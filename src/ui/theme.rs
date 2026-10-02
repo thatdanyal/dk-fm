@@ -74,6 +74,10 @@ pub fn px(size: f32) -> FontId {
 }
 
 pub fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(font_definitions());
+}
+
+pub fn font_definitions() -> FontDefinitions {
     // Only our own fonts (egui's built-in set is 1.4 MB). Fallbacks, tried in order for any
     // character the retro fonts lack: accented/Greek/Cyrillic text, emoji, UI icons, then the
     // pixel font (arrows and triangles).
@@ -93,7 +97,7 @@ pub fn install_fonts(ctx: &egui::Context) {
     f.families.insert(FontFamily::Name("px".into()), chain("press"));
     f.families.insert(FontFamily::Proportional, chain("vt323"));
     f.families.insert(FontFamily::Monospace, chain("vt323"));
-    ctx.set_fonts(f);
+    f
 }
 
 pub fn apply(ctx: &egui::Context, p: &Pal) {

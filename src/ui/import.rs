@@ -38,6 +38,9 @@ fn spawn_fetch(app: &mut App, ctx: &egui::Context, job: impl FnOnce() -> Result<
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let r = job();
+        if let Ok(f) = &r {
+            super::cjk::ensure(&ctx, &format!("{f:?}"));
+        }
         let cover_url = match &r {
             Ok(Fetched::Collection(c)) => c.cover.clone(),
             Ok(Fetched::Profile { cover, .. }) => cover.clone(),

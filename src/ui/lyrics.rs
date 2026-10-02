@@ -53,6 +53,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             std::thread::spawn(move || {
                 let clean = regex::Regex::new(r"(?i)\s*[\(\[]\s*(feat|ft|with)[^\)\]]*[\)\]]").unwrap().replace_all(&title, "").to_string();
                 let r = crate::net::lyrics(&artist, &clean, &album, dur);
+                if let Some(v) = &r {
+                    super::cjk::ensure(&ctx, &format!("{}{}", v["syncedLyrics"].as_str().unwrap_or(""), v["plainLyrics"].as_str().unwrap_or("")));
+                }
                 let l = match r {
                     Some(v) if v["instrumental"].as_bool() == Some(true) => Lyr::Instrumental,
                     Some(v) if v["syncedLyrics"].is_string() => Lyr::Synced(parse_lrc(v["syncedLyrics"].as_str().unwrap())),

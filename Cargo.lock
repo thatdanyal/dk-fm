@@ -1115,6 +1115,7 @@ dependencies = [
 name = "dkfm"
 version = "2.0.0"
 dependencies = [
+ "ab_glyph",
  "auto-launch",
  "chrono",
  "cpal",
@@ -1126,6 +1127,7 @@ dependencies = [
  "flate2",
  "image",
  "lofty",
+ "memmap2",
  "notify",
  "open",
  "parking_lot",

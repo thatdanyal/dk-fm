@@ -2,6 +2,7 @@
 //! The GUI only repaints when something changes (or ~4 Hz while playing / at the visualizer
 //! frame rate when the scope is visible), which is what keeps CPU and RAM low.
 pub mod browser;
+pub mod cjk;
 pub mod deck;
 pub mod eqpanel;
 pub mod import;
@@ -97,6 +98,7 @@ pub struct App {
     last_flush: Instant,
     started_hidden: bool,
     frames: u64,
+    cjk_gen: u64,
     pub drop_hover: bool,
 }
 
@@ -206,7 +208,33 @@ impl App {
             last_flush: Instant::now(),
             started_hidden: hidden,
             frames: 0,
+            cjk_gen: 0,
             drop_hover: false,
+        }
+    }
+
+    /// Loads a system font when Japanese/Korean/Chinese text shows up (see cjk.rs).
+    fn check_alphabets(&mut self, ctx: &egui::Context) {
+        let gen = self.lib.gen.load(Ordering::Relaxed);
+        if gen != self.cjk_gen {
+            self.cjk_gen = gen;
+            let mut text = String::new();
+            {
+                let d = self.lib.data.read();
+                for t in d.tracks.values() {
+                    for s in [&t.title, &t.artist, &t.album] {
+                        text.push_str(s);
+                    }
+                }
+                for p in &d.playlists {
+                    text.push_str(&p.name);
+                }
+            }
+            cjk::ensure(ctx, &text);
+        }
+        let typed: String = ctx.input(|i| i.events.iter().filter_map(|e| match e { egui::Event::Text(t) | egui::Event::Paste(t) | egui::Event::Ime(egui::ImeEvent::Preedit(t) | egui::ImeEvent::Commit(t)) => Some(t.clone()), _ => None }).collect());
+        if !typed.is_empty() {
+            cjk::ensure(ctx, &typed);
         }
     }
 
@@ -638,6 +666,7 @@ impl eframe::App for App {
         let t_update = Instant::now();
         self.frames += 1;
         self.scope.drawn = false;
+        self.check_alphabets(ctx);
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
         }

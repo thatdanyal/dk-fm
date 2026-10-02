@@ -101,7 +101,9 @@
         }
       ],
       "category": "Audio",
-      "icon": "build/icon.png"
+      "icon": "build/icon.png",
+      "maintainer": "thatdanyal <thatdanyal@users.noreply.github.com>",
+      "synopsis": "Retro desktop music player"
     },
     "publish": [
       {

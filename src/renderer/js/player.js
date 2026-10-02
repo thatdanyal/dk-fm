@@ -40,6 +40,7 @@ class Player extends Emitter {
     this.playing = false;
     this.fading = false;
     this.errorStreak = 0;
+    this._msTick = 0;
     this.sleep = null;
   }
 
@@ -87,7 +88,7 @@ class Player extends Emitter {
     this.applyEq(state.settings.eq);
     this.setSpeed(p.speed || 1);
 
-    setInterval(() => this._tick(), 200);
+    setInterval(() => this._tick(), 250);
     this._mediaSession();
 
     // Restore last session (paused).
@@ -409,7 +410,7 @@ class Player extends Emitter {
     const d = a.duration;
     this.emit('time');
     // Play counting: half the track or 30s, whichever comes first.
-    this.listened += 0.2 * (a.playbackRate || 1);
+    this.listened += 0.25 * (a.playbackRate || 1);
     if (!this.counted && d && this.listened >= Math.min(30, d / 2)) {
       this.counted = true;
       const id = this.deck.trackId;
@@ -429,7 +430,8 @@ class Player extends Emitter {
         if (t) this.other.load(t);
       }
     }
-    if ('mediaSession' in navigator && navigator.mediaSession.setPositionState) {
+    // OS media overlay only needs a position refresh about once a second.
+    if ('mediaSession' in navigator && navigator.mediaSession.setPositionState && ++this._msTick % 4 === 0) {
       try { navigator.mediaSession.setPositionState({ duration: d, position: Math.min(a.currentTime, d), playbackRate: a.playbackRate || 1 }); } catch {}
     }
   }
@@ -482,8 +484,8 @@ class Player extends Emitter {
   }
 
   _savePlayer() {
-    const { volume, crossfade, speed, visualizer, shuffle, repeat, normalize } = this.opts;
-    state.set('player', { ...state.settings.player, volume, crossfade, speed, visualizer, shuffle, repeat, normalize });
+    const { volume, crossfade, speed, visualizer, visFps, shuffle, repeat, normalize } = this.opts;
+    state.set('player', { ...state.settings.player, volume, crossfade, speed, visualizer, visFps, shuffle, repeat, normalize });
   }
 
   setVisualizer(mode) {
@@ -492,6 +494,10 @@ class Player extends Emitter {
   }
 
   _saveSession() {
+    // Skip the disk write when nothing moved (e.g. paused).
+    const key = `${this.index}|${this.queue.length}|${this.queue[this.index]}|${Math.round(this.time)}`;
+    if (key === this._sessionKey) return;
+    this._sessionKey = key;
     state.set('session', { queue: this.queue.slice(0, 5000), index: this.index, position: this.time });
   }
 

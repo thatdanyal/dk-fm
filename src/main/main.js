@@ -15,6 +15,14 @@ protocol.registerSchemesAsPrivileged([
 
 if (!app.requestSingleInstanceLock()) app.quit();
 
+// Leaner Chromium: run the network service inside the main process (one less process) and skip
+// features a music player never uses. DKFM_NO_TUNING=1 disables this for comparison.
+if (!process.env.DKFM_NO_TUNING) {
+  app.commandLine.appendSwitch('enable-features', 'NetworkServiceInProcess2');
+  app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,Translate,OptimizationHints');
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+}
+
 const RENDERER = path.join(__dirname, '..', 'renderer');
 let win;
 let settings, library, downloader, upd;
@@ -85,7 +93,9 @@ function registerProtocol() {
     if (u.host === 'cover') {
       const dir = path.join(app.getPath('userData'), 'covers');
       const file = path.normalize(path.join(dir, path.basename(p)));
-      return serveFile(file, req);
+      const res = serveFile(file, req);
+      res.headers.set('Cache-Control', 'public, max-age=31536000, immutable'); // names are content hashes
+      return res;
     }
     if (u.host === 'media') {
       // Only files the library knows about may be streamed.
@@ -122,7 +132,8 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      backgroundThrottling: false,
+      backgroundThrottling: false, // audio timing (crossfade/gapless) must keep running when hidden
+      spellcheck: false,
     },
   });
   if (b?.maximized) win.maximize();
@@ -160,6 +171,7 @@ function registerIpc() {
   const h = (ch, fn) => ipcMain.handle(ch, (_e, ...a) => fn(...a));
 
   h('settings:get', () => ({ ...settings.get(), platform: process.platform, version: app.getVersion() }));
+  h('app:gpu', () => app.getGPUFeatureStatus().gpu_compositing);
   h('settings:set', (patch) => {
     settings.patch(patch);
     return settings.get();
@@ -197,6 +209,13 @@ function registerIpc() {
   h('dl:list', () => downloader.list());
   h('yt:status', () => yt.getStatus());
   h('yt:ensure', () => yt.ensure().catch((e) => ({ error: e.message })));
+
+  // Waveform peaks cache: each song is decoded once, ever.
+  const waveDir = path.join(app.getPath('userData'), 'waves');
+  fs.mkdirSync(waveDir, { recursive: true });
+  const waveFile = (id) => path.join(waveDir, String(id).replace(/[^a-f0-9]/gi, '') + '.bin');
+  h('wave:get', (id) => fs.promises.readFile(waveFile(id)).catch(() => null));
+  h('wave:set', (id, data) => fs.promises.writeFile(waveFile(id), Buffer.from(data)).catch(() => {}));
 
   h('lyrics:get', async (q) => {
     const params = new URLSearchParams({ artist_name: q.artist, track_name: q.title });

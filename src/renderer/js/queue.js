@@ -1,13 +1,16 @@
 // Queue panel: history + upcoming, drag to reorder, save as playlist.
 import { player } from './player.js';
 import { state } from './state.js';
-import { $, h, coverUrl, fmtLong, prompt, toast, contextMenu } from './util.js';
+import { $, h, thumbUrl, fmtLong, prompt, toast, contextMenu } from './util.js';
 
 let dragFrom = null;
 
 export function initQueue() {
-  player.on('queue', render);
-  state.on('library', render);
+  // Several queue events can fire in one tick (track change + reorder); redraw once per frame.
+  let queued = false;
+  const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(() => { queued = false; render(); }); } };
+  player.on('queue', schedule);
+  state.on('library', schedule);
   $('#queue-clear').onclick = () => player.clearUpcoming();
   $('#queue-save').onclick = async () => {
     if (!player.queue.length) return;
@@ -31,7 +34,7 @@ function render() {
   }
   // Show a little history, then everything upcoming (capped for very long queues).
   const from = Math.max(0, player.index - 3);
-  const to = Math.min(q.length, player.index + 400);
+  const to = Math.min(q.length, player.index + 150);
   const items = [];
   for (let i = from; i < to; i++) {
     const t = state.track(q[i]);
@@ -72,7 +75,7 @@ function row(t, i) {
       },
     },
   },
-    t.cover ? h('img', { src: coverUrl(t), loading: 'lazy' }) : h('div.qph'),
+    t.cover ? h('img', { src: thumbUrl(t), loading: 'lazy', decoding: 'async' }) : h('div.qph'),
     h('div.qtxt', h('div.qt', t.title), h('div.qa', t.artist)),
     h('button.qx', { title: 'Remove', on: { click: (e) => { e.stopPropagation(); player.removeAt(i); } } }, '×'));
   return li;

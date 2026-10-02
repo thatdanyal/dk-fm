@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld('dk', {
   dl: { start: inv('dl:start'), retry: inv('dl:retry'), cancel: inv('dl:cancel'), clear: inv('dl:clear'), list: inv('dl:list') },
   yt: { status: inv('yt:status'), ensure: inv('yt:ensure') },
   lyrics: inv('lyrics:get'),
+  gpu: inv('app:gpu'),
+  wave: { get: inv('wave:get'), set: inv('wave:set') },
   win: { minimize: inv('win:minimize'), maximize: inv('win:maximize'), close: inv('win:close'), mini: inv('win:mini'), onTop: inv('win:onTop') },
   updater: { check: inv('updater:check'), download: inv('updater:download'), install: inv('updater:install'), status: inv('updater:status') },
   pathForFile: (f) => webUtils.getPathForFile(f),

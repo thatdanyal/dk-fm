@@ -3,7 +3,7 @@ import { player } from './player.js';
 import { $, h, toast, modal } from './util.js';
 import { applyTheme, THEMES, themeEvents } from './theme.js';
 import { initLayout, setEditing, isEditing, PANELS, isHidden, setHidden, showPanel, layoutEvents } from './layout.js';
-import { initDeck, drawWave } from './deck.js';
+import { initDeck, drawWave, invalidateWave } from './deck.js';
 import { initVisualizer, refreshColors, cycleMode } from './visualizer.js';
 import { initQueue } from './queue.js';
 import { initEq, drawCurve } from './eq.js';
@@ -27,7 +27,7 @@ async function boot() {
   initShortcuts();
   initDragDrop();
   initUpdater();
-  themeEvents.on('change', () => { refreshColors(); drawWave(); drawCurve(); });
+  themeEvents.on('change', () => { refreshColors(); invalidateWave(); drawCurve(); });
   layoutEvents.on('render', () => requestAnimationFrame(() => { drawWave(); drawCurve(); }));
 
   dk.on('library:progress', (p) => {

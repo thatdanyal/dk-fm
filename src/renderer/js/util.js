@@ -39,6 +39,8 @@ export const fmtLong = (s) => {
 };
 
 export const coverUrl = (t) => (t?.cover ? `dkfm://cover/${t.cover}` : '');
+// Small (192px) version for lists and grids; falls back to the full cover.
+export const thumbUrl = (t) => (t?.thumb ? `dkfm://cover/${t.thumb}` : coverUrl(t));
 export const mediaUrl = (t) => `dkfm://media/${t.id}`;
 
 export function debounce(fn, ms) {

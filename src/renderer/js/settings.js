@@ -4,6 +4,7 @@ import { player } from './player.js';
 import { h, modal, toast } from './util.js';
 import { THEMES, applyTheme } from './theme.js';
 import { resetLayout } from './layout.js';
+import { setFps } from './visualizer.js';
 
 const TABS = [
   ['appearance', 'Appearance'],
@@ -113,6 +114,7 @@ const SECTIONS = {
     return [
       section('PLAYBACK',
         row('Crossfade', h('select.pixel-select', { on: { change: (e) => player.setCrossfade(Number(e.target.value)) } }, [0, 2, 4, 6, 8, 10, 12].map((n) => h('option', { value: n, selected: (player.opts.crossfade || 0) === n }, n ? `${n} seconds` : 'Off (gapless)')))),
+        row('Visualizer FPS', h('select.pixel-select', { on: { change: (e) => { setFps(Number(e.target.value)); player._savePlayer(); } } }, [[30, '30 fps (light, default)'], [60, '60 fps (smooth)'], [15, '15 fps (battery saver)']].map(([v, l]) => h('option', { value: v, selected: (player.opts.visFps || 30) === v }, l)))),
         row('Leveler', h('label.switch', h('input', { type: 'checkbox', checked: !!player.opts.normalize, on: { change: (e) => player.setNormalize(e.target.checked) } }), h('span'), 'EVEN OUT LOUD/QUIET TRACKS'))),
     ];
   },
@@ -154,6 +156,7 @@ const SECTIONS = {
   about() {
     return [section('DK.FM', h('div.about',
       h('div', 'v' + state.settings.version + ' · ' + state.settings.platform),
+      (() => { const g = h('div', 'Graphics: …'); dk.gpu().then((s) => (g.textContent = 'Graphics: ' + (String(s).startsWith('enabled') ? 'GPU accelerated' : 'Software (no GPU) — lower the visualizer FPS if it feels heavy'))); return g; })(),
       h('p', 'Retro desktop music player. Plays your local library, imports Spotify playlists by finding the best YouTube Music match for every song.'),
       h('p', 'Lyrics from LRCLIB · Downloads powered by yt-dlp + FFmpeg.'),
       h('p', 'Only download music you have the rights to.')))];

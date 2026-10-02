@@ -1,4 +1,7 @@
 // Visualizer: LED spectrum bars, phosphor oscilloscope, twin analog VU meters, spectrogram.
+// Performance: every mode writes straight into one Uint32 pixel buffer and blits it once per
+// frame (instead of thousands of fillRect calls), runs at 30 fps by default, and the loop stops
+// entirely once playback is paused and the meters have fallen to rest.
 import { player } from './player.js';
 import { cssVar, h } from './util.js';
 
@@ -12,35 +15,51 @@ export const MODES = [
 
 const PX = 2; // render at half resolution for chunky pixels
 
-let canvas, ctx, colors, mode;
-let peaks = [];
+let canvas, ctx, img, buf, W = 0, H = 0;
+let mode;
+let col; // packed colors
 let freq, wave, waveL, waveR;
-const vu = { l: 0, r: 0, pl: 0, pr: 0, hold: [0, 0] };
+let peaks = new Float32Array(0);
+let glow = new Float32Array(0); // scope phosphor intensity
+let heatLut = new Uint32Array(256);
+let bandEdges = null;
+const vu = { l: 0, r: 0, hold: [0, 0] };
+let running = false;
+let lastFrame = 0;
+let fps = 30;
+let idleFrames = 0;
 
 export function initVisualizer() {
   canvas = document.getElementById('scope-canvas');
   canvas.style.imageRendering = 'pixelated';
-  ctx = canvas.getContext('2d', { alpha: false });
+  ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
   mode = player.opts.visualizer || 'bars';
+  fps = player.opts.visFps || 30;
   freq = new Uint8Array(player.analyser.frequencyBinCount);
   wave = new Uint8Array(player.analyser.fftSize);
   waveL = new Float32Array(player.analyserL.fftSize);
   waveR = new Float32Array(player.analyserR.fftSize);
   refreshColors();
   renderModeButtons();
-  canvas.addEventListener('click', () => {
-    const i = MODES.findIndex((m) => m[0] === mode);
-    setMode(MODES[(i + 1) % MODES.length][0]);
-  });
-  requestAnimationFrame(loop);
+  canvas.addEventListener('click', cycleMode);
+  player.on('state', wake);
+  player.on('track', wake);
+  new ResizeObserver(wake).observe(canvas);
+  document.addEventListener('visibilitychange', wake);
+  wake();
+}
+
+export function setFps(n) {
+  fps = n;
+  player.opts.visFps = n;
 }
 
 export function setMode(m) {
   mode = m;
   player.setVisualizer(m);
   renderModeButtons();
-  ctx.fillStyle = colors.bg;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (buf) { buf.fill(col.bg); glow.fill(0); blit(); }
+  wake();
 }
 
 export function cycleMode() {
@@ -53,208 +72,218 @@ function renderModeButtons() {
   box.replaceChildren(...MODES.map(([id, label]) => h('button' + (id === mode ? '.on' : ''), { on: { click: (e) => { e.stopPropagation(); setMode(id); } } }, label)));
 }
 
+const pack = (c) => {
+  const [r, g, b] = toRgb(c);
+  return (255 << 24) | (b << 16) | (g << 8) | r; // little-endian RGBA in a Uint32
+};
+
 export function refreshColors() {
-  colors = {
-    bg: cssVar('--lcd-bg') || '#100',
-    a: cssVar('--accent'),
-    b: cssVar('--accent-2'),
-    text: cssVar('--text'),
-    dim: cssVar('--faint'),
-    line: cssVar('--line-hi'),
+  col = {
+    bg: pack(cssVar('--lcd-bg') || '#100'),
+    a: pack(cssVar('--accent')),
+    b: pack(cssVar('--accent-2')),
+    text: pack(cssVar('--text')),
+    dim: pack(cssVar('--faint')),
   };
-  palette = null;
+  const stops = [cssVar('--lcd-bg'), cssVar('--accent'), cssVar('--accent-2'), cssVar('--text')].map(toRgb);
+  heatLut = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    const t = (i / 255) * (stops.length - 1);
+    const k = Math.min(stops.length - 2, Math.floor(t));
+    const f = t - k;
+    const c = stops[k].map((c0, j) => Math.round(c0 + (stops[k + 1][j] - c0) * f));
+    heatLut[i] = (255 << 24) | (c[2] << 16) | (c[1] << 8) | c[0];
+  }
+  if (buf) { buf.fill(col.bg); blit(); }
+  wake();
 }
 
-function loop() {
-  requestAnimationFrame(loop);
-  if (!canvas.offsetParent || document.hidden) return;
-  const w = Math.max(1, Math.floor(canvas.clientWidth / PX));
-  const hgt = Math.max(1, Math.floor(canvas.clientHeight / PX));
-  if (canvas.width !== w || canvas.height !== hgt) {
-    canvas.width = w;
-    canvas.height = hgt;
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(0, 0, w, hgt);
+// Start the loop if there's anything to draw.
+function wake() {
+  idleFrames = 0;
+  if (!running && canvas) {
+    running = true;
+    requestAnimationFrame(loop);
   }
-  if (mode === 'off') {
-    ctx.fillStyle = colors.bg;
-    ctx.fillRect(0, 0, w, hgt);
+}
+
+function loop(now) {
+  if (!canvas.offsetParent || document.hidden || mode === 'off') {
+    running = false;
+    if (mode === 'off' && buf) { buf.fill(col.bg); blit(); }
     return;
   }
-  ({ bars, scope, vu: drawVu, spectro })[mode]?.(w, hgt);
+  // Stop once paused and everything has decayed (~1.5s of frames).
+  if (!player.playing && ++idleFrames > fps * 1.5) {
+    running = false;
+    return;
+  }
+  requestAnimationFrame(loop);
+  if (now - lastFrame < 1000 / fps - 2) return;
+  lastFrame = now;
+  resize();
+  if (mode === 'bars') bars();
+  else if (mode === 'scope') scope();
+  else if (mode === 'vu') drawVu();
+  else if (mode === 'spectro') spectro();
+  blit();
 }
 
-// Log-spaced band edges for the spectrum.
-function bandValue(i, n) {
+function resize() {
+  const w = Math.max(1, Math.floor(canvas.clientWidth / PX));
+  const hh = Math.max(1, Math.floor(canvas.clientHeight / PX));
+  if (w === W && hh === H) return;
+  W = canvas.width = w;
+  H = canvas.height = hh;
+  img = ctx.createImageData(W, H);
+  buf = new Uint32Array(img.data.buffer);
+  buf.fill(col.bg);
+  glow = new Float32Array(W * H);
+  bandEdges = null;
+}
+
+const blit = () => img && ctx.putImageData(img, 0, 0);
+
+function rect(x, y, w, hh, c) {
+  x |= 0; y |= 0;
+  const x1 = Math.min(W, x + w), y1 = Math.min(H, y + hh);
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  for (let yy = y; yy < y1; yy++) buf.fill(c, yy * W + x, yy * W + x1);
+}
+
+const dot = (x, y, c) => {
+  x |= 0; y |= 0;
+  if (x >= 0 && y >= 0 && x < W && y < H) buf[y * W + x] = c;
+};
+
+// Precomputed log-spaced FFT bin ranges per band.
+function bands(n) {
+  if (bandEdges?.n === n) return bandEdges;
   const nyq = player.ctx.sampleRate / 2;
-  const lo = 30 * Math.pow(16000 / 30, i / n);
-  const hi = 30 * Math.pow(16000 / 30, (i + 1) / n);
-  const a = Math.floor((lo / nyq) * freq.length);
-  const b = Math.max(a + 1, Math.floor((hi / nyq) * freq.length));
+  const lo = new Uint16Array(n);
+  const hi = new Uint16Array(n);
+  for (let i = 0; i < n; i++) {
+    const f0 = 30 * Math.pow(16000 / 30, i / n);
+    const f1 = 30 * Math.pow(16000 / 30, (i + 1) / n);
+    lo[i] = Math.floor((f0 / nyq) * freq.length);
+    hi[i] = Math.max(lo[i] + 1, Math.floor((f1 / nyq) * freq.length));
+  }
+  return (bandEdges = { n, lo, hi });
+}
+
+function bandValue(b, i) {
   let m = 0;
-  for (let k = a; k < b && k < freq.length; k++) m = Math.max(m, freq[k]);
+  for (let k = b.lo[i], e = Math.min(b.hi[i], freq.length); k < e; k++) if (freq[k] > m) m = freq[k];
   return m / 255;
 }
 
-function bars(w, hgt) {
+function bars() {
   player.analyser.getByteFrequencyData(freq);
-  ctx.fillStyle = colors.bg;
-  ctx.fillRect(0, 0, w, hgt);
-  const barW = w > 300 ? 5 : 3;
-  const gap = 1;
-  const n = Math.max(8, Math.floor((w - 2) / (barW + gap)));
-  const segH = 2;
-  const segGap = 1;
-  const segs = Math.floor((hgt - 4) / (segH + segGap));
-  if (peaks.length !== n) peaks = new Array(n).fill(0);
-  const x0 = Math.floor((w - n * (barW + gap)) / 2);
+  buf.fill(col.bg);
+  const barW = W > 300 ? 5 : 3;
+  const n = Math.max(8, Math.floor((W - 2) / (barW + 1)));
+  const segs = Math.floor((H - 4) / 3);
+  if (peaks.length !== n) peaks = new Float32Array(n);
+  const b = bands(n);
+  const x0 = (W - n * (barW + 1)) >> 1;
   for (let i = 0; i < n; i++) {
-    const v = Math.pow(bandValue(i, n), 1.6);
-    const lit = Math.round(v * segs);
-    const x = x0 + i * (barW + gap);
+    const lit = Math.round(Math.pow(bandValue(b, i), 1.6) * segs);
+    const x = x0 + i * (barW + 1);
     for (let s = 0; s < segs; s++) {
-      const y = hgt - 2 - (s + 1) * (segH + segGap);
-      const frac = s / segs;
-      if (s < lit) ctx.fillStyle = frac > 0.8 ? colors.text : frac > 0.55 ? colors.b : colors.a;
-      else ctx.fillStyle = colors.dim;
-      if (s < lit || s % 2 === 0) {
-        ctx.globalAlpha = s < lit ? 1 : 0.25;
-        ctx.fillRect(x, y, barW, segH);
-      }
+      const y = H - 2 - (s + 1) * 3;
+      if (s < lit) {
+        const f = s / segs;
+        rect(x, y, barW, 2, f > 0.8 ? col.text : f > 0.55 ? col.b : col.a);
+      } else if ((s & 1) === 0) rect(x, y, barW, 2, col.dim);
     }
-    ctx.globalAlpha = 1;
     peaks[i] = Math.max(lit, peaks[i] - 0.25);
-    const py = hgt - 2 - Math.ceil(peaks[i]) * (segH + segGap) - segH - 1;
-    if (peaks[i] > 0.5) {
-      ctx.fillStyle = colors.text;
-      ctx.fillRect(x, py, barW, 1);
-    }
+    if (peaks[i] > 0.5) rect(x, H - 2 - Math.ceil(peaks[i]) * 3 - 3, barW, 1, col.text);
   }
 }
 
-function scope(w, hgt) {
+function scope() {
   player.analyser.getByteTimeDomainData(wave);
-  // phosphor persistence
-  ctx.globalAlpha = 0.35;
-  ctx.fillStyle = colors.bg;
-  ctx.fillRect(0, 0, w, hgt);
-  ctx.globalAlpha = 1;
-  // graticule
-  ctx.fillStyle = colors.dim;
-  for (let x = 0; x < w; x += 16) for (let y = 0; y < hgt; y += 4) ctx.fillRect(x, y, 1, 1);
-  for (let y = 0; y < hgt; y += 16) for (let x = 0; x < w; x += 4) ctx.fillRect(x, y, 1, 1);
-  // find a rising zero crossing for a stable trace
+  // phosphor persistence via an intensity buffer
+  for (let i = 0; i < glow.length; i++) glow[i] *= 0.55;
   let start = 0;
   for (let i = 1; i < wave.length / 2; i++) if (wave[i - 1] < 128 && wave[i] >= 128) { start = i; break; }
   const span = Math.min(wave.length - start, 1024);
-  ctx.fillStyle = colors.a;
-  let prevY = null;
-  for (let x = 0; x < w; x++) {
-    const v = wave[start + Math.floor((x / w) * span)] / 255;
-    const y = Math.round((1 - v) * (hgt - 2)) + 1;
-    if (prevY == null) prevY = y;
-    const y0 = Math.min(prevY, y);
-    const y1 = Math.max(prevY, y);
-    ctx.fillRect(x, y0, 1, y1 - y0 + 1);
+  let prevY = -1;
+  for (let x = 0; x < W; x++) {
+    const v = wave[start + Math.floor((x / W) * span)] / 255;
+    const y = Math.round((1 - v) * (H - 2)) + 1;
+    if (prevY < 0) prevY = y;
+    for (let yy = Math.min(prevY, y), e = Math.max(prevY, y); yy <= e; yy++) if (yy >= 0 && yy < H) glow[yy * W + x] = 1;
     prevY = y;
   }
+  for (let i = 0; i < glow.length; i++) buf[i] = glow[i] > 0.04 ? heatLut[(glow[i] * 190) | 0] : col.bg;
+  // graticule
+  for (let x = 0; x < W; x += 16) for (let y = 0; y < H; y += 4) if (glow[y * W + x] < 0.1) buf[y * W + x] = col.dim;
+  for (let y = 0; y < H; y += 16) for (let x = 0; x < W; x += 4) if (glow[y * W + x] < 0.1) buf[y * W + x] = col.dim;
 }
 
-function rms(buf) {
+function rms(a) {
   let s = 0;
-  for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
-  return Math.sqrt(s / buf.length);
+  for (let i = 0; i < a.length; i++) s += a[i] * a[i];
+  return Math.sqrt(s / a.length);
 }
 
-function drawVu(w, hgt) {
+function drawVu() {
   player.analyserL.getFloatTimeDomainData(waveL);
   player.analyserR.getFloatTimeDomainData(waveR);
-  const toNeedle = (r) => {
-    // Scale tuned for modern masters: -30 dBFS RMS at rest, red zone from ~-8 dBFS.
-    const db = 20 * Math.log10(Math.max(r, 1e-5));
-    return Math.max(0, Math.min(1, (db + 30) / 28));
-  };
-  const tl = toNeedle(rms(waveL));
-  const tr = toNeedle(rms(waveR));
-  // VU ballistics (~300ms)
-  vu.l += (tl - vu.l) * 0.18;
-  vu.r += (tr - vu.r) * 0.18;
-  ctx.fillStyle = colors.bg;
-  ctx.fillRect(0, 0, w, hgt);
-  const twoUp = w > hgt * 1.6;
-  const mw = twoUp ? w / 2 : w;
-  const mh = twoUp ? hgt : hgt / 2;
-  meter(0, 0, mw, mh, vu.l, 'L', 0);
-  meter(twoUp ? mw : 0, twoUp ? 0 : mh, mw, mh, vu.r, 'R', 1);
+  // Scale tuned for modern masters: -30 dBFS RMS at rest, red zone from ~-8 dBFS.
+  const needle = (r) => Math.max(0, Math.min(1, (20 * Math.log10(Math.max(r, 1e-5)) + 30) / 28));
+  const k = 30 / fps; // same ballistics at any frame rate
+  vu.l += (needle(rms(waveL)) - vu.l) * 0.18 * k;
+  vu.r += (needle(rms(waveR)) - vu.r) * 0.18 * k;
+  buf.fill(col.bg);
+  const two = W > H * 1.6;
+  const mw = two ? W / 2 : W;
+  const mh = two ? H : H / 2;
+  meter(0, 0, mw, mh, vu.l, 0);
+  meter(two ? mw : 0, two ? 0 : mh, mw, mh, vu.r, 1);
 }
 
-function meter(x, y, w, hgt, v, label, ch) {
+function meter(x, y, w, hh, v, ch) {
   const cx = x + w / 2;
-  const cy = y + hgt * 0.92;
-  const r = Math.min(w * 0.42, hgt * 0.78);
+  const cy = y + hh * 0.92;
+  const r = Math.min(w * 0.42, hh * 0.78);
   const a0 = Math.PI * 1.22;
   const a1 = Math.PI * 1.78;
-  // scale
   for (let i = 0; i <= 20; i++) {
     const t = i / 20;
     const a = a0 + (a1 - a0) * t;
     const len = i % 5 === 0 ? 5 : 2;
-    ctx.fillStyle = t > 0.78 ? colors.a : colors.text;
-    for (let k = 0; k < len; k++) {
-      ctx.fillRect(Math.round(cx + Math.cos(a) * (r - k)), Math.round(cy + Math.sin(a) * (r - k)), 1, 1);
-    }
+    for (let k = 0; k < len; k++) dot(cx + Math.cos(a) * (r - k), cy + Math.sin(a) * (r - k), t > 0.78 ? col.a : col.text);
   }
-  // red zone arc
-  ctx.fillStyle = colors.a;
   for (let t = 0.78; t <= 1; t += 0.005) {
     const a = a0 + (a1 - a0) * t;
-    ctx.fillRect(Math.round(cx + Math.cos(a) * (r + 2)), Math.round(cy + Math.sin(a) * (r + 2)), 1, 2);
+    dot(cx + Math.cos(a) * (r + 2), cy + Math.sin(a) * (r + 2), col.a);
+    dot(cx + Math.cos(a) * (r + 3), cy + Math.sin(a) * (r + 3), col.a);
   }
-  // needle
   const a = a0 + (a1 - a0) * v;
-  ctx.fillStyle = colors.b;
-  for (let k = 0; k < r - 2; k++) ctx.fillRect(Math.round(cx + Math.cos(a) * k), Math.round(cy + Math.sin(a) * k), 1, 1);
-  ctx.fillStyle = colors.text;
-  ctx.fillRect(Math.round(cx) - 2, Math.round(cy) - 2, 5, 5);
-  // peak LED
+  for (let k = 0; k < r - 2; k++) dot(cx + Math.cos(a) * k, cy + Math.sin(a) * k, col.b);
+  rect(cx - 2, cy - 2, 5, 5, col.text);
   vu.hold[ch] = v > 0.85 ? 20 : Math.max(0, vu.hold[ch] - 1);
-  ctx.fillStyle = vu.hold[ch] ? colors.a : colors.dim;
-  ctx.fillRect(Math.round(x + w - 10), Math.round(y + 5), 4, 4);
-  ctx.fillStyle = colors.dim;
-  ctx.font = '8px PressStart';
-  ctx.fillText(label, x + 5, y + 11);
+  rect(x + w - 10, y + 5, 4, 4, vu.hold[ch] ? col.a : col.dim);
+  // channel letter in a 3x5 pixel font
+  const L = ['100', '100', '100', '100', '111'];
+  const R = ['110', '101', '110', '101', '101'];
+  (ch ? R : L).forEach((row, j) => [...row].forEach((p, i) => p === '1' && dot(x + 5 + i, y + 5 + j, col.dim)));
 }
 
-let palette;
-function heat(v) {
-  if (!palette) {
-    palette = [];
-    const stops = [colors.bg, colors.a, colors.b, colors.text].map(hexToRgb);
-    for (let i = 0; i < 256; i++) {
-      const t = (i / 255) * (stops.length - 1);
-      const k = Math.min(stops.length - 2, Math.floor(t));
-      const f = t - k;
-      const c = stops[k].map((c0, j) => Math.round(c0 + (stops[k + 1][j] - c0) * f));
-      palette.push(`rgb(${c[0]},${c[1]},${c[2]})`);
-    }
-  }
-  return palette[v];
-}
-
-function spectro(w, hgt) {
+function spectro() {
   player.analyser.getByteFrequencyData(freq);
-  ctx.drawImage(canvas, 1, 0, w - 1, hgt, 0, 0, w - 1, hgt);
-  for (let y = 0; y < hgt; y++) {
-    const v = bandValue(hgt - 1 - y, hgt);
-    ctx.fillStyle = heat(Math.round(Math.pow(v, 1.4) * 255));
-    ctx.fillRect(w - 1, y, 1, 1);
-  }
+  for (let y = 0; y < H; y++) buf.copyWithin(y * W, y * W + 1, y * W + W);
+  const b = bands(H);
+  for (let y = 0; y < H; y++) buf[y * W + W - 1] = heatLut[(Math.pow(bandValue(b, H - 1 - y), 1.4) * 255) | 0];
 }
 
-function hexToRgb(c) {
-  c = c.trim();
+function toRgb(c) {
+  c = String(c || '#000').trim();
   if (c.startsWith('rgb')) return c.match(/\d+/g).slice(0, 3).map(Number);
   if (c.length === 4) c = '#' + [...c.slice(1)].map((x) => x + x).join('');
-  const n = parseInt(c.slice(1), 16);
+  const n = parseInt(c.slice(1, 7), 16);
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }

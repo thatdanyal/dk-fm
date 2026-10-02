@@ -129,49 +129,64 @@ class Downloader {
     // ---- search & pick ----
     t.status = 'searching';
     this.update(job, t);
-    let pick;
+    const want = t.durationMs ? t.durationMs / 1000 : null;
+    let order;
     if (t.forcedVideoId) {
-      pick = { id: t.forcedVideoId, title: '(manual pick)', source: 'manual', score: 100 };
+      order = [{ id: t.forcedVideoId, title: '(manual pick)', source: 'manual', score: 100 }];
     } else {
       const cands = rank(await this.search(t, signal), t);
       t.candidates = cands.slice(0, 6).map(({ id, title, channel, duration, score, source }) => ({ id, title, channel, duration, score, source }));
-      pick = await this.verify(cands, t, signal);
-      if (!pick) throw new Error('No confident match found on YouTube');
+      order = cands.filter((c) => c.score >= 20 && (!want || !c.duration || Math.abs(c.duration - want) <= 20)).slice(0, 3);
+      if (!order.length && cands[0]?.score >= 35) order = [cands[0]];
+      if (!order.length) throw new Error('No confident match found on YouTube');
     }
-    t.match = { id: pick.id, title: pick.title, channel: pick.channel, score: pick.score, source: pick.source };
-    t.lowConfidence = pick.score < 45;
 
     // ---- download ----
+    // Candidates whose length is unknown (YT Music search results) get a --match-filters
+    // length check inside the download call itself, so a wrong version is rejected without an
+    // extra yt-dlp launch; we then fall through to the next candidate.
     t.status = 'downloading';
-    this.update(job, t);
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dkfm-'));
     try {
-      let lastEmit = 0;
-      await yt.run(
-        [
-          ...yt.baseArgs(),
-          '--no-playlist',
-          ...fmt.args,
-          '--write-thumbnail', '--convert-thumbnails', 'jpg',
-          '--newline', '--progress-template', 'download:DKP %(progress._percent_str)s',
-          '-o', path.join(tmpDir, 'audio.%(ext)s'),
-          '-o', 'thumbnail:' + path.join(tmpDir, 'thumb.%(ext)s'),
-          `https://music.youtube.com/watch?v=${pick.id}`,
-        ],
-        {
-          signal,
-          onLine: (line) => {
-            const m = line.match(/DKP\s+([\d.]+)%/);
-            if (m && Date.now() - lastEmit > 300) {
-              lastEmit = Date.now();
-              t.progress = Math.min(99, parseFloat(m[1]));
-              this.update(job, t);
-            }
-          },
-        }
-      );
-      const audio = fs.readdirSync(tmpDir).find((f) => f.startsWith('audio.') && f.endsWith('.' + fmt.ext));
-      if (!audio) throw new Error('Download produced no audio file');
+      let pick = null;
+      let audio = null;
+      for (const c of order) {
+        t.match = { id: c.id, title: c.title, channel: c.channel, score: c.score, source: c.source };
+        t.lowConfidence = c.score < 45;
+        t.progress = 0;
+        this.update(job, t);
+        const filter = want && !c.duration && c.source !== 'manual'
+          ? ['--match-filters', `duration>=${Math.floor(want - 12)} & duration<=${Math.ceil(want + 12)}`]
+          : [];
+        let lastEmit = 0;
+        await yt.run(
+          [
+            ...yt.baseArgs(),
+            '--no-playlist',
+            ...filter,
+            ...fmt.args,
+            '--write-thumbnail', '--convert-thumbnails', 'jpg',
+            '--newline', '--progress-template', 'download:DKP %(progress._percent_str)s',
+            '-o', path.join(tmpDir, 'audio.%(ext)s'),
+            '-o', 'thumbnail:' + path.join(tmpDir, 'thumb.%(ext)s'),
+            `https://music.youtube.com/watch?v=${c.id}`,
+          ],
+          {
+            signal,
+            onLine: (line) => {
+              const m = line.match(/DKPs+([d.]+)%/);
+              if (m && Date.now() - lastEmit > 300) {
+                lastEmit = Date.now();
+                t.progress = Math.min(99, parseFloat(m[1]));
+                this.update(job, t);
+              }
+            },
+          }
+        ).catch((e) => { if (signal.aborted || order.length === 1) throw e; });
+        audio = fs.readdirSync(tmpDir).find((f) => f.startsWith('audio.') && f.endsWith('.' + fmt.ext));
+        if (audio) { pick = c; break; }
+      }
+      if (!audio) throw new Error('No version with the right length found on YouTube');
 
       // ---- tag ----
       t.status = 'tagging';
@@ -234,29 +249,6 @@ class Downloader {
     take(plain, 'yt');
     if (!out.length) throw new Error('YouTube search returned nothing');
     return out;
-  }
-
-  // Top candidates without a known duration get a quick metadata probe so we never
-  // download a 10-minute live version of a 3-minute song.
-  async verify(cands, t, signal) {
-    const want = t.durationMs ? t.durationMs / 1000 : null;
-    for (const c of cands.slice(0, 4)) {
-      if (c.score < 20) break;
-      if (!want || c.duration) {
-        if (!want || Math.abs(c.duration - want) <= 20) return c;
-        continue;
-      }
-      try {
-        const info = await yt.run([...yt.baseArgs(), '--skip-download', '--print', '%(duration)s|%(channel)s', `https://music.youtube.com/watch?v=${c.id}`], { signal });
-        const [dur, channel] = info.trim().split('|');
-        c.duration = Number(dur) || null;
-        c.channel = c.channel || channel;
-        if (!c.duration || Math.abs(c.duration - want) <= 12) return c;
-      } catch (e) {
-        if (signal.aborted) throw e;
-      }
-    }
-    return cands[0]?.score >= 35 ? cands[0] : null;
   }
 
   linkPlaylist(job) {

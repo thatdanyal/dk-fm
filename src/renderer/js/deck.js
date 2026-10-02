@@ -88,20 +88,46 @@ function renderTrack(t) {
   $('#np-album').textContent = t ? [t.album, t.year].filter(Boolean).join(' · ') : '';
   $('#np-tech').textContent = t ? [t.bitrate ? `${t.bitrate} KBPS` : null, t.sampleRate ? `${(t.sampleRate / 1000).toFixed(1)} KHZ` : null, codecLabel(t)].filter(Boolean).join(' · ') : '--- KBPS';
   $('#np-state').textContent = player.playing ? '▶ PLAY' : t ? '❚❚ PAUSE' : '■ STOP';
-  requestAnimationFrame(() => {
-    const m = $('#np-title').parentElement;
-    const over = $('#np-title').scrollWidth > m.clientWidth + 2;
-    m.classList.toggle('scroll', over);
-    m.style.setProperty('--dur', Math.max(8, (t?.title.length || 10) * 0.35) + 's');
-  });
+  setupMarquee(t ? t.title : 'NO TRACK LOADED');
   renderLike();
   renderTime();
   loadPeaks(t);
 }
 
+let shownTime = '';
+// LCD-style marquee: long titles step one character at a time, 4x per second, only while playing.
+// (A smooth CSS scroll forces 60 full-window redraws per second; this is ~4 tiny ones.)
+let marquee = { text: '', pos: 0, on: false };
+function setupMarquee(text) {
+  const el = $('#np-title');
+  el.textContent = text;
+  marquee = { text, pos: 0, on: false };
+  requestAnimationFrame(() => {
+    marquee.on = el.scrollWidth > el.parentElement.clientWidth + 2;
+  });
+}
+setInterval(() => {
+  if (!marquee.on || !player.playing || document.hidden) return;
+  const loop = marquee.text + '   ·   ';
+  marquee.pos = (marquee.pos + 1) % loop.length;
+  $('#np-title').textContent = loop.slice(marquee.pos) + loop.slice(0, marquee.pos);
+}, 250);
+
+// Blinking logo dot, driven by a slow timer instead of a CSS animation (which would keep the
+// compositor producing frames continuously).
+setInterval(() => {
+  const dot = document.querySelector('.logo-dot');
+  if (dot) dot.style.visibility = player.playing && !document.hidden && dot.style.visibility !== 'hidden' ? 'hidden' : '';
+}, 600);
+
 function renderTime() {
-  $('#np-elapsed').textContent = fmtTime(player.time);
-  $('#np-total').textContent = fmtTime(player.duration);
+  const txt = fmtTime(player.time) + '|' + fmtTime(player.duration);
+  if (txt !== shownTime) {
+    shownTime = txt;
+    const [a, b] = txt.split('|');
+    $('#np-elapsed').textContent = a;
+    $('#np-total').textContent = b;
+  }
   drawWave();
 }
 
@@ -146,12 +172,18 @@ function codecLabel(t) {
 }
 
 // ---- waveform ----
+// Peaks are computed once per song (then cached on disk). The bar itself is pre-rendered into two
+// offscreen layers (played / unplayed); each frame just stitches them at the playhead, and only
+// when the playhead or hover position has actually moved a pixel.
 async function loadPeaks(t) {
   peaksFor = t?.id || null;
   peaks = t ? peaksCache.get(t.id) || null : null;
-  drawWave();
+  invalidateWave();
   if (!t || peaks) return;
   try {
+    const saved = await dk.wave.get(t.id);
+    if (peaksFor !== t.id) return;
+    if (saved?.length) return setPeaks(t.id, Float32Array.from(new Uint8Array(saved), (v) => v / 255));
     const buf = await (await fetch(mediaUrl(t))).arrayBuffer();
     if (peaksFor !== t.id) return;
     const audio = await new OfflineAudioContext(1, 1, 8000).decodeAudioData(buf);
@@ -177,13 +209,51 @@ async function loadPeaks(t) {
     let max = 0;
     for (const v of out) max = Math.max(max, v);
     for (let i = 0; i < N; i++) out[i] = max ? out[i] / max : 0;
-    peaksCache.set(t.id, out);
-    if (peaksCache.size > 60) peaksCache.delete(peaksCache.keys().next().value);
-    if (peaksFor === t.id) {
-      peaks = out;
-      drawWave();
-    }
+    dk.wave.set(t.id, Uint8Array.from(out, (v) => Math.round(v * 255)));
+    setPeaks(t.id, out);
   } catch { /* undecodable: plain bar */ }
+}
+
+function setPeaks(id, out) {
+  peaksCache.set(id, out);
+  if (peaksCache.size > 60) peaksCache.delete(peaksCache.keys().next().value);
+  if (peaksFor === id) {
+    peaks = out;
+    invalidateWave();
+  }
+}
+
+let layers = null; // { W, H, played, rest, hover }
+let lastDraw = '';
+
+export function invalidateWave() {
+  layers = null;
+  lastDraw = '';
+  drawWave();
+}
+
+function buildLayers(W, H) {
+  const colors = { played: cssVar('--accent'), rest: cssVar('--line-hi'), hover: cssVar('--accent-2') };
+  const mid = Math.floor(H / 2);
+  const out = { W, H, bg: cssVar('--bg'), head: cssVar('--text') };
+  for (const [k, color] of Object.entries(colors)) {
+    const cv = new OffscreenCanvas(W, H);
+    const g = cv.getContext('2d');
+    g.fillStyle = color;
+    for (let x = 0; x < W; x += 2) {
+      let amp = 1;
+      if (peaks) {
+        const i0 = Math.floor((x / W) * peaks.length);
+        const i1 = Math.max(i0 + 1, Math.floor(((x + 2) / W) * peaks.length));
+        amp = 0;
+        for (let i = i0; i < i1; i++) amp = Math.max(amp, peaks[i]);
+        amp = Math.max(1, Math.round(Math.pow(amp, 1.6) * (mid - 1)));
+      }
+      g.fillRect(x, mid - amp, 1, amp * 2);
+    }
+    out[k] = cv;
+  }
+  return out;
 }
 
 export function drawWave() {
@@ -191,30 +261,24 @@ export function drawWave() {
   if (!c || !c.offsetParent) return;
   const W = Math.floor(c.clientWidth / 2);
   const H = Math.floor(c.clientHeight / 2);
-  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+  if (!W || !H) return;
+  if (c.width !== W || c.height !== H) { c.width = W; c.height = H; layers = null; }
+  if (!layers) layers = buildLayers(W, H);
+  const px = Math.floor((player.duration ? player.time / player.duration : 0) * W);
+  const hx = hoverX == null ? -1 : Math.floor(hoverX * W);
+  const key = px + '|' + hx;
+  if (key === lastDraw) return;
+  lastDraw = key;
   const g = c.getContext('2d');
-  g.fillStyle = cssVar('--bg');
+  g.fillStyle = layers.bg;
   g.fillRect(0, 0, W, H);
-  const prog = player.duration ? player.time / player.duration : 0;
-  const played = cssVar('--accent');
-  const rest = cssVar('--line-hi');
-  const hov = cssVar('--accent-2');
-  const mid = Math.floor(H / 2);
-  for (let x = 0; x < W; x += 2) {
-    const f = x / W;
-    let amp;
-    if (peaks) {
-      const i0 = Math.floor(f * peaks.length);
-      const i1 = Math.max(i0 + 1, Math.floor(((x + 2) / W) * peaks.length));
-      amp = 0;
-      for (let i = i0; i < i1; i++) amp = Math.max(amp, peaks[i]);
-      amp = Math.max(1, Math.round(Math.pow(amp, 1.6) * (mid - 1)));
-    } else amp = 1;
-    g.fillStyle = f <= prog ? played : hoverX != null && f <= hoverX ? hov : rest;
-    if (hoverX != null && f > prog && f <= hoverX) g.globalAlpha = 0.6;
-    g.fillRect(x, mid - amp, 1, amp * 2);
+  g.drawImage(layers.rest, 0, 0);
+  if (hx > px) {
+    g.globalAlpha = 0.6;
+    g.drawImage(layers.hover, px, 0, hx - px, H, px, 0, hx - px, H);
     g.globalAlpha = 1;
   }
-  g.fillStyle = cssVar('--text');
-  g.fillRect(Math.floor(prog * W), 0, 1, H);
+  if (px > 0) g.drawImage(layers.played, 0, 0, px, H, 0, 0, px, H);
+  g.fillStyle = layers.head;
+  g.fillRect(px, 0, 1, H);
 }

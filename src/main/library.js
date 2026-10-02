@@ -2,13 +2,13 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { app } = require('electron');
+const { app, nativeImage } = require('electron');
 const mm = require('music-metadata');
 const { Store } = require('./store');
 
 const AUDIO_EXT = new Set(['.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wav', '.wma', '.aiff', '.aif', '.webm', '.alac']);
 
-const SCHEMA = 2; // bump to force re-reading tags after metadata changes
+const SCHEMA = 3; // bump to force re-reading tags after metadata changes
 
 const idFor = (p) => crypto.createHash('sha1').update(path.resolve(p).toLowerCase()).digest('hex').slice(0, 16);
 
@@ -19,6 +19,14 @@ class Library {
     this.coverDir = path.join(app.getPath('userData'), 'covers');
     fs.mkdirSync(this.coverDir, { recursive: true });
     this.scanning = false;
+    this._emitTimer = null;
+  }
+
+  // Coalesce change notifications: a 300-song import would otherwise ship the whole library
+  // to the renderer 300 times.
+  changed() {
+    clearTimeout(this._emitTimer);
+    this._emitTimer = setTimeout(() => this.emit('library:changed', this.snapshot()), 250);
   }
 
   snapshot() {
@@ -35,27 +43,35 @@ class Library {
       const tracks = this.store.data.tracks;
       const seen = new Set();
       let done = 0;
-      for (const file of files) {
-        const id = idFor(file);
-        seen.add(id);
-        let st;
-        try { st = await fs.promises.stat(file); } catch { continue; }
-        const existing = tracks[id];
-        if (!existing || existing.mtime !== st.mtimeMs || existing.v !== SCHEMA) {
-          const t = await this.readTrack(file, st);
-          if (t) tracks[id] = { ...existing, ...t, addedAt: existing?.addedAt ?? Date.now() };
+      let dirty = false;
+      let lastProgress = 0;
+      // 8 files in flight: tag parsing is I/O-bound, so this is several times faster on big libraries.
+      let next = 0;
+      const worker = async () => {
+        while (next < files.length) {
+          const file = files[next++];
+          const id = idFor(file);
+          seen.add(id);
+          let st;
+          try { st = await fs.promises.stat(file); } catch { continue; }
+          const existing = tracks[id];
+          if (!existing || existing.mtime !== st.mtimeMs || existing.v !== SCHEMA) {
+            const t = await this.readTrack(file, st);
+            if (t) { tracks[id] = { ...existing, ...t, addedAt: existing?.addedAt ?? Date.now() }; dirty = true; }
+          }
+          done++;
+          if (Date.now() - lastProgress > 150) { lastProgress = Date.now(); this.emit('library:progress', { done, total: files.length }); }
         }
-        if (++done % 25 === 0) this.emit('library:progress', { done, total: files.length });
-      }
+      };
+      await Promise.all(Array.from({ length: 8 }, worker));
       // Drop tracks that lived inside a scanned folder but are gone now.
       const roots = folders.map((f) => path.resolve(f).toLowerCase() + path.sep);
       for (const [id, t] of Object.entries(tracks)) {
         const inRoot = roots.some((r) => path.resolve(t.path).toLowerCase().startsWith(r));
-        if (inRoot && !seen.has(id)) delete tracks[id];
+        if (inRoot && !seen.has(id)) { delete tracks[id]; dirty = true; }
       }
-      this.store.save();
       this.emit('library:progress', { done: files.length, total: files.length, finished: true });
-      this.emit('library:changed', this.snapshot());
+      if (dirty) { this.store.save(); this.changed(); }
     } finally {
       this.scanning = false;
     }
@@ -75,15 +91,19 @@ class Library {
       } catch { /* unreadable */ }
     }
     this.store.save();
-    this.emit('library:changed', this.snapshot());
+    this.changed();
     return added;
   }
 
   async readTrack(file, st) {
     try {
-      const meta = await mm.parseFile(file, { duration: true, skipPostHeaders: true });
+      // duration:false reads length from headers instead of scanning the whole file; only fall
+      // back to a full scan for the rare file without usable headers.
+      let meta = await mm.parseFile(file, { duration: false, skipPostHeaders: true });
+      if (!meta.format.duration) meta = await mm.parseFile(file, { duration: true, skipPostHeaders: true });
       const c = meta.common;
       let cover = null;
+      let thumb = null;
       const pic = c.picture?.[0];
       if (pic?.data?.length) {
         const hash = crypto.createHash('sha1').update(pic.data).digest('hex').slice(0, 20);
@@ -92,6 +112,14 @@ class Library {
         const out = path.join(this.coverDir, name);
         if (!fs.existsSync(out)) await fs.promises.writeFile(out, pic.data);
         cover = name;
+        // 192px thumbnail for lists, queue and grids (full art can be 3000px / several MB).
+        const tname = `t_${hash}.jpg`;
+        const tout = path.join(this.coverDir, tname);
+        if (!fs.existsSync(tout)) {
+          const img = nativeImage.createFromBuffer(pic.data);
+          if (!img.isEmpty()) await fs.promises.writeFile(tout, img.resize({ width: 192, height: 192, quality: 'good' }).toJPEG(82));
+        }
+        if (fs.existsSync(tout)) thumb = tname;
       }
       const duration = meta.format.duration || 0;
       let bitrate = meta.format.bitrate ? Math.round(meta.format.bitrate / 1000) : null;
@@ -113,6 +141,7 @@ class Library {
         codec: meta.format.codec || path.extname(file).slice(1).toUpperCase(),
         sampleRate: meta.format.sampleRate || null,
         cover,
+        thumb,
         mtime: st.mtimeMs,
         size: st.size,
         v: SCHEMA,
@@ -146,21 +175,21 @@ class Library {
     if (i >= 0) list[i] = { ...list[i], ...pl };
     else list.push({ name: 'New Playlist', trackIds: [], source: 'user', createdAt: Date.now(), ...pl });
     this.store.save();
-    this.emit('library:changed', this.snapshot());
+    this.changed();
     return list.find((p) => p.id === pl.id);
   }
 
   deletePlaylist(id) {
     this.store.data.playlists = this.store.data.playlists.filter((p) => p.id !== id);
     this.store.save();
-    this.emit('library:changed', this.snapshot());
+    this.changed();
   }
 
   removeTrack(id) {
     delete this.store.data.tracks[id];
     for (const p of this.store.data.playlists) p.trackIds = p.trackIds.filter((t) => t !== id);
     this.store.save();
-    this.emit('library:changed', this.snapshot());
+    this.changed();
   }
 }
 

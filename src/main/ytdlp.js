@@ -1,49 +1,86 @@
-// Manages the yt-dlp binary (download on first run, daily self-update) and runs it.
-// Electron itself doubles as yt-dlp's JavaScript runtime (ELECTRON_RUN_AS_NODE), so YouTube's
-// signature challenges are solved without the user installing Node/Deno.
+// Manages the download tools (yt-dlp + ffmpeg): fetched on first use, yt-dlp kept up to date daily.
+//  - Windows/macOS use yt-dlp's "onedir" build: ~3x faster startup than the single-file exe, which
+//    re-extracts itself to %TEMP% on every launch (we launch it several times per song).
+//  - ffmpeg is downloaded on demand instead of bundled, keeping the installer ~30MB smaller.
+//  - Electron itself doubles as yt-dlp's JavaScript runtime (ELECTRON_RUN_AS_NODE).
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const zlib = require('zlib');
+const { spawn, execFile } = require('child_process');
+const { pipeline } = require('stream/promises');
+const { Readable } = require('stream');
 const { app } = require('electron');
 
 const BIN_DIR = () => path.join(app.getPath('userData'), 'bin');
-const BIN_NAME = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
-const ASSET = {
-  win32: 'yt-dlp.exe',
-  darwin: 'yt-dlp_macos',
-  linux: process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux',
-}[process.platform];
+const EXE = process.platform === 'win32' ? '.exe' : '';
+const plat = process.platform;
+const arch = process.arch;
 
-const binPath = () => path.join(BIN_DIR(), BIN_NAME);
-
-function ffmpegPath() {
-  let p = require('ffmpeg-static');
-  if (p && p.includes('app.asar')) p = p.replace('app.asar', 'app.asar.unpacked');
-  return p;
-}
+// onedir zip for win/mac (fast startup); single binary on Linux (no unzip guaranteed there)
+const YT_ASSET = {
+  win32: arch === 'arm64' ? 'yt-dlp_win_arm64.zip' : 'yt-dlp_win.zip',
+  darwin: 'yt-dlp_macos.zip',
+  linux: arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux',
+}[plat];
+const YT_DIR = () => path.join(BIN_DIR(), 'yt-dlp');
+const ytPath = () => (YT_ASSET.endsWith('.zip') ? path.join(YT_DIR(), plat === 'darwin' ? 'yt-dlp_macos' : 'yt-dlp' + EXE) : path.join(YT_DIR(), 'yt-dlp'));
+const ffPath = () => path.join(BIN_DIR(), 'ffmpeg' + EXE);
+const FF_URL = `https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-${plat}-${arch}.gz`;
 
 let ready = null;
 let status = { state: 'idle', version: null };
 const listeners = new Set();
 const setStatus = (s) => { status = { ...status, ...s }; listeners.forEach((fn) => fn(status)); };
 
-async function downloadBinary() {
-  setStatus({ state: 'installing' });
-  fs.mkdirSync(BIN_DIR(), { recursive: true });
-  const r = await fetch(`https://github.com/yt-dlp/yt-dlp/releases/latest/download/${ASSET}`);
-  if (!r.ok) throw new Error(`Could not download yt-dlp (${r.status})`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  const tmp = binPath() + '.part';
-  fs.writeFileSync(tmp, buf);
-  fs.chmodSync(tmp, 0o755);
-  fs.renameSync(tmp, binPath());
+async function download(url, dest, { gunzip = false } = {}) {
+  const r = await fetch(url, { headers: { 'User-Agent': 'DK.FM' } });
+  if (!r.ok) throw new Error(`Download failed (${r.status}): ${url}`);
+  const tmp = dest + '.part';
+  const src = Readable.fromWeb(r.body);
+  await pipeline(src, ...(gunzip ? [zlib.createGunzip()] : []), fs.createWriteStream(tmp));
+  fs.renameSync(tmp, dest);
 }
 
-function run(args, { onLine, signal } = {}) {
+function unzip(zip, dir) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binPath(), args, {
+    const [cmd, args] = plat === 'win32'
+      ? [path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe'), ['-xf', zip, '-C', dir]]
+      : ['ditto', ['-x', '-k', zip, dir]];
+    execFile(cmd, args, { windowsHide: true }, (err) => (err ? reject(err) : resolve()));
+  });
+}
+
+async function latestYtVersion() {
+  const r = await fetch('https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest', { headers: { 'User-Agent': 'DK.FM' } });
+  if (!r.ok) return null;
+  return (await r.json()).tag_name;
+}
+
+async function installYt(version) {
+  setStatus({ state: status.version ? 'updating' : 'installing' });
+  fs.mkdirSync(BIN_DIR(), { recursive: true });
+  const base = version ? `https://github.com/yt-dlp/yt-dlp/releases/download/${version}` : 'https://github.com/yt-dlp/yt-dlp/releases/latest/download';
+  const stage = YT_DIR() + '.new';
+  fs.rmSync(stage, { recursive: true, force: true });
+  fs.mkdirSync(stage, { recursive: true });
+  if (YT_ASSET.endsWith('.zip')) {
+    const zip = path.join(BIN_DIR(), YT_ASSET);
+    await download(`${base}/${YT_ASSET}`, zip);
+    await unzip(zip, stage);
+    fs.rmSync(zip, { force: true });
+  } else {
+    await download(`${base}/${YT_ASSET}`, path.join(stage, 'yt-dlp'));
+  }
+  fs.rmSync(YT_DIR(), { recursive: true, force: true });
+  fs.renameSync(stage, YT_DIR());
+  if (plat !== 'win32') fs.chmodSync(ytPath(), 0o755);
+}
+
+function run(args, { onLine, signal, bin = ytPath() } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, {
       windowsHide: true,
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PYTHONIOENCODING: 'utf-8' },
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
     });
     let out = '';
     let err = '';
@@ -67,32 +104,44 @@ function run(args, { onLine, signal } = {}) {
       if (signal?.aborted) return reject(new Error('Cancelled'));
       if (code === 0) resolve(out);
       else {
-        const msg = err.split('\n').filter((l) => l.startsWith('ERROR')).pop() || err.trim().split('\n').pop() || `yt-dlp exited ${code}`;
+        const msg = err.split('\n').filter((l) => l.startsWith('ERROR')).pop() || err.trim().split('\n').pop() || `exited ${code}`;
         reject(new Error(msg.replace(/^ERROR:\s*/, '')));
       }
     });
   });
 }
 
-// Common flags: Electron as JS runtime, bundled ffmpeg.
-const baseArgs = () => ['--js-runtimes', `node:${process.execPath}`, '--ffmpeg-location', ffmpegPath(), '--no-warnings', '--encoding', 'utf-8'];
+const baseArgs = () => ['--js-runtimes', `node:${process.execPath}`, '--ffmpeg-location', ffPath(), '--no-warnings', '--encoding', 'utf-8', '--no-cache-dir'];
 
 function ensure() {
   if (ready) return ready;
   ready = (async () => {
-    const stampFile = path.join(BIN_DIR(), 'last-update');
-    if (!fs.existsSync(binPath())) {
-      await downloadBinary();
-      fs.writeFileSync(stampFile, String(Date.now()));
-    } else {
-      const last = Number(fs.existsSync(stampFile) ? fs.readFileSync(stampFile, 'utf8') : 0);
-      if (Date.now() - last > 24 * 3600 * 1000) {
-        setStatus({ state: 'updating' });
-        await run(['-U']).catch(() => {}); // keep going with the old binary if offline
-        fs.writeFileSync(stampFile, String(Date.now()));
-      }
+    fs.mkdirSync(BIN_DIR(), { recursive: true });
+    const stamp = path.join(BIN_DIR(), 'yt-dlp.version');
+    const have = fs.existsSync(ytPath()) && fs.existsSync(stamp) ? fs.readFileSync(stamp, 'utf8').trim() : null;
+    const tasks = [];
+    if (!fs.existsSync(ffPath())) {
+      tasks.push((async () => {
+        await download(FF_URL, ffPath(), { gunzip: true });
+        if (plat !== 'win32') fs.chmodSync(ffPath(), 0o755);
+      })());
     }
-    const version = (await run(['--version'])).trim();
+    const checkedFile = path.join(BIN_DIR(), 'last-check');
+    const lastCheck = Number(fs.existsSync(checkedFile) ? fs.readFileSync(checkedFile, 'utf8') : 0);
+    if (!have || Date.now() - lastCheck > 24 * 3600 * 1000) {
+      tasks.push((async () => {
+        const latest = await latestYtVersion().catch(() => null);
+        if (!have || (latest && latest !== have)) {
+          setStatus({ version: have });
+          await installYt(latest);
+          fs.writeFileSync(stamp, latest || (await run(['--version'])).trim());
+        }
+        fs.writeFileSync(checkedFile, String(Date.now()));
+      })().catch((e) => { if (!have) throw e; })); // offline with a working copy: keep it
+    }
+    await Promise.all(tasks);
+    try { fs.rmSync(path.join(BIN_DIR(), 'yt-dlp.exe'), { force: true }); fs.rmSync(path.join(BIN_DIR(), 'last-update'), { force: true }); } catch { /* still locked; next launch */ }
+    const version = fs.readFileSync(stamp, 'utf8').trim();
     setStatus({ state: 'ready', version });
     return version;
   })().catch((e) => {
@@ -107,7 +156,7 @@ module.exports = {
   ensure,
   run,
   baseArgs,
-  ffmpegPath,
+  ffmpegPath: ffPath,
   getStatus: () => status,
   onStatus: (fn) => listeners.add(fn),
 };

@@ -1,7 +1,7 @@
 // Library browser: sources sidebar + views (tracks, albums, artists, playlists, Spotify import, downloads).
 import { player } from './player.js';
 import { state } from './state.js';
-import { $, h, fmtTime, fmtLong, coverUrl, contextMenu, prompt, toast, debounce } from './util.js';
+import { $, h, fmtTime, fmtLong, coverUrl, thumbUrl, contextMenu, prompt, toast, debounce } from './util.js';
 
 const ROW = 28;
 let view = { key: 'all' };
@@ -76,6 +76,7 @@ function renderSources() {
     src('recent', '◷', 'Recently Added'),
     src('albums', '◉', 'Albums'),
     src('artists', '☻', 'Artists'),
+    h('div.src.dim', { title: 'Scan another folder for music', on: { click: addFolder } }, h('span.ico', '+'), h('span.lbl', 'Add music folder')),
     h('div.src-group', 'SPOTIFY'),
     src('import', '⤓', 'Import Playlist'),
     src('downloads', '⇣', 'Downloads', active || null),
@@ -97,6 +98,17 @@ function playlistDrop(id) {
       addToPlaylist(id, ids);
     },
   };
+}
+
+async function addFolder() {
+  const f = await dk.dialog.folder();
+  if (!f) return;
+  const folders = state.settings.musicFolders || [];
+  if (!folders.includes(f)) state.set('musicFolders', [...folders, f]);
+  toast('Scanning ' + f + '…');
+  await new Promise((r) => setTimeout(r, 400)); // let the settings save land first
+  await dk.library.scan();
+  toast(`Library: ${state.tracks.size} tracks`);
 }
 
 async function newPlaylist(ids = []) {
@@ -246,28 +258,49 @@ function trackView(box, cfg, keepScroll = 0) {
   scroller.append(inner);
   box.replaceChildren(head, thead, scroller);
 
+  // Virtualized + pooled: a fixed set of row elements is reused while scrolling; only text and
+  // classes change. Scroll events are coalesced to one render per frame.
+  const pool = [];
+  const mkRow = () => {
+    const r = h('div.trow', { draggable: true },
+      h('span.t-num', h('span')), h('span.t-like', '♥'), h('span'), h('span.t-dim'), h('span.t-dim'), h('span.t-time'), h('span.t-plays'));
+    inner.append(r);
+    return r;
+  };
+  const setText = (el, v) => { if (el.textContent !== v) el.textContent = v; };
+  let rafQueued = false;
   renderRows = () => {
+    rafQueued = false;
     const top = scroller.scrollTop;
-    const a = Math.max(0, Math.floor(top / ROW) - 8);
-    const b = Math.min(listIds.length, Math.ceil((top + scroller.clientHeight) / ROW) + 8);
+    const a = Math.max(0, Math.floor(top / ROW) - 6);
+    const b = Math.min(listIds.length, Math.ceil((top + scroller.clientHeight) / ROW) + 6);
     const curId = player.current?.id;
-    const rows = [];
+    const numMode = activeSort?.key === 'trackno';
+    let used = 0;
     for (let i = a; i < b; i++) {
       const t = state.track(listIds[i]);
       if (!t) continue;
       const st = state.stat(t.id);
-      rows.push(h('div.trow' + (selection.has(t.id) ? '.sel' : '') + (t.id === curId ? '.current' : ''), { style: { top: i * ROW + 'px', background: i % 2 && !selection.has(t.id) ? 'rgba(255,255,255,.015)' : null }, 'data-i': i, draggable: true },
-        h('span.t-num', h('span', String(cfg.playlist || activeSort?.key === 'trackno' ? (activeSort?.key === 'trackno' && t.track ? t.track : i + 1) : i + 1))),
-        h('span.t-like' + (st.liked ? '.on' : ''), { 'data-like': t.id }, '♥'),
-        h('span', t.title),
-        h('span.t-dim', t.artist),
-        h('span.t-dim', t.album || ''),
-        h('span.t-time', fmtTime(t.duration)),
-        h('span.t-plays', st.plays ? String(st.plays) : '')));
+      const r = pool[used] || (pool[used] = mkRow());
+      used++;
+      const sel = selection.has(t.id);
+      r.className = 'trow' + (sel ? ' sel' : '') + (t.id === curId ? ' current' : '') + (i % 2 && !sel ? ' odd' : '');
+      r.style.transform = `translateY(${i * ROW}px)`;
+      r.dataset.i = i;
+      r.hidden = false;
+      const c = r.children;
+      setText(c[0].firstChild, String(numMode && t.track ? t.track : i + 1));
+      c[1].className = 't-like' + (st.liked ? ' on' : '');
+      c[1].dataset.like = t.id;
+      setText(c[2], t.title);
+      setText(c[3], t.artist);
+      setText(c[4], t.album || '');
+      setText(c[5], fmtTime(t.duration));
+      setText(c[6], st.plays ? String(st.plays) : '');
     }
-    inner.replaceChildren(...rows);
+    for (let k = used; k < pool.length; k++) pool[k].hidden = true;
   };
-  scroller.addEventListener('scroll', () => requestAnimationFrame(renderRows));
+  scroller.addEventListener('scroll', () => { if (!rafQueued) { rafQueued = true; requestAnimationFrame(renderRows); } }, { passive: true });
   new ResizeObserver(() => renderRows?.()).observe(scroller);
 
   const rowIndex = (e) => {
@@ -377,7 +410,7 @@ function albumsView(box, all) {
   const albums = [...map.values()].sort((a, b) => a.artist.localeCompare(b.artist) || a.name.localeCompare(b.name));
   box.replaceChildren(
     h('div.view-head', h('div.vh-text', h('div.view-title.glow-text', 'ALBUMS'), h('div.view-sub', `${albums.length} ALBUMS`))),
-    albums.length ? h('div.grid', albums.map((a) => card(a.cover ? coverUrl(a.cover) : null, a.name, `${a.artist}${a.year ? ' · ' + a.year : ''}`, () => setView({ key: 'album', id: a.key })))) : emptyState());
+    albums.length ? h('div.grid', albums.map((a) => card(a.cover ? thumbUrl(a.cover) : null, a.name, `${a.artist}${a.year ? ' · ' + a.year : ''}`, () => setView({ key: 'album', id: a.key })))) : emptyState());
 }
 
 function artistsView(box, all) {
@@ -392,7 +425,7 @@ function artistsView(box, all) {
   const artists = [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
   box.replaceChildren(
     h('div.view-head', h('div.vh-text', h('div.view-title.glow-text', 'ARTISTS'), h('div.view-sub', `${artists.length} ARTISTS`))),
-    artists.length ? h('div.grid', artists.map((a) => card(a.cover ? coverUrl(a.cover) : null, a.name, `${a.n} TRACK${a.n === 1 ? '' : 'S'}`, () => setView({ key: 'artist', id: a.key })))) : emptyState());
+    artists.length ? h('div.grid', artists.map((a) => card(a.cover ? thumbUrl(a.cover) : null, a.name, `${a.n} TRACK${a.n === 1 ? '' : 'S'}`, () => setView({ key: 'artist', id: a.key })))) : emptyState());
 }
 
 function card(img, c1, c2, onClick) {

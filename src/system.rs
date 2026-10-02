@@ -283,6 +283,23 @@ pub fn cleanup_old() {
     if let Ok(p) = std::env::var("APPIMAGE") {
         let _ = std::fs::remove_file(std::path::PathBuf::from(p).with_extension("old"));
     }
+    // The Electron version kept its built-in browser's caches in the data folder we share
+    // (~10 MB). Remove exactly those names; everything else in the folder is ours.
+    let data = crate::store::data_dir();
+    for d in [
+        "blob_storage", "Cache", "Code Cache", "Crashpad", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GPUCache",
+        "GPUPersistentCache", "GrShaderCache", "IndexedDB", "Local Storage", "Network", "Service Worker", "Session Storage",
+        "ShaderCache", "Shared Dictionary", "VideoDecodeStats", "WebStorage",
+    ] {
+        let _ = std::fs::remove_dir_all(data.join(d));
+    }
+    for f in [
+        ".running", ".updaterId", "declarative_performance_observer.db", "declarative_performance_observer.db-journal",
+        "DevToolsActivePort", "DIPS", "DIPS-wal", "Local State", "lockfile", "Network Persistent State", "Preferences",
+        "SharedStorage", "SharedStorage-wal", "TransportSecurity", "Trust Tokens", "Trust Tokens-journal",
+    ] {
+        let _ = std::fs::remove_file(data.join(f));
+    }
     // the old Electron version's update cache (it downloaded the installer that moved us over)
     #[cfg(windows)]
     if let (Some(local), Ok(exe)) = (dirs::data_local_dir(), std::env::current_exe()) {

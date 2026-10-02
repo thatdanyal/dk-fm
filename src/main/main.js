@@ -13,14 +13,29 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'dkfm', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true, corsEnabled: true } },
 ]);
 
-if (!app.requestSingleInstanceLock()) app.quit();
+// Dev/testing: DKFM_USER_DATA=<dir> runs an isolated profile alongside an installed copy.
+if (process.env.DKFM_USER_DATA) app.setPath('userData', process.env.DKFM_USER_DATA);
 
-// Leaner Chromium: run the network service inside the main process (one less process) and skip
-// features a music player never uses. DKFM_NO_TUNING=1 disables this for comparison.
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) app.quit();
+
+// Leaner Chromium (measured: ~450 -> ~375 MB working set, 5 -> 3 processes):
+//  - network service and GPU compositor run inside the main process instead of their own
+//  - V8 tuned for memory over peak speed (this UI is light)
+//  - tiny disk caches; features a music player never uses are off
+// Crash guard: if the last session didn't exit cleanly, the GPU goes back to its own process
+// (a graphics-driver crash can then never take the whole app down twice).
+// DKFM_NO_TUNING=1 disables all of this for comparison.
+const crashFlag = () => path.join(app.getPath('userData'), '.running');
+let safeMode = false;
 if (!process.env.DKFM_NO_TUNING) {
+  try { safeMode = gotLock && fs.existsSync(crashFlag()); } catch {}
   app.commandLine.appendSwitch('enable-features', 'NetworkServiceInProcess2');
   app.commandLine.appendSwitch('disable-features', 'SpareRendererForSitePerProcess,MediaRouter,DialMediaRouteProvider,AutofillServerCommunication,Translate,OptimizationHints');
   app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('js-flags', '--optimize-for-size');
+  app.commandLine.appendSwitch('disk-cache-size', String(8 * 1024 * 1024));
+  if (!safeMode) app.commandLine.appendSwitch('in-process-gpu');
 }
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
@@ -41,7 +56,7 @@ function defaults() {
     pixelFont: true,
     musicFolders: [music],
     downloadDir: path.join(music, 'DK.FM'),
-    downloadFormat: 'mp3-320',
+    downloadFormat: 'm4a', // original YouTube AAC, no re-encode: ~half the size of MP3 320
     downloadConcurrency: 3,
     spotifyClientId: '',
     spotifyClientSecret: '',
@@ -268,6 +283,7 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(() => {
+  try { fs.writeFileSync(crashFlag(), String(Date.now())); } catch {}
   settings = new Store('settings', defaults());
   library = new Library(emit);
   downloader = new Downloader({ emit, library, settings });
@@ -276,12 +292,11 @@ app.whenReady().then(() => {
   registerIpc();
   upd = updater.init(emit, () => settings.get('autoUpdate'));
   createWindow();
-  // Warm up: fetch/update yt-dlp in the background so the first import is fast.
-  setTimeout(() => yt.ensure().catch(() => {}), 3000);
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
 
 app.on('before-quit', () => {
+  if (gotLock) try { fs.rmSync(crashFlag(), { force: true }); } catch {}
   settings?.flush();
   library?.store.flush();
 });

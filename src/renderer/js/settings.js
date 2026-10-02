@@ -87,7 +87,7 @@ const SECTIONS = {
       section('DOWNLOAD FOLDER', row('Save to', dir, h('button.mini-btn', { on: { click: async () => { const f = await dk.dialog.folder(); if (f) { state.set('downloadDir', f); dir.value = f; } } } }, 'CHANGE'))),
       section('FORMAT',
         row('Audio format', h('select.pixel-select', { on: { change: (e) => state.set('downloadFormat', e.target.value) } },
-          [['mp3-320', 'MP3 · 320 kbps CBR (max compatibility)'], ['mp3-v0', 'MP3 · V0 VBR (~245 kbps, smaller)'], ['m4a', 'M4A · AAC (no re-encode when possible)']].map(([v, l]) => h('option', { value: v, selected: state.settings.downloadFormat === v }, l)))),
+          [['m4a', 'M4A · AAC original (recommended: smallest, no quality loss)'], ['mp3-v0', 'MP3 · V0 VBR (~245 kbps)'], ['mp3-320', 'MP3 · 320 kbps (largest, for old devices)']].map(([v, l]) => h('option', { value: v, selected: state.settings.downloadFormat === v }, l)))),
         row('Parallel downloads', h('select.pixel-select', { on: { change: (e) => state.set('downloadConcurrency', Number(e.target.value)) } },
           [1, 2, 3, 4, 5, 6].map((n) => h('option', { value: n, selected: state.settings.downloadConcurrency === n }, String(n)))))),
       section('ENGINE', row('Downloader', ver), h('div.dim', 'yt-dlp is fetched automatically on first use and updated daily so YouTube changes don’t break downloads.')),

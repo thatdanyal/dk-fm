@@ -436,6 +436,7 @@ function card(img, c1, c2, onClick) {
 
 // ---------------- Spotify import ----------------
 function importView(box) {
+  dk.yt.ensure(); // first visit: fetch the download tools in the background (nothing is downloaded until then)
   const input = h('input.pixel-input', { placeholder: 'Paste a Spotify playlist, album or track link…', value: spotifyResult?.url || '' });
   const go = async () => {
     const url = input.value.trim();

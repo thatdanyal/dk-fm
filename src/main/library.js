@@ -8,7 +8,7 @@ const { Store } = require('./store');
 
 const AUDIO_EXT = new Set(['.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wav', '.wma', '.aiff', '.aif', '.webm', '.alac']);
 
-const SCHEMA = 3; // bump to force re-reading tags after metadata changes
+const SCHEMA = 4; // bump to force re-reading tags after metadata changes
 
 const idFor = (p) => crypto.createHash('sha1').update(path.resolve(p).toLowerCase()).digest('hex').slice(0, 16);
 
@@ -72,6 +72,7 @@ class Library {
       }
       this.emit('library:progress', { done: files.length, total: files.length, finished: true });
       if (dirty) { this.store.save(); this.changed(); }
+      this.cleanupFiles();
     } finally {
       this.scanning = false;
     }
@@ -106,11 +107,19 @@ class Library {
       let thumb = null;
       const pic = c.picture?.[0];
       if (pic?.data?.length) {
+        // Stored at most 512px (embedded art is often 3000px / several MB; the app never shows
+        // it larger than ~256px). Same art across an album is stored once (content hash).
         const hash = crypto.createHash('sha1').update(pic.data).digest('hex').slice(0, 20);
-        const ext = pic.format?.includes('png') ? 'png' : 'jpg';
-        const name = `${hash}.${ext}`;
+        const name = `${hash}.jpg`;
         const out = path.join(this.coverDir, name);
-        if (!fs.existsSync(out)) await fs.promises.writeFile(out, pic.data);
+        if (!fs.existsSync(out)) {
+          const img = nativeImage.createFromBuffer(pic.data);
+          if (img.isEmpty()) await fs.promises.writeFile(out, pic.data);
+          else {
+            const { width } = img.getSize();
+            await fs.promises.writeFile(out, (width > 512 ? img.resize({ width: 512, quality: 'good' }) : img).toJPEG(85));
+          }
+        }
         cover = name;
         // 192px thumbnail for lists, queue and grids (full art can be 3000px / several MB).
         const tname = `t_${hash}.jpg`;
@@ -149,6 +158,25 @@ class Library {
     } catch {
       return null;
     }
+  }
+
+  // Delete cover art and waveform files no track uses anymore.
+  async cleanupFiles() {
+    const used = new Set();
+    const ids = new Set(Object.keys(this.store.data.tracks));
+    for (const t of Object.values(this.store.data.tracks)) { if (t.cover) used.add(t.cover); if (t.thumb) used.add(t.thumb); }
+    for (const p of this.store.data.playlists) if (p.cover && !/^https?:/.test(p.cover)) used.add(p.cover);
+    const rm = async (dir, keep) => {
+      for (const f of await fs.promises.readdir(dir).catch(() => [])) {
+        if (keep(f)) continue;
+        const p = path.join(dir, f);
+        const st = await fs.promises.stat(p).catch(() => null);
+        // Leave fresh files alone: a download may have just written one for a track not saved yet.
+        if (st && Date.now() - st.mtimeMs > 10 * 60 * 1000) await fs.promises.rm(p, { force: true }).catch(() => {});
+      }
+    };
+    await rm(this.coverDir, (f) => used.has(f));
+    await rm(path.join(app.getPath('userData'), 'waves'), (f) => ids.has(f.replace(/.bin$/, '')));
   }
 
   // ---- stats (plays, likes) ----

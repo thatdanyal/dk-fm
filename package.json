@@ -111,6 +111,7 @@
     "electronLanguages": [
       "en-US"
     ],
-    "compression": "maximum"
+    "compression": "maximum",
+    "afterPack": "scripts/after-pack.js"
   }
 }

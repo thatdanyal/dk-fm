@@ -1,0 +1,179 @@
+// Local library: scans folders for audio, reads tags + cover art, tracks stats & playlists.
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { app } = require('electron');
+const mm = require('music-metadata');
+const { Store } = require('./store');
+
+const AUDIO_EXT = new Set(['.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.wav', '.wma', '.aiff', '.aif', '.webm', '.alac']);
+
+const SCHEMA = 2; // bump to force re-reading tags after metadata changes
+
+const idFor = (p) => crypto.createHash('sha1').update(path.resolve(p).toLowerCase()).digest('hex').slice(0, 16);
+
+class Library {
+  constructor(emit) {
+    this.emit = emit;
+    this.store = new Store('library', { tracks: {}, playlists: [], stats: {} });
+    this.coverDir = path.join(app.getPath('userData'), 'covers');
+    fs.mkdirSync(this.coverDir, { recursive: true });
+    this.scanning = false;
+  }
+
+  snapshot() {
+    const { tracks, playlists, stats } = this.store.data;
+    return { tracks: Object.values(tracks), playlists, stats };
+  }
+
+  async scan(folders) {
+    if (this.scanning) return;
+    this.scanning = true;
+    try {
+      const files = [];
+      for (const f of folders) await walk(f, files);
+      const tracks = this.store.data.tracks;
+      const seen = new Set();
+      let done = 0;
+      for (const file of files) {
+        const id = idFor(file);
+        seen.add(id);
+        let st;
+        try { st = await fs.promises.stat(file); } catch { continue; }
+        const existing = tracks[id];
+        if (!existing || existing.mtime !== st.mtimeMs || existing.v !== SCHEMA) {
+          const t = await this.readTrack(file, st);
+          if (t) tracks[id] = { ...existing, ...t, addedAt: existing?.addedAt ?? Date.now() };
+        }
+        if (++done % 25 === 0) this.emit('library:progress', { done, total: files.length });
+      }
+      // Drop tracks that lived inside a scanned folder but are gone now.
+      const roots = folders.map((f) => path.resolve(f).toLowerCase() + path.sep);
+      for (const [id, t] of Object.entries(tracks)) {
+        const inRoot = roots.some((r) => path.resolve(t.path).toLowerCase().startsWith(r));
+        if (inRoot && !seen.has(id)) delete tracks[id];
+      }
+      this.store.save();
+      this.emit('library:progress', { done: files.length, total: files.length, finished: true });
+      this.emit('library:changed', this.snapshot());
+    } finally {
+      this.scanning = false;
+    }
+  }
+
+  async addFiles(paths, extra = {}) {
+    const added = [];
+    for (const p of paths) {
+      if (!AUDIO_EXT.has(path.extname(p).toLowerCase())) continue;
+      try {
+        const st = await fs.promises.stat(p);
+        const t = await this.readTrack(p, st);
+        if (!t) continue;
+        const prev = this.store.data.tracks[t.id];
+        this.store.data.tracks[t.id] = { ...prev, ...t, ...extra, addedAt: prev?.addedAt ?? Date.now() };
+        added.push(this.store.data.tracks[t.id]);
+      } catch { /* unreadable */ }
+    }
+    this.store.save();
+    this.emit('library:changed', this.snapshot());
+    return added;
+  }
+
+  async readTrack(file, st) {
+    try {
+      const meta = await mm.parseFile(file, { duration: true, skipPostHeaders: true });
+      const c = meta.common;
+      let cover = null;
+      const pic = c.picture?.[0];
+      if (pic?.data?.length) {
+        const hash = crypto.createHash('sha1').update(pic.data).digest('hex').slice(0, 20);
+        const ext = pic.format?.includes('png') ? 'png' : 'jpg';
+        const name = `${hash}.${ext}`;
+        const out = path.join(this.coverDir, name);
+        if (!fs.existsSync(out)) await fs.promises.writeFile(out, pic.data);
+        cover = name;
+      }
+      const duration = meta.format.duration || 0;
+      let bitrate = meta.format.bitrate ? Math.round(meta.format.bitrate / 1000) : null;
+      if ((!bitrate || bitrate < 32 || bitrate > 6000) && duration) bitrate = Math.round((st.size * 8) / duration / 1000);
+      const base = path.basename(file, path.extname(file));
+      const guess = base.includes(' - ') ? base.split(' - ') : null;
+      return {
+        id: idFor(file),
+        path: file,
+        title: c.title || (guess ? guess.slice(1).join(' - ') : base),
+        artist: c.artist || (c.artists && c.artists.join(', ')) || (guess ? guess[0] : 'Unknown Artist'),
+        album: c.album || '',
+        albumArtist: c.albumartist || '',
+        year: c.year || null,
+        track: c.track?.no || null,
+        genre: c.genre?.[0] || '',
+        duration,
+        bitrate,
+        codec: meta.format.codec || path.extname(file).slice(1).toUpperCase(),
+        sampleRate: meta.format.sampleRate || null,
+        cover,
+        mtime: st.mtimeMs,
+        size: st.size,
+        v: SCHEMA,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ---- stats (plays, likes) ----
+  bumpPlay(id) {
+    const s = (this.store.data.stats[id] ||= { plays: 0, liked: false, lastPlayed: 0 });
+    s.plays++;
+    s.lastPlayed = Date.now();
+    this.store.save();
+    return s;
+  }
+
+  toggleLike(id) {
+    const s = (this.store.data.stats[id] ||= { plays: 0, liked: false, lastPlayed: 0 });
+    s.liked = !s.liked;
+    this.store.save();
+    return s;
+  }
+
+  // ---- playlists ----
+  upsertPlaylist(pl) {
+    const list = this.store.data.playlists;
+    if (!pl.id) pl.id = crypto.randomUUID();
+    const i = list.findIndex((p) => p.id === pl.id);
+    if (i >= 0) list[i] = { ...list[i], ...pl };
+    else list.push({ name: 'New Playlist', trackIds: [], source: 'user', createdAt: Date.now(), ...pl });
+    this.store.save();
+    this.emit('library:changed', this.snapshot());
+    return list.find((p) => p.id === pl.id);
+  }
+
+  deletePlaylist(id) {
+    this.store.data.playlists = this.store.data.playlists.filter((p) => p.id !== id);
+    this.store.save();
+    this.emit('library:changed', this.snapshot());
+  }
+
+  removeTrack(id) {
+    delete this.store.data.tracks[id];
+    for (const p of this.store.data.playlists) p.trackIds = p.trackIds.filter((t) => t !== id);
+    this.store.save();
+    this.emit('library:changed', this.snapshot());
+  }
+}
+
+async function walk(dir, out, depth = 0) {
+  if (depth > 12) return;
+  let entries;
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    if (e.name.startsWith('.')) continue;
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) await walk(p, out, depth + 1);
+    else if (AUDIO_EXT.has(path.extname(e.name).toLowerCase())) out.push(p);
+  }
+}
+
+module.exports = { Library, idFor, AUDIO_EXT };

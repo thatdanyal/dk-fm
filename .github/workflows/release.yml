@@ -1,0 +1,67 @@
+# Every push to main builds Windows / macOS / Linux installers and publishes them as a GitHub
+# Release (v1.0.<run number>). Installed copies of DK.FM check these releases and auto-update.
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: 1.0.${{ github.run_number }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release v${{ env.VERSION }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "DK.FM v$VERSION" \
+            --target "$GITHUB_SHA" \
+            --notes "Automatic build from ${GITHUB_SHA::7}: $(printf '%s' "$COMMIT_MSG" | head -n1)"
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            args: --win
+          - os: macos-latest
+            args: --mac
+          - os: ubuntu-latest
+            args: --linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Set version
+        run: npm version ${{ env.VERSION }} --no-git-tag-version --allow-same-version
+
+      - name: Build & upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder ${{ matrix.args }} --publish always

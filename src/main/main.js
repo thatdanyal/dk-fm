@@ -5,7 +5,9 @@ const { Readable } = require('stream');
 const { Store } = require('./store');
 const { Library } = require('./library');
 const { Downloader } = require('./downloader');
-const { fetchSpotify } = require('./spotify');
+const { fetchAny, radio } = require('./sources');
+const { Sync } = require('./sync');
+const { Watcher } = require('./watcher');
 const yt = require('./ytdlp');
 const updater = require('./updater');
 
@@ -40,7 +42,7 @@ if (!process.env.DKFM_NO_TUNING) {
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
 let win;
-let settings, library, downloader, upd;
+let settings, library, downloader, upd, sync, watcher, history;
 
 const emit = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -58,6 +60,7 @@ function defaults() {
     downloadDir: path.join(music, 'DK.FM'),
     downloadFormat: 'm4a', // original YouTube AAC, no re-encode: ~half the size of MP3 320
     downloadConcurrency: 3,
+    syncHours: 6, // auto-sync imported playlists every N hours (0 = off)
     spotifyClientId: '',
     spotifyClientSecret: '',
     autoUpdate: true,
@@ -189,6 +192,8 @@ function registerIpc() {
   h('app:gpu', () => app.getGPUFeatureStatus().gpu_compositing);
   h('settings:set', (patch) => {
     settings.patch(patch);
+    if ('musicFolders' in patch || 'downloadDir' in patch) watchFolders();
+    if ('syncHours' in patch) sync.schedule();
     return settings.get();
   });
 
@@ -198,6 +203,17 @@ function registerIpc() {
   h('library:removeTrack', (id) => library.removeTrack(id));
   h('library:like', (id) => library.toggleLike(id));
   h('library:played', (id) => library.bumpPlay(id));
+  h('library:skipped', (id) => library.bumpSkip(id));
+  h('library:setGain', (id, db) => library.setGain(id, db));
+
+  // Listening history (for Stats): compact rows [trackId, startedAt(s), listened(s), skipped].
+  h('history:add', (row) => {
+    const ev = history.data.events;
+    ev.push(row);
+    if (ev.length > 100000) ev.splice(0, ev.length - 100000);
+    history.save();
+  });
+  h('history:get', () => history.data.events);
   h('library:upsertPlaylist', (pl) => library.upsertPlaylist(pl));
   h('library:deletePlaylist', (id) => library.deletePlaylist(id));
   h('library:reveal', (id) => {
@@ -216,7 +232,18 @@ function registerIpc() {
   h('shell:openPath', (p) => shell.openPath(p));
   h('shell:openExternal', (u) => /^https:\/\//.test(u) && shell.openExternal(u));
 
-  h('spotify:fetch', (url) => fetchSpotify(url, { clientId: settings.get('spotifyClientId'), clientSecret: settings.get('spotifyClientSecret') }));
+  const creds = () => ({ clientId: settings.get('spotifyClientId'), clientSecret: settings.get('spotifyClientSecret') });
+  h('import:fetch', (url) => fetchAny(url, creds()));
+  h('import:radio', (id) => {
+    const t = library.store.data.tracks[id];
+    if (!t) throw new Error('Unknown track');
+    return radio(t);
+  });
+  h('sync:now', () => sync.runAll({ manual: true }));
+  h('sync:one', async (playlistId) => {
+    const p = library.store.data.playlists.find((x) => x.id === playlistId);
+    return p ? { added: await sync.syncOne(p) } : { added: 0 };
+  });
   h('dl:start', (collection, selected) => downloader.start(collection, selected));
   h('dl:retry', (jobId, idx, videoId) => downloader.retry(jobId, idx, videoId));
   h('dl:cancel', (jobId) => downloader.cancel(jobId));
@@ -270,6 +297,12 @@ function registerIpc() {
   h('updater:status', () => upd.status());
 }
 
+// The download folder is created up front so it's watched before the first download lands.
+function watchFolders() {
+  try { fs.mkdirSync(settings.get('downloadDir'), { recursive: true }); } catch {}
+  watcher.watch(uniqueFolders());
+}
+
 function uniqueFolders() {
   const list = [...settings.get('musicFolders'), settings.get('downloadDir')];
   return [...new Set(list.map((f) => path.resolve(f)))].filter((f) => fs.existsSync(f));
@@ -287,17 +320,24 @@ app.whenReady().then(() => {
   settings = new Store('settings', defaults());
   library = new Library(emit);
   downloader = new Downloader({ emit, library, settings });
+  history = new Store('history', { events: [] });
+  sync = new Sync({ library, downloader, settings, emit });
+  watcher = new Watcher(library);
   yt.onStatus((s) => emit('yt:status', s));
   registerProtocol();
   registerIpc();
   upd = updater.init(emit, () => settings.get('autoUpdate'));
   createWindow();
+  watchFolders();
+  sync.start();
   app.on('activate', () => BrowserWindow.getAllWindows().length === 0 && createWindow());
 });
 
 app.on('before-quit', () => {
   if (gotLock) try { fs.rmSync(crashFlag(), { force: true }); } catch {}
   settings?.flush();
+  history?.flush();
+  watcher?.close();
   library?.store.flush();
 });
 app.on('window-all-closed', () => app.quit());

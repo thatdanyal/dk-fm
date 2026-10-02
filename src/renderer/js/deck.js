@@ -2,12 +2,12 @@
 import { player } from './player.js';
 import { state } from './state.js';
 import { $, fmtTime, coverUrl, mediaUrl, setRangeFill, contextMenu, cssVar } from './util.js';
+import { analyze, cachedPeaks } from './analysis.js';
 
 const CASSETTE = `<svg viewBox="0 0 32 22" shape-rendering="crispEdges" style="color:var(--faint)"><g fill="currentColor">
 <path d="M1 1h30v20H1z M3 3v16h26V3z" fill-rule="evenodd"/><rect x="5" y="5" width="22" height="3"/>
 <path d="M7 10h18v6H7z M9 12v2h2v-2z M21 12v2h2v-2z" fill-rule="evenodd" opacity=".7"/><rect x="9" y="18" width="14" height="1"/></g></svg>`;
 
-const peaksCache = new Map();
 let peaks = null;
 let peaksFor = null;
 let hoverX = null;
@@ -177,46 +177,14 @@ function codecLabel(t) {
 // when the playhead or hover position has actually moved a pixel.
 async function loadPeaks(t) {
   peaksFor = t?.id || null;
-  peaks = t ? peaksCache.get(t.id) || null : null;
+  peaks = t ? cachedPeaks(t.id) : null;
   invalidateWave();
   if (!t || peaks) return;
-  try {
-    const saved = await dk.wave.get(t.id);
-    if (peaksFor !== t.id) return;
-    if (saved?.length) return setPeaks(t.id, Float32Array.from(new Uint8Array(saved), (v) => v / 255));
-    const buf = await (await fetch(mediaUrl(t))).arrayBuffer();
-    if (peaksFor !== t.id) return;
-    const audio = await new OfflineAudioContext(1, 1, 8000).decodeAudioData(buf);
-    const N = 1200;
-    const out = new Float32Array(N);
-    const chs = Math.min(2, audio.numberOfChannels);
-    const per = Math.max(1, Math.floor(audio.length / N));
-    for (let c = 0; c < chs; c++) {
-      const d = audio.getChannelData(c);
-      for (let i = 0; i < N; i++) {
-        // RMS per bucket: shows dynamics even on brick-walled masters.
-        let sum = 0;
-        let n = 0;
-        const s = i * per;
-        for (let k = 0; k < per; k += 2) {
-          const v = d[s + k] || 0;
-          sum += v * v;
-          n++;
-        }
-        out[i] = Math.max(out[i], Math.sqrt(sum / Math.max(1, n)));
-      }
-    }
-    let max = 0;
-    for (const v of out) max = Math.max(max, v);
-    for (let i = 0; i < N; i++) out[i] = max ? out[i] / max : 0;
-    dk.wave.set(t.id, Uint8Array.from(out, (v) => Math.round(v * 255)));
-    setPeaks(t.id, out);
-  } catch { /* undecodable: plain bar */ }
+  const r = await analyze(t).catch(() => null);
+  if (r?.peaks) setPeaks(t.id, r.peaks);
 }
 
 function setPeaks(id, out) {
-  peaksCache.set(id, out);
-  if (peaksCache.size > 60) peaksCache.delete(peaksCache.keys().next().value);
   if (peaksFor === id) {
     peaks = out;
     invalidateWave();

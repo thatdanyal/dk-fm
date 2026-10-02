@@ -1,10 +1,11 @@
-// Download pipeline: Spotify track -> search YouTube -> rank -> verify -> download -> tag -> library.
+// Download pipeline: track -> (search YouTube & rank | direct link) -> download -> tag -> library.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const yt = require('./ytdlp');
 const { rank } = require('./matcher');
+const { taKey } = require('./library');
 
 const FORMATS = {
   'mp3-320': { ext: 'mp3', args: ['-x', '--audio-format', 'mp3', '--audio-quality', '320K'] },
@@ -28,19 +29,24 @@ class Downloader {
     return [...this.jobs.values()].map(publicJob);
   }
 
-  // collection = result of fetchSpotify; selected = indices to download (default all)
-  start(collection, selected) {
+  // collection = result of sources.fetchAny / radio; selected = indices to download (default all).
+  // opts.silent: started by background sync (no UI focus change).
+  start(collection, selected, opts = {}) {
     const jobId = `${collection.type}-${collection.id}`;
     const existing = this.jobs.get(jobId);
     if (existing) this.cancel(jobId);
     const fmt = this.settings.get('downloadFormat') || 'mp3-320';
-    const folder = path.join(this.settings.get('downloadDir'), sanitize(collection.type === 'track' ? 'Singles' : collection.name));
+    const sub = collection.type === 'track' ? 'Singles' : collection.type === 'radio' ? 'Discovered' : collection.name;
+    const folder = path.join(this.settings.get('downloadDir'), sanitize(sub));
     const job = {
       id: jobId,
       name: collection.name,
       cover: collection.cover,
       type: collection.type,
       url: collection.url,
+      source: collection.source || 'spotify',
+      complete: collection.complete !== false,
+      silent: !!opts.silent,
       folder,
       fmt,
       createdAt: Date.now(),
@@ -53,9 +59,20 @@ class Downloader {
       })),
     };
     this.jobs.set(jobId, job);
-    // A playlist in the library mirrors the Spotify collection.
-    if (collection.type !== 'track') {
-      this.library.upsertPlaylist({ id: 'sp-' + jobId, name: collection.name, source: 'spotify', spotifyUrl: collection.url, cover: collection.cover, trackIds: this.library.store.data.playlists.find((p) => p.id === 'sp-' + jobId)?.trackIds || [] });
+    // A playlist in the library mirrors the source collection (and auto-syncs by default).
+    if (collection.type === 'playlist' || collection.type === 'album') {
+      const prev = this.library.store.data.playlists.find((p) => p.id === 'sp-' + jobId);
+      this.library.upsertPlaylist({
+        id: 'sp-' + jobId,
+        name: collection.name,
+        source: collection.source || 'spotify',
+        sourceUrl: collection.url,
+        spotifyUrl: (collection.source || 'spotify') === 'spotify' ? collection.url : undefined,
+        cover: collection.cover,
+        autoSync: prev?.autoSync ?? true,
+        lastSync: Date.now(),
+        trackIds: prev?.trackIds || [],
+      });
     }
     for (const t of job.tracks) if (t.status === 'queued') this.queue.push([job, t]);
     this.emit('dl:job', publicJob(job));
@@ -117,7 +134,7 @@ class Downloader {
     const outFile = path.join(job.folder, `${sanitize(t.artists[0])} - ${sanitize(t.title)}.${fmt.ext}`);
 
     if (fs.existsSync(outFile) && !t.forcedVideoId) {
-      const [added] = await this.library.addFiles([outFile], { spotifyId: t.spotifyId });
+      const [added] = await this.library.addFiles([outFile], keyFields(t));
       t.status = 'done';
       t.note = 'Already downloaded';
       t.trackId = added?.id;
@@ -133,6 +150,9 @@ class Downloader {
     let order;
     if (t.forcedVideoId) {
       order = [{ id: t.forcedVideoId, title: '(manual pick)', source: 'manual', score: 100 }];
+    } else if (t.directUrl) {
+      // YouTube / SoundCloud imports: the exact upload is known, no search needed.
+      order = [{ id: t.youtubeId, url: t.directUrl, title: t.title, channel: t.artists[0], source: 'direct', score: 100 }];
     } else {
       const cands = rank(await this.search(t, signal), t);
       t.candidates = cands.slice(0, 6).map(({ id, title, channel, duration, score, source }) => ({ id, title, channel, duration, score, source }));
@@ -169,7 +189,7 @@ class Downloader {
             '--newline', '--progress-template', 'download:DKP %(progress._percent_str)s',
             '-o', path.join(tmpDir, 'audio.%(ext)s'),
             '-o', 'thumbnail:' + path.join(tmpDir, 'thumb.%(ext)s'),
-            `https://music.youtube.com/watch?v=${c.id}`,
+            c.url || `https://music.youtube.com/watch?v=${c.id}`,
           ],
           {
             signal,
@@ -194,9 +214,10 @@ class Downloader {
       this.update(job, t);
       let cover = null;
       let coverIsSquare = false;
-      if (t.cover) {
+      const coverUrl = t.cover || (job.type === 'album' ? job.cover : null); // album art for every album track
+      if (coverUrl) {
         try {
-          const r = await fetch(t.cover, { signal });
+          const r = await fetch(coverUrl, { signal });
           if (r.ok) {
             cover = path.join(tmpDir, 'cover.jpg');
             fs.writeFileSync(cover, Buffer.from(await r.arrayBuffer()));
@@ -209,14 +230,14 @@ class Downloader {
       await tag(path.join(tmpDir, audio), outFile, {
         title: t.title,
         artist,
-        album: t.album || (job.type === 'playlist' ? job.name : t.title),
+        album: t.album || (job.type === 'playlist' || job.type === 'album' ? job.name : t.title),
         album_artist: t.albumArtist || t.artists[0],
         date: t.year || '',
         track: t.trackNo || '',
-        comment: `DK.FM · youtube:${pick.id}${t.spotifyId ? ' · spotify:' + t.spotifyId : ''}`,
+        comment: `DK.FM · ${pick.id ? 'youtube:' + pick.id : pick.url}${t.spotifyId ? ' · spotify:' + t.spotifyId : ''}`,
       }, cover, coverIsSquare, fmt.ext, signal);
 
-      const [added] = await this.library.addFiles([outFile], { spotifyId: t.spotifyId, youtubeId: pick.id });
+      const [added] = await this.library.addFiles([outFile], { ...keyFields(t), ...(pick.id ? { youtubeId: pick.id } : {}) });
       t.trackId = added?.id;
       t.file = outFile;
       t.status = 'done';
@@ -252,13 +273,26 @@ class Downloader {
   }
 
   linkPlaylist(job) {
-    if (job.type === 'track') return;
-    const ids = job.tracks.filter((x) => x.status === 'done' && x.trackId).map((x) => x.trackId);
-    const pl = this.library.store.data.playlists.find((p) => p.id === 'sp-' + job.id);
-    // Keep any tracks from previous syncs that aren't part of this run.
-    const keep = (pl?.trackIds || []).filter((id) => !ids.includes(id));
-    this.library.upsertPlaylist({ id: 'sp-' + job.id, trackIds: [...ids, ...keep] });
+    this.mirror({ ...job, jobId: job.id });
   }
+
+  // Make the library playlist match the source: same songs, same order. If the source listing
+  // was truncated (Spotify's public page stops at 100), songs beyond it are kept, not dropped.
+  mirror(col) {
+    if (col.type !== 'playlist' && col.type !== 'album') return;
+    const pid = 'sp-' + (col.jobId || `${col.type}-${col.id}`);
+    const pl = this.library.store.data.playlists.find((p) => p.id === pid);
+    if (!pl) return;
+    const index = this.library.keyIndex();
+    const ordered = [];
+    for (const t of col.tracks) {
+      const id = t.trackId || index.get(t.sourceKey) || (t.spotifyId && index.get('sp:' + t.spotifyId)) || index.get(taKey(t.artists[0], t.title));
+      if (id && !ordered.includes(id)) ordered.push(id);
+    }
+    const trackIds = col.complete !== false ? ordered : [...ordered, ...pl.trackIds.filter((id) => !ordered.includes(id))];
+    this.library.upsertPlaylist({ id: pid, trackIds, lastSync: Date.now() });
+  }
+
 }
 
 function tag(input, output, meta, cover, coverIsSquare, ext, signal) {
@@ -296,10 +330,20 @@ function tag(input, output, meta, cover, coverIsSquare, ext, signal) {
   });
 }
 
+// Fields stored on the library track so future syncs recognise songs already downloaded.
+const keyFields = (t) => {
+  const out = {};
+  if (t.spotifyId) out.spotifyId = t.spotifyId;
+  if (t.youtubeId) out.youtubeId = t.youtubeId;
+  const key = t.sourceKey || (t.spotifyId ? 'sp:' + t.spotifyId : null);
+  if (key) out.sourceKey = key;
+  return out;
+};
+
 const publicTrack = (t) => {
   const { forcedVideoId, ...rest } = t;
   return rest;
 };
-const publicJob = (j) => ({ id: j.id, name: j.name, cover: j.cover, type: j.type, url: j.url, folder: j.folder, fmt: j.fmt, createdAt: j.createdAt, tracks: j.tracks.map(publicTrack) });
+const publicJob = (j) => ({ id: j.id, name: j.name, cover: j.cover, type: j.type, url: j.url, source: j.source, silent: j.silent, folder: j.folder, fmt: j.fmt, createdAt: j.createdAt, tracks: j.tracks.map(publicTrack) });
 
 module.exports = { Downloader, FORMATS };

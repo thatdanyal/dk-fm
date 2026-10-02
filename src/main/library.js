@@ -10,6 +10,16 @@ const AUDIO_EXT = new Set(['.mp3', '.m4a', '.aac', '.flac', '.ogg', '.opus', '.w
 
 const SCHEMA = 4; // bump to force re-reading tags after metadata changes
 
+// Artist + title fingerprint, so songs you already own (local files with no source IDs) are
+// recognised: "Me and My Guitar (feat. X) [Remastered]" by "A Boogie, Y" -> "a boogie|me and my guitar".
+const taKey = (artist, title) => {
+  const n = (s) => String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    // drop bracketed extras (feat., prod., remaster, video credits) unless they mark another version
+    .replace(/\s*[([]([^)\]]*)[)\]]/g, (_, inner) => (/remix|live|acoustic|version|edit|mix|slowed|sped|instrumental|cover/.test(inner) ? ' ' + inner : ''))
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+  return 'ta:' + n(String(artist || '').split(/,|;| feat\.? | & /i)[0]) + '|' + n(title);
+};
+
 const idFor = (p) => crypto.createHash('sha1').update(path.resolve(p).toLowerCase()).digest('hex').slice(0, 16);
 
 class Library {
@@ -179,11 +189,44 @@ class Library {
     await rm(path.join(app.getPath('userData'), 'waves'), (f) => ids.has(f.replace(/.bin$/, '')));
   }
 
+  // sourceKey / Spotify ID / YouTube ID -> track id, so syncs recognise songs already downloaded.
+  keyIndex() {
+    const m = new Map();
+    for (const t of Object.values(this.store.data.tracks)) {
+      if (t.sourceKey) m.set(t.sourceKey, t.id);
+      if (t.spotifyId) m.set('sp:' + t.spotifyId, t.id);
+      if (t.youtubeId) m.set('yt:' + t.youtubeId, t.id);
+      const ta = taKey(t.artist, t.title);
+      if (!m.has(ta)) m.set(ta, t.id);
+    }
+    return m;
+  }
+
+  removeByPath(p) {
+    const id = idFor(p);
+    if (this.store.data.tracks[id]) this.removeTrack(id);
+  }
+
   // ---- stats (plays, likes) ----
   bumpPlay(id) {
     const s = (this.store.data.stats[id] ||= { plays: 0, liked: false, lastPlayed: 0 });
     s.plays++;
     s.lastPlayed = Date.now();
+    this.store.save();
+    return s;
+  }
+
+  // Loudness from the renderer's analysis; saved quietly (no library broadcast).
+  setGain(id, db) {
+    const t = this.store.data.tracks[id];
+    if (!t || typeof db !== 'number') return;
+    t.gain = db;
+    this.store.save();
+  }
+
+  bumpSkip(id) {
+    const s = (this.store.data.stats[id] ||= { plays: 0, liked: false, lastPlayed: 0 });
+    s.skips = (s.skips || 0) + 1;
     this.store.save();
     return s;
   }
@@ -233,4 +276,4 @@ async function walk(dir, out, depth = 0) {
   }
 }
 
-module.exports = { Library, idFor, AUDIO_EXT };
+module.exports = { Library, idFor, AUDIO_EXT, taKey };

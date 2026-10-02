@@ -10,6 +10,7 @@ import { initEq, drawCurve } from './eq.js';
 import { initLyrics } from './lyrics.js';
 import { initBrowser, setView, focusSearch } from './browser.js';
 import { openSettings } from './settings.js';
+import { initPalette } from './palette.js';
 
 async function boot() {
   await state.load();
@@ -27,6 +28,7 @@ async function boot() {
   initShortcuts();
   initDragDrop();
   initUpdater();
+  initPalette({ toggleMini });
   themeEvents.on('change', () => { refreshColors(); invalidateWave(); drawCurve(); });
   layoutEvents.on('render', () => requestAnimationFrame(() => { drawWave(); drawCurve(); }));
 
@@ -85,7 +87,7 @@ async function toggleMini() {
 
 function initShortcuts() {
   addEventListener('keydown', (e) => {
-    const typing = e.target.closest('input, textarea, select') && e.target.type !== 'range' && e.target.type !== 'checkbox';
+    const typing = e.target.closest?.('input, textarea, select') && e.target.type !== 'range' && e.target.type !== 'checkbox';
     const mod = e.ctrlKey || e.metaKey;
     const k = e.key;
     if (mod && k === ',') { e.preventDefault(); return openSettings(); }
@@ -99,7 +101,7 @@ function initShortcuts() {
     if (mod && k === 'ArrowLeft') return player.prev();
     if (k === 'ArrowRight') return player.seek(player.time + (e.shiftKey ? 30 : 5));
     if (k === 'ArrowLeft') return player.seek(player.time - (e.shiftKey ? 30 : 5));
-    if (e.target.closest('.tracks')) return; // let lists use arrows/enter
+    if (e.target.closest?.('.tracks')) return; // let lists use arrows/enter
     if (k === 'ArrowUp') { e.preventDefault(); return player.setVolume(player.opts.volume + 0.05); }
     if (k === 'ArrowDown') { e.preventDefault(); return player.setVolume(player.opts.volume - 0.05); }
     if (mod || e.altKey) return;

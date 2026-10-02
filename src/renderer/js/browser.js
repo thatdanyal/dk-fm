@@ -1,7 +1,8 @@
-// Library browser: sources sidebar + views (tracks, albums, artists, playlists, Spotify import, downloads).
+// Library browser: sources sidebar + views (tracks, albums, artists, playlists, stats, import, downloads).
 import { player } from './player.js';
 import { state } from './state.js';
 import { $, h, fmtTime, fmtLong, coverUrl, thumbUrl, contextMenu, prompt, toast, debounce } from './util.js';
+import { statsView } from './stats.js';
 
 const ROW = 28;
 let view = { key: 'all' };
@@ -11,8 +12,10 @@ let selection = new Set();
 let anchor = null;
 let listIds = [];
 let renderRows = null;
-let spotifyResult = null;
-let spotifyBusy = false;
+let importResult = null; // collection or profile currently shown in the import view
+let importBusy = false;
+const SOURCE_ICON = { spotify: '◍', youtube: '▶', soundcloud: '☁' };
+const isImported = (p) => !!(p.sourceUrl || p.spotifyUrl);
 const jobs = new Map();
 let openSettings = () => {};
 
@@ -32,7 +35,8 @@ export function initBrowser({ onOpenSettings }) {
   });
   dk.on('yt:status', () => view.key === 'downloads' && renderEngine());
   renderSources();
-  setView({ key: state.tracks.size ? 'all' : 'all' });
+  dk.on('sync:new', ({ playlist, count }) => toast(`Auto-sync: ${count} new song${count === 1 ? '' : 's'} from "${playlist}"`));
+  setView({ key: 'all' });
 }
 
 export function setView(v) {
@@ -66,8 +70,8 @@ function renderSources() {
       title: label,
     }, h('span.ico', ico), h('span.lbl', label), cnt != null ? h('span.cnt', String(cnt)) : null);
 
-  const userPls = state.playlists.filter((p) => p.source !== 'spotify');
-  const spPls = state.playlists.filter((p) => p.source === 'spotify');
+  const userPls = state.playlists.filter((p) => !isImported(p));
+  const spPls = state.playlists.filter(isImported);
   box.replaceChildren(
     h('div.src-group', 'LOCAL'),
     src('all', '♫', 'All Tracks', all.length),
@@ -76,11 +80,12 @@ function renderSources() {
     src('recent', '◷', 'Recently Added'),
     src('albums', '◉', 'Albums'),
     src('artists', '☻', 'Artists'),
+    src('stats', '▣', 'Stats'),
     h('div.src.dim', { title: 'Scan another folder for music', on: { click: addFolder } }, h('span.ico', '+'), h('span.lbl', 'Add music folder')),
-    h('div.src-group', 'SPOTIFY'),
-    src('import', '⤓', 'Import Playlist'),
+    h('div.src-group', 'IMPORTED'),
+    src('import', '⤓', 'Import Music'),
     src('downloads', '⇣', 'Downloads', active || null),
-    ...spPls.map((p) => src('playlist', '▤', p.name, p.trackIds.length, { id: p.id, ctx: (e) => playlistMenu(e, p) })),
+    ...spPls.map((p) => src('playlist', SOURCE_ICON[p.source] || '▤', p.name, p.trackIds.length, { id: p.id, ctx: (e) => playlistMenu(e, p) })),
     h('div.src-group', 'PLAYLISTS', h('button', { title: 'New playlist', on: { click: newPlaylist } }, '+')),
     ...userPls.map((p) => src('playlist', '▤', p.name, p.trackIds.length, { id: p.id, dropPlaylist: true, ctx: (e) => playlistMenu(e, p) })),
     userPls.length ? null : h('div.src.dim', { on: { click: newPlaylist } }, h('span.ico', '+'), h('span.lbl', 'New playlist')),
@@ -134,20 +139,38 @@ function playlistMenu(e, p) {
     { label: 'Add to queue', action: () => player.enqueue(p.trackIds.filter((id) => state.track(id))) },
     '-',
     { label: 'Rename…', action: async () => { const n = await prompt('RENAME PLAYLIST', p.name); if (n) dk.library.upsertPlaylist({ id: p.id, name: n }); } },
-    p.spotifyUrl ? { label: 'Sync with Spotify', action: () => syncSpotify(p) } : null,
-    p.spotifyUrl ? { label: 'Open in Spotify', action: () => dk.shell.openExternal(p.spotifyUrl) } : null,
+    isImported(p) ? { label: 'Sync now', action: () => syncNow(p) } : null,
+    isImported(p) ? { label: `Auto-sync: ${p.autoSync === false ? 'OFF' : 'ON ✓'}`, action: () => dk.library.upsertPlaylist({ id: p.id, autoSync: p.autoSync === false }) } : null,
+    isImported(p) ? { label: 'Open original', action: () => dk.shell.openExternal(p.sourceUrl || p.spotifyUrl) } : null,
     { label: 'Delete playlist', action: () => { if (confirm(`Delete playlist "${p.name}"? (Files are kept.)`)) { dk.library.deletePlaylist(p.id); if (view.id === p.id) setView({ key: 'all' }); } } },
   ].filter(Boolean));
 }
 
-async function syncSpotify(p) {
+async function syncNow(p) {
   toast(`Syncing "${p.name}"…`);
   try {
-    const col = await dk.spotify.fetch(p.spotifyUrl);
-    await dk.dl.start(col);
-    setView({ key: 'downloads' });
+    const { added } = await dk.sync.one(p.id);
+    toast(added ? `${added} new song${added === 1 ? '' : 's'} downloading` : `"${p.name}" is up to date`);
   } catch (err) {
-    toast(err.message, { error: true });
+    toast(cleanErr(err), { error: true });
+  }
+}
+
+const cleanErr = (err) => String(err?.message || err).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+
+// "More like this": YouTube Music radio for a song, shown in the import view for picking.
+export async function radioFor(id) {
+  if (!state.track(id)) return;
+  importResult = null;
+  importBusy = true;
+  setView({ key: 'import' });
+  try {
+    importResult = prepare(await dk.importer.radio(id));
+  } catch (err) {
+    toast(cleanErr(err), { error: true });
+  } finally {
+    importBusy = false;
+    if (view.key === 'import') rerenderView();
   }
 }
 
@@ -183,8 +206,11 @@ function rerenderView() {
       const p = state.playlists.find((x) => x.id === view.id);
       if (!p) return setView({ key: 'all' });
       const ids = p.trackIds.filter((id) => state.track(id));
-      return trackView(box, { title: p.name, sub: p.source === 'spotify' ? 'SPOTIFY IMPORT' : 'PLAYLIST', coverUrl: p.cover, ids, playlist: p }, keepScroll);
+      const sub = isImported(p) ? `${(p.source || 'spotify').toUpperCase()} · ${p.autoSync === false ? 'SYNC OFF' : 'AUTO-SYNC'}` : 'PLAYLIST';
+      return trackView(box, { title: p.name, sub, coverUrl: p.cover, ids, playlist: p }, keepScroll);
     }
+    case 'stats':
+      return statsView(box);
     case 'import':
       return importView(box);
     case 'downloads':
@@ -365,11 +391,12 @@ function removeFromPlaylist(pl, ids) {
 function trackMenu(e, ids, playlist, i) {
   const one = ids.length === 1 ? state.track(ids[0]) : null;
   const liked = one && state.stat(one.id).liked;
-  const userPls = state.playlists.filter((p) => p.source !== 'spotify' || p.id === playlist?.id);
+  const userPls = state.playlists.filter((p) => !isImported(p) || p.id === playlist?.id);
   contextMenu(e.clientX, e.clientY, [
     { label: '▶ Play', action: () => player.playList(listIds, i) },
     { label: 'Play next', action: () => player.playNext(ids) },
     { label: 'Add to queue', action: () => player.enqueue(ids) },
+    { label: '✦ More like this', action: () => radioFor(ids[0]), disabled: !one },
     { label: 'Add to playlist', sub: [
       { label: '+ New playlist…', action: () => newPlaylist(ids) },
       ...(userPls.length ? ['-'] : []),
@@ -434,72 +461,155 @@ function card(img, c1, c2, onClick) {
     h('div.c1', c1), h('div.c2', c2));
 }
 
-// ---------------- Spotify import ----------------
+// ---------------- Import (Spotify / YouTube / SoundCloud / profiles / radio) ----------------
+function prepare(r) {
+  if (r.kind === 'profile') {
+    r.selected = new Set(r.playlists.map((_, i) => i));
+    return r;
+  }
+  const index = libraryKeys();
+  r.selected = new Set(r.tracks.map((t, i) => (inLibrary(index, t) ? null : i)).filter((i) => i != null));
+  return r;
+}
+
+// Artist + title fingerprint, so songs you already own (local files with no source IDs) are
+// recognised: "Me and My Guitar (feat. X) [Remastered]" by "A Boogie, Y" -> "a boogie|me and my guitar".
+const taKey = (artist, title) => {
+  const n = (s) => String(s || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    // drop bracketed extras (feat., prod., remaster, video credits) unless they mark another version
+    .replace(/\s*[([]([^)\]]*)[)\]]/g, (_, inner) => (/remix|live|acoustic|version|edit|mix|slowed|sped|instrumental|cover/.test(inner) ? ' ' + inner : ''))
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+  return 'ta:' + n(String(artist || '').split(/,|;| feat\.? | & /i)[0]) + '|' + n(title);
+};
+
+function libraryKeys() {
+  const m = new Set();
+  for (const t of state.tracks.values()) {
+    if (t.sourceKey) m.add(t.sourceKey);
+    if (t.spotifyId) m.add('sp:' + t.spotifyId);
+    if (t.youtubeId) m.add('yt:' + t.youtubeId);
+    m.add(taKey(t.artist, t.title));
+  }
+  return m;
+}
+
+const inLibrary = (index, t) => index.has(t.sourceKey) || (t.spotifyId && index.has('sp:' + t.spotifyId)) || (t.youtubeId && index.has('yt:' + t.youtubeId)) || index.has(taKey(t.artists[0], t.title));
+
+// Used by the command palette: open the import view and fetch a pasted link.
+export async function importLink(url) {
+  importResult = null;
+  importBusy = true;
+  setView({ key: 'import' });
+  try {
+    importResult = prepare(await dk.importer.fetch(url));
+    importResult.url ||= url;
+  } catch (err) {
+    toast(cleanErr(err), { error: true });
+  } finally {
+    importBusy = false;
+    if (view.key === 'import') rerenderView();
+  }
+}
+
 function importView(box) {
   dk.yt.ensure(); // first visit: fetch the download tools in the background (nothing is downloaded until then)
-  const input = h('input.pixel-input', { placeholder: 'Paste a Spotify playlist, album or track link…', value: spotifyResult?.url || '' });
+  const input = h('input.pixel-input', { placeholder: 'Paste a Spotify, YouTube, YouTube Music or SoundCloud link…', value: importResult?.url || '' });
   const go = async () => {
     const url = input.value.trim();
-    if (!url || spotifyBusy) return;
-    spotifyBusy = true;
+    if (!url || importBusy) return;
+    importBusy = true;
     btn.disabled = true;
     btn.textContent = 'LOADING…';
     try {
-      spotifyResult = await dk.spotify.fetch(url);
-      const owned = new Set([...state.tracks.values()].map((t) => t.spotifyId).filter(Boolean));
-      spotifyResult.selected = new Set(spotifyResult.tracks.map((t, i) => (owned.has(t.spotifyId) ? null : i)).filter((i) => i != null));
-      if (spotifyResult.warning) toast(spotifyResult.warning, { error: true });
+      importResult = prepare(await dk.importer.fetch(url));
+      importResult.url ||= url;
+      if (importResult.warning) toast(importResult.warning, { error: true });
     } catch (err) {
-      toast(err.message, { error: true });
+      toast(cleanErr(err), { error: true });
     } finally {
-      spotifyBusy = false;
+      importBusy = false;
       rerenderView();
     }
   };
   input.addEventListener('keydown', (e) => e.key === 'Enter' && go());
-  const btn = h('button.btn.primary', { on: { click: go } }, spotifyBusy ? 'LOADING…' : 'FETCH');
+  const btn = h('button.btn.primary', { disabled: importBusy, on: { click: go } }, importBusy ? 'LOADING…' : 'FETCH');
   const hasKeys = state.settings.spotifyClientId && state.settings.spotifyClientSecret;
   const top = h('div.import-box',
-    h('div.view-title.glow-text', 'IMPORT FROM SPOTIFY'),
+    h('div.view-title.glow-text', 'IMPORT MUSIC'),
     h('div.import-row', input, btn),
-    h('div.hint', 'DK.FM finds the best-matching studio version of each song on YouTube Music, downloads it, and tags it with Spotify’s metadata and cover art. ',
-      hasKeys ? 'Using your Spotify API keys (full playlists).' : h('span', 'Works without setup for up to 100 tracks. ', h('a', { on: { click: () => openSettings('spotify') } }, 'Add free Spotify API keys'), ' for unlimited playlist size and album info.')));
+    h('div.hint', 'Spotify playlists, albums, songs & profiles · YouTube / YouTube Music playlists, albums & videos · SoundCloud tracks & sets. Spotify songs are matched to the best studio version on YouTube Music. Imported playlists stay in sync automatically. ',
+      hasKeys ? '' : h('span', h('a', { on: { click: () => openSettings('spotify') } }, 'Add free Spotify API keys'), ' for playlists over 100 songs and whole-profile import.')));
 
-  if (!spotifyResult) {
-    box.replaceChildren(top, h('div.empty', h('span.px', 'PASTE A LINK ABOVE'), 'Playlists, albums and single tracks are supported. The playlist must be public.'));
-    setTimeout(() => input.focus());
+  if (!importResult) {
+    box.replaceChildren(top, importBusy
+      ? h('div.empty', h('span.px', 'TUNING IN…'), 'Fetching…')
+      : h('div.empty', h('span.px', 'PASTE A LINK ABOVE'), 'Tip: right-click any song → "More like this" to discover similar music.'));
+    if (!importBusy) setTimeout(() => input.focus());
     return;
   }
+  if (importResult.kind === 'profile') return profileView(box, top, importResult);
 
-  const r = spotifyResult;
-  const owned = new Map([...state.tracks.values()].filter((t) => t.spotifyId).map((t) => [t.spotifyId, t]));
-  const totalSel = r.selected.size;
-  const fmtName = { 'mp3-320': 'MP3 320', 'mp3-v0': 'MP3 V0', m4a: 'M4A/AAC' }[state.settings.downloadFormat] || 'MP3';
+  const r = importResult;
+  const index = libraryKeys();
+  const fmtName = { 'mp3-320': 'MP3 320', 'mp3-v0': 'MP3 V0', m4a: 'M4A' }[state.settings.downloadFormat] || 'M4A';
+  const label = (n) => `⇣ DOWNLOAD ${n} AS ${fmtName}`;
+  const viaText = { api: 'SPOTIFY API', embed: 'SPOTIFY PUBLIC PAGE', youtube: 'YOUTUBE', soundcloud: 'SOUNDCLOUD' }[r.via] || '';
   const head = h('div.view-head',
     r.cover ? h('img.vh-cover', { src: r.cover }) : null,
     h('div.vh-text',
       h('div.view-title.glow-text', r.name),
-      h('div.view-sub', `${r.type.toUpperCase()} · ${r.owner || ''} · ${r.tracks.length} TRACKS · VIA ${r.via === 'api' ? 'SPOTIFY API' : 'PUBLIC PAGE'}`),
+      h('div.view-sub', [r.type === 'radio' ? 'RADIO' : r.type.toUpperCase(), r.owner, `${r.tracks.length} TRACKS`, viaText].filter(Boolean).join(' · ')),
       !r.complete ? h('div.warn', '⚠ Spotify’s public page only lists the first 100 tracks. ', h('a', { style: { cursor: 'pointer', textDecoration: 'underline' }, on: { click: () => openSettings('spotify') } }, 'Add API keys'), ' to get them all.') : null),
     h('div.view-actions',
       h('button.btn', { on: { click: () => { r.selected = new Set(r.tracks.map((_, i) => i)); rerenderView(); } } }, 'ALL'),
       h('button.btn', { on: { click: () => { r.selected = new Set(); rerenderView(); } } }, 'NONE'),
-      h('button.btn.primary', { disabled: !totalSel, on: { click: async () => { await dk.dl.start(stripCollection(r), [...r.selected]); setView({ key: 'downloads' }); } } }, `⇣ DOWNLOAD ${totalSel} AS ${fmtName}`)));
+      h('button.btn.primary', { disabled: !r.selected.size, on: { click: async () => { await dk.dl.start(stripCollection(r), [...r.selected]); setView({ key: 'downloads' }); } } }, label(r.selected.size))));
 
   const list = h('div.tracks', { style: { position: 'relative' } },
     r.tracks.map((t, i) => {
-      const have = owned.get(t.spotifyId);
+      const have = inLibrary(index, t);
       const cb = h('input.chk', { type: 'checkbox', checked: r.selected.has(i), on: { change: (e) => { e.target.checked ? r.selected.add(i) : r.selected.delete(i); updateBtn(); } } });
       return h('label.irow', cb, h('span.t-num', String(i + 1)), t.cover ? h('img', { src: t.cover, loading: 'lazy' }) : h('span'),
-        h('span', t.title), h('span.t-dim', t.artists.join(', ')), h('span.t-time', fmtTime((t.durationMs || 0) / 1000)),
+        h('span', t.title), h('span.t-dim', t.artists.join(', ')), h('span.t-time', t.durationMs ? fmtTime(t.durationMs / 1000) : ''),
         h('span', have ? h('span.badge.ok', 'IN LIBRARY') : t.explicit ? h('span.badge', 'E') : ''));
     }));
   const updateBtn = () => {
     const b = head.querySelector('.btn.primary');
-    b.textContent = `⇣ DOWNLOAD ${r.selected.size} AS ${fmtName}`;
+    b.textContent = label(r.selected.size);
     b.disabled = !r.selected.size;
   };
   box.replaceChildren(top, head, list);
+}
+
+function profileView(box, top, r) {
+  const btnLabel = () => `⇣ IMPORT ${r.selected.size} PLAYLISTS`;
+  const head = h('div.view-head',
+    r.cover ? h('img.vh-cover', { src: r.cover }) : null,
+    h('div.vh-text', h('div.view-title.glow-text', r.name), h('div.view-sub', `SPOTIFY PROFILE · ${r.playlists.length} PUBLIC PLAYLISTS`)),
+    h('div.view-actions',
+      h('button.btn', { on: { click: () => { r.selected = new Set(r.playlists.map((_, i) => i)); rerenderView(); } } }, 'ALL'),
+      h('button.btn', { on: { click: () => { r.selected = new Set(); rerenderView(); } } }, 'NONE'),
+      h('button.btn.primary', { disabled: !r.selected.size, on: { click: () => importPlaylists(r) } }, btnLabel())));
+  const list = h('div.tracks', { style: { position: 'relative' } },
+    r.playlists.map((p, i) => h('label.irow',
+      h('input.chk', { type: 'checkbox', checked: r.selected.has(i), on: { change: (e) => { e.target.checked ? r.selected.add(i) : r.selected.delete(i); head.querySelector('.btn.primary').textContent = btnLabel(); } } }),
+      h('span.t-num', String(i + 1)), p.cover ? h('img', { src: p.cover, loading: 'lazy' }) : h('span'),
+      h('span', p.name), h('span.t-dim', p.owner || ''), h('span.t-time', `${p.total} ♪`), h('span'))));
+  box.replaceChildren(top, head, list);
+}
+
+async function importPlaylists(r) {
+  const picked = [...r.selected].map((i) => r.playlists[i]);
+  setView({ key: 'downloads' });
+  toast(`Importing ${picked.length} playlists — they’ll stay in sync automatically`);
+  for (const p of picked) {
+    try {
+      const col = prepare(await dk.importer.fetch(p.url));
+      await dk.dl.start(stripCollection(col), [...col.selected]);
+    } catch (err) {
+      toast(`${p.name}: ${cleanErr(err)}`, { error: true });
+    }
+  }
 }
 
 const stripCollection = (r) => {

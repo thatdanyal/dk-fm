@@ -1,6 +1,8 @@
-// Audio engine: two decks (crossfade + gapless preloading) -> 10-band EQ -> leveler -> master.
+// Audio engine: two decks (crossfade + gapless preloading), each with a per-song loudness trim
+// -> 10-band EQ -> optional leveler -> safety limiter -> master.
 import { Emitter, mediaUrl, coverUrl, toast } from './util.js';
 import { state } from './state.js';
+import { analyze } from './analysis.js';
 
 export const EQ_FREQS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 
@@ -11,8 +13,9 @@ class Deck {
     this.audio.preload = 'auto';
     this.audio.preservesPitch = true;
     this.node = ctx.createMediaElementSource(this.audio);
-    this.gain = ctx.createGain();
-    this.node.connect(this.gain).connect(dest);
+    this.trim = ctx.createGain(); // per-song volume matching
+    this.gain = ctx.createGain(); // crossfades / fades
+    this.node.connect(this.trim).connect(this.gain).connect(dest);
     this.trackId = null;
     this.audio.addEventListener('ended', () => player._onEnded(this));
     this.audio.addEventListener('error', () => player._onError(this));
@@ -63,6 +66,13 @@ class Player extends Emitter {
     this.leveler.release.value = 0.3;
     this.levelerMakeup = ctx.createGain();
     this.levelerMakeup.gain.value = 1.4;
+    // Transparent safety limiter, only in the chain when volume matching may boost quiet songs.
+    this.limiter = ctx.createDynamicsCompressor();
+    this.limiter.threshold.value = -1;
+    this.limiter.knee.value = 0;
+    this.limiter.ratio.value = 20;
+    this.limiter.attack.value = 0.002;
+    this.limiter.release.value = 0.12;
     this.post = ctx.createGain(); // tap point for analysers: after EQ, before volume
     this.master = ctx.createGain();
     this.analyser = ctx.createAnalyser();
@@ -100,7 +110,7 @@ class Player extends Emitter {
       this._load(this.index, { autoplay: false, startAt: s.position || 0 });
     }
     setInterval(() => this._saveSession(), 5000);
-    addEventListener('beforeunload', () => this._saveSession());
+    addEventListener('beforeunload', () => { this._finishListen(true); this._saveSession(); });
   }
 
   get deck() { return this.decks[this.active]; }
@@ -118,6 +128,31 @@ class Player extends Emitter {
     this._rewire();
   }
 
+  setMatchVolume(on) {
+    this.opts.matchVolume = on;
+    this._savePlayer();
+    this._rewire();
+    this.decks.forEach((d) => d.trackId && this._applyTrim(d, state.track(d.trackId)));
+  }
+
+  setSmartShuffle(on) {
+    this.opts.smartShuffle = on;
+    this._savePlayer();
+  }
+
+  _applyTrim(deck, t) {
+    const db = this.opts.matchVolume !== false && t?.gain != null ? t.gain : 0;
+    deck.trim.gain.setTargetAtTime(Math.pow(10, db / 20), this.ctx.currentTime, 0.08);
+  }
+
+  // Load loudness for a deck's song (analysing it once if needed) and apply it.
+  _matchDeck(deck, t) {
+    this._applyTrim(deck, t);
+    if (t && t.gain == null && this.opts.matchVolume !== false) {
+      analyze(t).then((r) => { if (r && deck.trackId === t.id) this._applyTrim(deck, { ...t, gain: r.gain }); }).catch(() => {});
+    }
+  }
+
   setNormalize(on) {
     this.opts.normalize = on;
     this._savePlayer();
@@ -125,10 +160,11 @@ class Player extends Emitter {
   }
 
   _rewire() {
-    const nodes = [this.bus, this.preamp, ...this.filters, this.leveler, this.levelerMakeup];
+    const nodes = [this.bus, this.preamp, ...this.filters, this.leveler, this.levelerMakeup, this.limiter];
     nodes.forEach((n) => n.disconnect());
     let chain = [this.bus, this.preamp, ...this.filters];
     if (this.opts?.normalize) chain = [...chain, this.leveler, this.levelerMakeup];
+    if (this.opts?.matchVolume !== false) chain.push(this.limiter);
     chain.push(this.post);
     for (let i = 0; i < chain.length - 1; i++) chain[i].connect(chain[i + 1]);
   }
@@ -143,7 +179,7 @@ class Player extends Emitter {
     if (doShuffle) {
       this.unshuffled = [...q];
       const first = q.splice(start, 1)[0];
-      q = [first, ...shuffleArr(q)];
+      q = [first, ...this._shuffle(q)];
       idx = 0;
       if (shuffle && !this.opts.shuffle) this.toggleShuffle(true, true);
     }
@@ -213,7 +249,7 @@ class Player extends Emitter {
       const cur = this.queue[this.index];
       if (on) {
         this.unshuffled = [...this.queue];
-        const upcoming = shuffleArr(this.queue.slice(this.index + 1));
+        const upcoming = this._shuffle(this.queue.slice(this.index + 1));
         this.queue = [...this.queue.slice(0, this.index + 1), ...upcoming];
       } else if (this.unshuffled) {
         this.queue = this.unshuffled;
@@ -268,7 +304,17 @@ class Player extends Emitter {
     if (!manual && this.opts.repeat === 'one') return this._load(this.index, { autoplay: true });
     let i = this.index + 1;
     if (i >= this.queue.length) {
-      if (this.opts.repeat === 'all' || manual) i = 0;
+      if (this.opts.repeat === 'all' || manual) {
+        i = 0;
+        // Shuffle + repeat: every song played once -> deal a fresh order for the next lap,
+        // without the last few songs coming straight back.
+        if (this.opts.shuffle && this.queue.length > 4) {
+          const recent = this.queue.slice(-3);
+          const fresh = this._shuffle(this.queue.filter((id) => !recent.includes(id)));
+          this.queue = [...fresh.slice(0, 3), ...this._shuffle(recent), ...fresh.slice(3)];
+          this.emit('queue');
+        }
+      }
       else {
         this.pause();
         this.deck.audio.currentTime = 0;
@@ -345,6 +391,7 @@ class Player extends Emitter {
   _load(index, { autoplay, startAt = 0 }) {
     const track = state.track(this.queue[index]);
     if (!track) return;
+    this._finishListen(false);
     if (this.fading) this._finishFade();
     const prevDeck = this.deck;
     // Use the preloaded deck if it already holds this track (gapless).
@@ -358,6 +405,7 @@ class Player extends Emitter {
     this._resetPreload();
     this.counted = false;
     this.listened = 0;
+    this._matchDeck(this.deck, track);
     const a = this.deck.audio;
     a.playbackRate = this.opts.speed || 1;
     this.deck.gain.gain.cancelScheduledValues(0);
@@ -380,6 +428,7 @@ class Player extends Emitter {
 
   _onEnded(deck) {
     if (deck !== this.deck) return;
+    this._finishListen(true);
     if (this.sleep?.mode === 'track') {
       this.sleep = null;
       this.emit('sleep');
@@ -411,6 +460,7 @@ class Player extends Emitter {
     this.emit('time');
     // Play counting: half the track or 30s, whichever comes first.
     this.listened += 0.25 * (a.playbackRate || 1);
+    if (!this.listenStart) { this.listenStart = Math.round(Date.now() / 1000); this.listenId = this.deck.trackId; }
     if (!this.counted && d && this.listened >= Math.min(30, d / 2)) {
       this.counted = true;
       const id = this.deck.trackId;
@@ -422,12 +472,19 @@ class Player extends Emitter {
     const xf = this.opts.crossfade || 0;
     if (xf > 0 && !this.fading && nextIdx != null && remaining <= xf && remaining > 0.3 && this.opts.repeat !== 'one') {
       this._startFade(nextIdx, remaining);
+    } else if (!this.fading && nextIdx != null && remaining < 45 && remaining > 12) {
+      // Measure the next song's loudness ahead of time so it starts at the right level.
+      const nt = state.track(this.queue[nextIdx]);
+      if (nt && nt.gain == null && this.opts.matchVolume !== false && this._preId !== nt.id) {
+        this._preId = nt.id;
+        analyze(nt).catch(() => {});
+      }
     } else if (!this.fading && nextIdx != null && remaining < 12) {
       // Gapless: get the next file decoded and ready.
       const nid = this.queue[nextIdx];
       if (this.other.trackId !== nid) {
         const t = state.track(nid);
-        if (t) this.other.load(t);
+        if (t) { this.other.load(t); this._applyTrim(this.other, t); }
       }
     }
     // OS media overlay only needs a position refresh about once a second.
@@ -445,10 +502,12 @@ class Player extends Emitter {
   _startFade(nextIdx, dur) {
     const track = state.track(this.queue[nextIdx]);
     if (!track) return;
+    this._finishListen(true);
     this.fading = true;
     const out = this.deck;
     const inc = this.other;
     if (inc.trackId !== track.id) inc.load(track);
+    this._matchDeck(inc, track);
     const t = this.ctx.currentTime;
     out.gain.gain.cancelScheduledValues(t);
     out.gain.gain.setValueAtTime(1, t);
@@ -484,8 +543,48 @@ class Player extends Emitter {
   }
 
   _savePlayer() {
-    const { volume, crossfade, speed, visualizer, visFps, shuffle, repeat, normalize } = this.opts;
-    state.set('player', { ...state.settings.player, volume, crossfade, speed, visualizer, visFps, shuffle, repeat, normalize });
+    const { volume, crossfade, speed, visualizer, visFps, shuffle, repeat, normalize, matchVolume, smartShuffle } = this.opts;
+    state.set('player', { ...state.settings.player, volume, crossfade, speed, visualizer, visFps, shuffle, repeat, normalize, matchVolume, smartShuffle });
+  }
+
+  // Close out the current listen for Stats and Smart Shuffle.
+  // ended = played to the end (or crossfaded out); otherwise it was left early.
+  _finishListen(ended) {
+    const id = this.listenId;
+    const secs = Math.round(this.listened || 0);
+    if (id && this.listenStart && secs >= 1) {
+      const skipped = !ended && !this.counted;
+      dk.history.add([id, this.listenStart, secs, skipped ? 1 : 0]);
+      if (skipped && secs < 30) dk.library.skipped(id).then((st) => { state.stats[id] = st; });
+    }
+    this.listenStart = 0;
+    this.listenId = null;
+  }
+
+  // Smart shuffle: a true permutation (every song once per lap), same-artist songs spread evenly
+  // apart, and songs you tend to skip drift toward the end.
+  _shuffle(ids) {
+    if (this.opts.smartShuffle === false) return shuffleArr([...ids]);
+    const groups = new Map();
+    for (const id of ids) {
+      const t = state.track(id);
+      const k = (t?.artist || '?').split(/,|;| feat\.? | & /i)[0].trim().toLowerCase();
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(id);
+    }
+    const placed = [];
+    for (const g of groups.values()) {
+      shuffleArr(g);
+      const n = g.length;
+      const offset = Math.random() / n;
+      g.forEach((id, i) => {
+        const st = state.stat(id);
+        const skipRate = (st.skips || 0) / ((st.plays || 0) + (st.skips || 0) + 2);
+        const pos = offset + i / n + (Math.random() - 0.5) * (0.2 / n) + skipRate * 0.6;
+        placed.push([pos, id]);
+      });
+    }
+    return placed.sort((a, b) => a[0] - b[0]).map((p) => p[1]);
   }
 
   setVisualizer(mode) {

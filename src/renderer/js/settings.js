@@ -90,6 +90,10 @@ const SECTIONS = {
           [['m4a', 'M4A · AAC original (recommended: smallest, no quality loss)'], ['mp3-v0', 'MP3 · V0 VBR (~245 kbps)'], ['mp3-320', 'MP3 · 320 kbps (largest, for old devices)']].map(([v, l]) => h('option', { value: v, selected: state.settings.downloadFormat === v }, l)))),
         row('Parallel downloads', h('select.pixel-select', { on: { change: (e) => state.set('downloadConcurrency', Number(e.target.value)) } },
           [1, 2, 3, 4, 5, 6].map((n) => h('option', { value: n, selected: state.settings.downloadConcurrency === n }, String(n)))))),
+      section('AUTO-SYNC',
+        row('Check imported playlists', h('select.pixel-select', { on: { change: (e) => state.set('syncHours', Number(e.target.value)) } },
+          [[1, 'Every hour'], [6, 'Every 6 hours'], [24, 'Once a day'], [0, 'Never (sync manually)']].map(([v, l]) => h('option', { value: v, selected: (state.settings.syncHours ?? 6) === v }, l)))),
+        h('div.dim', 'New songs added to an imported Spotify / YouTube / SoundCloud playlist download automatically, and the playlist keeps the same order. Turn it off per playlist by right-clicking it.')),
       section('ENGINE', row('Downloader', ver), h('div.dim', 'yt-dlp is fetched automatically on first use and updated daily so YouTube changes don’t break downloads.')),
     ];
   },
@@ -115,6 +119,8 @@ const SECTIONS = {
       section('PLAYBACK',
         row('Crossfade', h('select.pixel-select', { on: { change: (e) => player.setCrossfade(Number(e.target.value)) } }, [0, 2, 4, 6, 8, 10, 12].map((n) => h('option', { value: n, selected: (player.opts.crossfade || 0) === n }, n ? `${n} seconds` : 'Off (gapless)')))),
         row('Visualizer FPS', h('select.pixel-select', { on: { change: (e) => { setFps(Number(e.target.value)); player._savePlayer(); } } }, [[30, '30 fps (light, default)'], [60, '60 fps (smooth)'], [15, '15 fps (battery saver)']].map(([v, l]) => h('option', { value: v, selected: (player.opts.visFps || 30) === v }, l)))),
+        row('Smart shuffle', h('label.switch', h('input', { type: 'checkbox', checked: player.opts.smartShuffle !== false, on: { change: (e) => player.setSmartShuffle(e.target.checked) } }), h('span'), 'SPREAD OUT ARTISTS, PLAY OFTEN-SKIPPED SONGS LATER')),
+        row('Volume matching', h('label.switch', h('input', { type: 'checkbox', checked: player.opts.matchVolume !== false, on: { change: (e) => player.setMatchVolume(e.target.checked) } }), h('span'), 'EVERY SONG AT THE SAME LOUDNESS (MEASURED ONCE PER SONG)')),
         row('Leveler', h('label.switch', h('input', { type: 'checkbox', checked: !!player.opts.normalize, on: { change: (e) => player.setNormalize(e.target.checked) } }), h('span'), 'EVEN OUT LOUD/QUIET TRACKS'))),
     ];
   },
@@ -148,7 +154,7 @@ const SECTIONS = {
     const keys = [
       ['Space', 'Play / pause'], ['← / →', 'Seek 5s (Shift: 30s)'], ['Ctrl ← / →', 'Previous / next track'], ['↑ / ↓', 'Volume'],
       ['M', 'Mute'], ['S', 'Shuffle'], ['R', 'Repeat mode'], ['L', 'Like current track'], ['V', 'Cycle visualizer'],
-      ['Ctrl F', 'Search library'], ['Ctrl E', 'Edit layout'], ['Ctrl M', 'Mini player'], ['Ctrl ,', 'Settings'], ['Ctrl I', 'Import from Spotify'],
+      ['Ctrl K', 'Command palette: search & do anything'], ['Ctrl F', 'Search library'], ['Ctrl E', 'Edit layout'], ['Ctrl M', 'Mini player'], ['Ctrl ,', 'Settings'], ['Ctrl I', 'Import from Spotify'],
     ];
     return [section('KEYBOARD', h('div.keys', keys.flatMap(([k, d]) => [h('kbd', k), h('span', d)]))), h('div.dim', 'Media keys on your keyboard / headphones work too.')];
   },

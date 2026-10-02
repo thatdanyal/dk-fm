@@ -21,13 +21,22 @@ version of each song on YouTube Music.
 - Albums, artists, liked songs, most played, recently added, playlists
 - Fast virtualized lists, multi-select, search, sortable columns
 
-**Spotify import**
-- Paste a playlist, album or track link → preview → pick tracks → download
-- Matching prefers official YouTube Music audio, checks song length, and avoids live, remix,
-  sped-up and cover versions. Each choice is shown so you can swap it from a menu or paste your own link.
-- Files are tagged with Spotify's title, artist, album and cover art (MP3 320, MP3 V0 or M4A)
-- Imported playlists show up in the library; **Sync** later downloads only new songs
-- Works with no setup for up to 100 tracks; add free Spotify API keys in Settings for unlimited playlists
+**Import anything**
+- Paste a **Spotify** playlist / album / song / profile, **YouTube** or **YouTube Music** playlist / album / video, or **SoundCloud** track / set
+- Spotify songs are matched to the best studio version on YouTube Music (length-checked, avoids live / remix / sped-up / covers);
+  every pick is shown and can be swapped or replaced with your own link
+- **Auto-sync**: imported playlists are re-checked in the background (hourly / 6h / daily). New songs download by themselves
+  and the playlist keeps the source's order. Toggle per playlist with a right-click.
+- **More like this**: right-click any song for a 50-song radio from YouTube Music; songs you already own are recognised
+- **Whole Spotify profile**: import all of someone's public playlists at once (needs free Spotify API keys)
+- Saves as M4A (original AAC, no re-encode: smallest files, no quality loss) or MP3, tagged with title/artist/album/cover
+
+**Listening**
+- **Stats any time**: minutes, plays, top songs & artists, streak, peak hour, activity, most skipped (week / month / year / all)
+- **Smart shuffle**: every song once per lap, same-artist songs spread out, often-skipped songs play later
+- **Volume matching**: each song's loudness is measured once and evened out (plus a transparent safety limiter)
+- **Ctrl+K command palette**: search and do anything (songs, albums, artists, playlists, actions, themes, paste a link)
+- **Auto-add**: files dropped into your music folders appear instantly
 
 **Look**
 - Red Retro by default, plus Amber CRT, Green Phosphor, Synthwave, Ice, Mono and Paper themes, and a custom accent color

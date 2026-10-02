@@ -139,4 +139,28 @@ async function fetchSpotify(url, creds) {
   return { ...(await fetchViaEmbed(ref)), via: 'embed', url };
 }
 
-module.exports = { fetchSpotify, parseSpotifyUrl };
+// All public playlists of a Spotify user. Spotify only exposes this through the Web API.
+async function fetchSpotifyProfile(url, creds) {
+  const m = String(url).match(/open\.spotify\.com\/(?:intl-[a-z-]+\/)?user\/([^/?#]+)/);
+  if (!m) throw new Error('That is not a Spotify profile link.');
+  if (!creds?.clientId || !creds?.clientSecret) {
+    throw new Error('Importing a whole profile needs the free Spotify API keys (Settings → Spotify).');
+  }
+  const userId = decodeURIComponent(m[1]);
+  const token = await getApiToken(creds.clientId, creds.clientSecret);
+  const user = await api(token, `/users/${encodeURIComponent(userId)}`).catch(() => ({}));
+  const playlists = [];
+  let next = `/users/${encodeURIComponent(userId)}/playlists?limit=50`;
+  while (next) {
+    const page = await api(token, next);
+    for (const p of page.items) {
+      if (!p) continue;
+      playlists.push({ id: p.id, name: p.name, cover: bestImage(p.images), total: p.tracks?.total || 0, owner: p.owner?.display_name, url: p.external_urls?.spotify || `https://open.spotify.com/playlist/${p.id}` });
+    }
+    next = page.next;
+  }
+  if (!playlists.length) throw new Error('No public playlists on that profile.');
+  return { name: user.display_name || userId, cover: bestImage(user.images), playlists };
+}
+
+module.exports = { fetchSpotify, fetchSpotifyProfile, parseSpotifyUrl };

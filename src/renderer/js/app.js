@@ -29,6 +29,7 @@ async function boot() {
   initDragDrop();
   initUpdater();
   initPalette({ toggleMini });
+  initTray();
   themeEvents.on('change', () => { refreshColors(); invalidateWave(); drawCurve(); });
   layoutEvents.on('render', () => requestAnimationFrame(() => { drawWave(); drawCurve(); }));
 
@@ -113,6 +114,23 @@ function initShortcuts() {
       case 'v': return cycleMode();
     }
   });
+}
+
+// Keep the tray menu/tooltip in step with playback, and obey its buttons.
+function initTray() {
+  dk.on('win:visible', (v) => {
+    window.__dkHidden = !v;
+    document.dispatchEvent(new Event('visibilitychange')); // wakes the visualizer when shown again
+    if (v) requestAnimationFrame(drawWave);
+  });
+  const send = () => {
+    const t = player.current;
+    dk.tray.update({ title: t?.title || '', artist: t?.artist || '', playing: player.playing });
+  };
+  player.on('track', send);
+  player.on('state', send);
+  send();
+  dk.on('tray:cmd', (c) => ({ toggle: () => player.toggle(), next: () => player.next(true), prev: () => player.prev() })[c]?.());
 }
 
 function initDragDrop() {

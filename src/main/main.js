@@ -8,6 +8,7 @@ const { Downloader } = require('./downloader');
 const { fetchAny, radio } = require('./sources');
 const { Sync } = require('./sync');
 const { Watcher } = require('./watcher');
+const { TrayController, setStartAtLogin, launchedHidden } = require('./tray');
 const yt = require('./ytdlp');
 const updater = require('./updater');
 
@@ -42,7 +43,7 @@ if (!process.env.DKFM_NO_TUNING) {
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
 let win;
-let settings, library, downloader, upd, sync, watcher, history;
+let settings, library, downloader, upd, sync, watcher, history, trayCtl;
 
 const emit = (channel, payload) => {
   if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
@@ -61,6 +62,8 @@ function defaults() {
     downloadFormat: 'm4a', // original YouTube AAC, no re-encode: ~half the size of MP3 320
     downloadConcurrency: 3,
     syncHours: 6, // auto-sync imported playlists every N hours (0 = off)
+    closeToTray: true, // X hides to the tray; music keeps playing
+    startAtLogin: false,
     spotifyClientId: '',
     spotifyClientSecret: '',
     autoUpdate: true,
@@ -156,7 +159,13 @@ function createWindow() {
   });
   if (b?.maximized) win.maximize();
   win.loadURL('dkfm://app/index.html');
-  win.once('ready-to-show', () => win.show());
+  // Started at login: stay hidden in the tray until the user opens it.
+  win.once('ready-to-show', () => { if (!launchedHidden()) win.show(); });
+  trayCtl.attach(win);
+  // backgroundThrottling is off (audio timing), so the page can't tell it's hidden: tell it,
+  // so visualizer/animations stop while DK.FM sits in the tray or is minimized.
+  const vis = () => emit('win:visible', win.isVisible() && !win.isMinimized());
+  ['show', 'hide', 'minimize', 'restore'].forEach((ev) => win.on(ev, vis));
   const saveBounds = () => {
     if (win.isDestroyed() || miniMode) return;
     settings.set('windowBounds', { ...win.getNormalBounds(), maximized: win.isMaximized() });
@@ -194,6 +203,7 @@ function registerIpc() {
     settings.patch(patch);
     if ('musicFolders' in patch || 'downloadDir' in patch) watchFolders();
     if ('syncHours' in patch) sync.schedule();
+    if ('startAtLogin' in patch) setStartAtLogin(patch.startAtLogin);
     return settings.get();
   });
 
@@ -275,6 +285,7 @@ function registerIpc() {
   h('win:minimize', () => win.minimize());
   h('win:maximize', () => (win.isMaximized() ? win.unmaximize() : win.maximize()));
   h('win:close', () => win.close());
+  h('tray:update', (now) => trayCtl.update(now));
   h('win:mini', (on) => {
     miniMode = on;
     if (on) {
@@ -308,12 +319,7 @@ function uniqueFolders() {
   return [...new Set(list.map((f) => path.resolve(f)))].filter((f) => fs.existsSync(f));
 }
 
-app.on('second-instance', () => {
-  if (win) {
-    if (win.isMinimized()) win.restore();
-    win.focus();
-  }
-});
+app.on('second-instance', () => trayCtl?.show());
 
 app.whenReady().then(() => {
   try { fs.writeFileSync(crashFlag(), String(Date.now())); } catch {}
@@ -327,6 +333,8 @@ app.whenReady().then(() => {
   registerProtocol();
   registerIpc();
   upd = updater.init(emit, () => settings.get('autoUpdate'));
+  trayCtl = new TrayController({ getWindow: () => win, settings, emit });
+  trayCtl.init();
   createWindow();
   watchFolders();
   sync.start();

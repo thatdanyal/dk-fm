@@ -3,7 +3,7 @@
 // frame (instead of thousands of fillRect calls), runs at 30 fps by default, and the loop stops
 // entirely once playback is paused and the meters have fallen to rest.
 import { player } from './player.js';
-import { cssVar, h } from './util.js';
+import { cssVar, h, appHidden } from './util.js';
 
 export const MODES = [
   ['bars', 'BARS'],
@@ -108,7 +108,7 @@ function wake() {
 }
 
 function loop(now) {
-  if (!canvas.offsetParent || document.hidden || mode === 'off') {
+  if (!canvas.offsetParent || appHidden() || mode === 'off') {
     running = false;
     if (mode === 'off' && buf) { buf.fill(col.bg); blit(); }
     return;

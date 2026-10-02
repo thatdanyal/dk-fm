@@ -119,6 +119,9 @@ export function setRangeFill(input) {
   input.style.setProperty('--fill', ((input.value - min) / (max - min)) * 100 + '%');
 }
 
+// True when the window is hidden (tray), minimized or the page is backgrounded.
+export const appHidden = () => document.hidden || window.__dkHidden === true;
+
 export const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
 export const PLACEHOLDER_SVG = `<svg viewBox="0 0 16 16" shape-rendering="crispEdges"><g fill="currentColor"><rect x="3" y="2" width="10" height="12" fill="none" stroke="currentColor"/><rect x="5" y="5" width="2" height="2"/><rect x="9" y="5" width="2" height="2"/><rect x="5" y="9" width="6" height="1"/><rect x="4" y="11" width="8" height="1" opacity=".5"/></g></svg>`;

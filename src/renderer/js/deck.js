@@ -1,7 +1,7 @@
 // Now-playing deck: cover, LCD readout, waveform seek bar, transport, volume, speed, sleep timer.
 import { player } from './player.js';
 import { state } from './state.js';
-import { $, fmtTime, coverUrl, mediaUrl, setRangeFill, contextMenu, cssVar } from './util.js';
+import { $, fmtTime, coverUrl, mediaUrl, setRangeFill, contextMenu, cssVar, appHidden } from './util.js';
 import { analyze, cachedPeaks } from './analysis.js';
 
 const CASSETTE = `<svg viewBox="0 0 32 22" shape-rendering="crispEdges" style="color:var(--faint)"><g fill="currentColor">
@@ -107,7 +107,7 @@ function setupMarquee(text) {
   });
 }
 setInterval(() => {
-  if (!marquee.on || !player.playing || document.hidden) return;
+  if (!marquee.on || !player.playing || appHidden()) return;
   const loop = marquee.text + '   ·   ';
   marquee.pos = (marquee.pos + 1) % loop.length;
   $('#np-title').textContent = loop.slice(marquee.pos) + loop.slice(0, marquee.pos);
@@ -117,7 +117,7 @@ setInterval(() => {
 // compositor producing frames continuously).
 setInterval(() => {
   const dot = document.querySelector('.logo-dot');
-  if (dot) dot.style.visibility = player.playing && !document.hidden && dot.style.visibility !== 'hidden' ? 'hidden' : '';
+  if (dot) dot.style.visibility = player.playing && !appHidden() && dot.style.visibility !== 'hidden' ? 'hidden' : '';
 }, 600);
 
 function renderTime() {

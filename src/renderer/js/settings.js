@@ -12,6 +12,7 @@ const TABS = [
   ['downloads', 'Downloads'],
   ['spotify', 'Spotify'],
   ['playback', 'Playback'],
+  ['system', 'System'],
   ['updates', 'Updates'],
   ['keys', 'Shortcuts'],
   ['about', 'About'],
@@ -122,6 +123,18 @@ const SECTIONS = {
         row('Smart shuffle', h('label.switch', h('input', { type: 'checkbox', checked: player.opts.smartShuffle !== false, on: { change: (e) => player.setSmartShuffle(e.target.checked) } }), h('span'), 'SPREAD OUT ARTISTS, PLAY OFTEN-SKIPPED SONGS LATER')),
         row('Volume matching', h('label.switch', h('input', { type: 'checkbox', checked: player.opts.matchVolume !== false, on: { change: (e) => player.setMatchVolume(e.target.checked) } }), h('span'), 'EVERY SONG AT THE SAME LOUDNESS (MEASURED ONCE PER SONG)')),
         row('Leveler', h('label.switch', h('input', { type: 'checkbox', checked: !!player.opts.normalize, on: { change: (e) => player.setNormalize(e.target.checked) } }), h('span'), 'EVEN OUT LOUD/QUIET TRACKS'))),
+    ];
+  },
+
+  system() {
+    const isLinux = state.settings.platform === 'linux';
+    const osName = state.settings.platform === 'darwin' ? 'macOS' : 'Windows';
+    return [
+      section('WINDOW & TRAY',
+        h('div.set-row', toggle('closeToTray', 'CLOSE BUTTON KEEPS MUSIC PLAYING IN THE TRAY')),
+        h('div.dim', { style: { marginBottom: '12px' } }, 'The X button hides DK.FM to the tray (by the clock) instead of quitting. Right-click the tray icon for play/pause, next and Quit.'),
+        isLinux ? h('div.dim', 'Start-at-login is set up through your desktop environment on Linux.') : h('div.set-row', toggle('startAtLogin', `START WITH ${osName.toUpperCase()} (HIDDEN IN THE TRAY, PAUSED)`)),
+      ),
     ];
   },
 

@@ -37,6 +37,7 @@ version of each song on YouTube Music.
 - **Volume matching**: each song's loudness is measured once and evened out (plus a transparent safety limiter)
 - **Ctrl+K command palette**: search and do anything (songs, albums, artists, playlists, actions, themes, paste a link)
 - **Auto-add**: files dropped into your music folders appear instantly
+- **Tray**: the X button keeps music playing in the system tray (play/pause/next from the tray icon); optional start with Windows/macOS, hidden and paused
 
 **Look**
 - Red Retro by default, plus Amber CRT, Green Phosphor, Synthwave, Ice, Mono and Paper themes, and a custom accent color

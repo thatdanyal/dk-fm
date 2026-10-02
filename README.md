@@ -35,7 +35,12 @@ version of each song on YouTube Music.
 - **Movable layout**: click LAYOUT, then drag panels between columns, resize them, collapse or hide them
 
 **Auto-update**: every push to `main` builds installers for all three OSes and publishes a GitHub
-Release. Installed copies check every 30 minutes, download in the background and install on restart.
+Release (`v1.0.<build number>`). The app checks on launch and every 30 minutes. When a new
+version is out, an **Update available** popup shows the version and "What's new" (your commit
+messages since the last release), with **LATER** and **DOWNLOAD & RESTART** buttons. If someone
+picks LATER, an UPDATE button stays in the title bar and the popup returns on their next launch.
+
+Write clear commit subjects. They become the release notes your users read.
 
 ## Develop
 

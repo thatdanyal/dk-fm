@@ -1,6 +1,6 @@
 import { state } from './state.js';
 import { player } from './player.js';
-import { $, h, toast } from './util.js';
+import { $, h, toast, modal } from './util.js';
 import { applyTheme, THEMES, themeEvents } from './theme.js';
 import { initLayout, setEditing, isEditing, PANELS, isHidden, setHidden, showPanel, layoutEvents } from './layout.js';
 import { initDeck, drawWave } from './deck.js';
@@ -134,17 +134,49 @@ function initDragDrop() {
   });
 }
 
+// "Ask, then install": a popup announces each new release with its notes. LATER keeps a
+// pill in the title bar (and the popup returns next launch); DOWNLOAD & RESTART installs it.
 function initUpdater() {
   const pill = $('#btn-update');
-  const render = (s) => {
-    pill.classList.toggle('hidden', !['downloading', 'ready'].includes(s.state));
-    if (s.state === 'downloading') pill.textContent = `UPDATING ${s.percent || 0}%`;
-    if (s.state === 'ready') {
-      pill.textContent = `RESTART → v${s.next}`;
-      if (!initUpdater.notified) { initUpdater.notified = true; toast(`DK.FM v${s.next} downloaded — click the orange button to restart.`); }
-    }
+  const isMac = state.settings.platform === 'darwin';
+  let popup = null; // { close, render }
+  const dismissed = new Set();
+  let last = {};
+
+  const openPopup = (s) => {
+    if (popup) return popup.render(s);
+    const body = h('div.modal-pad');
+    const foot = h('div.modal-foot');
+    const render = (st) => {
+      const busy = st.state === 'downloading';
+      body.replaceChildren(...[
+        h('div', { style: { fontSize: '24px' } }, `DK.FM v${st.next}`, h('span.dim', `  (you have v${state.settings.version})`)),
+        st.notes ? h('div', h('div.px', { style: { color: 'var(--accent-2)', margin: '6px 0' } }, "WHAT'S NEW"),
+          h('div', { style: { whiteSpace: 'pre-wrap', maxHeight: '220px', overflowY: 'auto', color: 'var(--text)' } }, st.notes)) : null,
+        busy ? h('div', h('div.job-bar', h('i', { style: { width: (st.percent || 0) + '%' } })), h('div.dim', `Downloading… ${st.percent || 0}% — DK.FM will restart when done.`)) : null,
+        st.state === 'error' ? h('div.warn', 'Update failed: ' + st.error) : null,
+        isMac ? h('div.dim', 'macOS: this opens the download page — install the new .dmg over the old app.') : null].filter(Boolean));
+      foot.replaceChildren(
+        h('button.btn', { disabled: busy, on: { click: later } }, 'LATER'),
+        h('button.btn.primary', { disabled: busy, on: { click: () => dk.updater.download() } }, isMac ? 'GET UPDATE' : st.state === 'error' ? 'TRY AGAIN' : 'DOWNLOAD & RESTART'));
+    };
+    const later = () => { dismissed.add(last.next); popup?.close(); };
+    render(s);
+    const close = modal('UPDATE AVAILABLE', h('div', body, foot), { small: true, onClose: () => { dismissed.add(last.next); popup = null; } });
+    popup = { close, render };
   };
-  pill.onclick = () => dk.updater.install();
+
+  const render = (s) => {
+    last = { ...last, ...s };
+    const show = ['available', 'downloading', 'ready'].includes(s.state) || (s.state === 'error' && last.next);
+    pill.classList.toggle('hidden', !show);
+    if (s.state === 'available') pill.textContent = `UPDATE > v${s.next}`;
+    if (s.state === 'downloading') pill.textContent = `UPDATING ${s.percent || 0}%`;
+    if (s.state === 'ready') pill.textContent = `RESTART > v${s.next}`;
+    if (s.state === 'available' && !dismissed.has(s.next)) openPopup(last);
+    else popup?.render(last);
+  };
+  pill.onclick = () => (last.state === 'ready' ? dk.updater.install() : openPopup(last));
   dk.on('updater:status', render);
   dk.updater.status().then(render);
 }

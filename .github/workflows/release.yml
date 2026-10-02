@@ -22,16 +22,24 @@ jobs:
   create-release:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # "What's new" shown in the in-app update popup = commit subjects since the last release.
+      - name: Write release notes
+        run: |
+          PREV=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          RANGE=$([ -n "$PREV" ] && echo "$PREV..HEAD" || echo "HEAD")
+          git log $RANGE --no-merges --pretty=format:'- %s' | grep -v '^- Merge' | head -n 30 > notes.md || true
+          [ -s notes.md ] || echo "- Maintenance update" > notes.md
+          cat notes.md
+
       - name: Create release v${{ env.VERSION }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          gh release create "v$VERSION" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "DK.FM v$VERSION" \
-            --target "$GITHUB_SHA" \
-            --notes "Automatic build from ${GITHUB_SHA::7}: $(printf '%s' "$COMMIT_MSG" | head -n1)"
+          gh release create "v$VERSION"             --repo "$GITHUB_REPOSITORY"             --title "DK.FM v$VERSION"             --target "$GITHUB_SHA"             --notes-file notes.md
 
   build:
     needs: create-release

@@ -22,7 +22,7 @@ contextBridge.exposeInMainWorld('dk', {
   yt: { status: inv('yt:status'), ensure: inv('yt:ensure') },
   lyrics: inv('lyrics:get'),
   win: { minimize: inv('win:minimize'), maximize: inv('win:maximize'), close: inv('win:close'), mini: inv('win:mini'), onTop: inv('win:onTop') },
-  updater: { check: inv('updater:check'), install: inv('updater:install'), status: inv('updater:status') },
+  updater: { check: inv('updater:check'), download: inv('updater:download'), install: inv('updater:install'), status: inv('updater:status') },
   pathForFile: (f) => webUtils.getPathForFile(f),
   on: (ch, fn) => {
     const l = (_e, p) => fn(p);

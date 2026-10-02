@@ -231,6 +231,7 @@ function registerIpc() {
   h('win:onTop', (on) => win.setAlwaysOnTop(!!on));
 
   h('updater:check', () => upd.check());
+  h('updater:download', () => upd.download());
   h('updater:install', () => upd.install());
   h('updater:status', () => upd.status());
 }

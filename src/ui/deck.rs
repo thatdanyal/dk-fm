@@ -1,0 +1,293 @@
+//! Now-playing deck: cover, LCD readout, waveform seek bar, transport, volume, like, sleep timer.
+use super::theme::{px, vt};
+use super::widgets::{fill, fmt_time, frame_rect, with_alpha};
+use super::App;
+use crate::player::Sleep;
+use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use std::time::{Duration, Instant};
+
+const CASSETTE: &[&str] = &[
+    "################################",
+    "#..............................#",
+    "#..####################.......#.",
+    "#..#..................#.......#.",
+    "#..####################.......#.",
+    "#..............................#",
+    "#......##################......#",
+    "#......#..##........##..#......#",
+    "#......#..##........##..#......#",
+    "#......##################......#",
+    "#..............................#",
+    "#........##############........#",
+    "################################",
+];
+
+pub fn show(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let st = app.player.status();
+    let track = app.current_track();
+    egui::Frame::new().inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        // ---- cover + LCD
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(128.0), Sense::hover());
+            cover(app, ui, r, track.as_ref(), 256);
+            let w = ui.available_width();
+            let (lr, _) = ui.allocate_exact_size(Vec2::new(w, 128.0), Sense::hover());
+            lcd(app, ui, lr, &st, track.as_ref(), false);
+        });
+        // ---- waveform seek bar
+        let (wr, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), Sense::click_and_drag());
+        waveform(app, ui, wr, &resp, &st);
+        // ---- transport
+        ui.horizontal(|ui| {
+            let total = 46.0 + 46.0 + 62.0 + 46.0 + 46.0 + 8.0 * 4.0;
+            ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+            let opts = app.player.st.lock().opts.clone();
+            if tbtn(ui, &pal, "SHUF", Vec2::new(46.0, 30.0), opts.shuffle, false).clicked() {
+                app.player.toggle_shuffle();
+            }
+            if tbtn(ui, &pal, "⏮", Vec2::new(46.0, 40.0), false, false).clicked() {
+                app.player.prev();
+            }
+            if tbtn(ui, &pal, if st.playing { "⏸" } else { "▶" }, Vec2::new(62.0, 50.0), false, true).clicked() {
+                app.player.toggle();
+            }
+            if tbtn(ui, &pal, "⏭", Vec2::new(46.0, 40.0), false, false).clicked() {
+                app.player.next(true);
+            }
+            let rl = match opts.repeat.as_str() { "one" => "RPT1", _ => "RPT" };
+            if tbtn(ui, &pal, rl, Vec2::new(46.0, 30.0), opts.repeat != "off", false).clicked() {
+                app.player.cycle_repeat();
+            }
+        });
+        // ---- like / volume / sleep
+        ui.horizontal(|ui| {
+            let liked = track.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);
+            if icon(ui, &pal, "♥", liked).clicked() {
+                if let Some(t) = &track {
+                    app.lib.toggle_like(&t.id);
+                }
+            }
+            let (muted, mut vol) = { let s = app.player.st.lock(); (s.muted, s.opts.volume) };
+            if icon(ui, &pal, if muted || vol == 0.0 { "🔇" } else { "🔊" }, muted).clicked() {
+                app.player.toggle_mute();
+            }
+            let sw = (ui.available_width() - 96.0).max(40.0);
+            ui.spacing_mut().slider_width = sw;
+            if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false)).changed() {
+                app.player.set_volume(vol);
+            }
+            ui.label(egui::RichText::new(if muted { "--".to_string() } else { format!("{:>3}", (vol * 100.0).round()) }).color(pal.dim));
+            let sleep = app.player.st.lock().sleep;
+            let label = match sleep { Sleep::Off => "ZZ".to_string(), Sleep::EndOfTrack => "EOT".into(), Sleep::At(t) => format!("{}M", (t.saturating_duration_since(Instant::now()).as_secs() / 60 + 1)) };
+            let r = icon(ui, &pal, &label, sleep != Sleep::Off);
+            let id = ui.make_persistent_id("sleep-menu");
+            if r.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(id));
+            }
+            egui::popup::popup_below_widget(ui, id, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                ui.set_min_width(170.0);
+                if ui.button("Off").clicked() { app.player.set_sleep(Sleep::Off); }
+                if ui.button("End of this song").clicked() { app.player.set_sleep(Sleep::EndOfTrack); }
+                for m in [10u64, 15, 30, 45, 60, 90] {
+                    if ui.button(format!("{m} minutes")).clicked() {
+                        app.player.set_sleep(Sleep::At(Instant::now() + Duration::from_secs(m * 60)));
+                    }
+                }
+            });
+        });
+    });
+}
+
+pub fn show_mini(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let st = app.player.status();
+    let track = app.current_track();
+    ui.horizontal(|ui| {
+        let (r, _) = ui.allocate_exact_size(Vec2::splat(56.0), Sense::hover());
+        cover(app, ui, r, track.as_ref(), 128);
+        let (lr, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 56.0), Sense::hover());
+        lcd(app, ui, lr, &st, track.as_ref(), true);
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let w = ui.available_width() - 3.0 * 38.0 - 12.0;
+        let (wr, resp) = ui.allocate_exact_size(Vec2::new(w, 32.0), Sense::click_and_drag());
+        waveform(app, ui, wr, &resp, &st);
+        if tbtn(ui, &pal, "⏮", Vec2::new(34.0, 32.0), false, false).clicked() { app.player.prev(); }
+        if tbtn(ui, &pal, if st.playing { "⏸" } else { "▶" }, Vec2::new(38.0, 34.0), false, true).clicked() { app.player.toggle(); }
+        if tbtn(ui, &pal, "⏭", Vec2::new(34.0, 32.0), false, false).clicked() { app.player.next(true); }
+    });
+}
+
+fn cover(app: &mut App, ui: &mut Ui, r: Rect, t: Option<&crate::store::Track>, size: u32) {
+    let pal = app.pal;
+    fill(ui.painter(), r, pal.bg);
+    let tex = t.and_then(|t| t.cover.clone()).and_then(|c| app.covers.get(ui.ctx(), app.lib.cover_path(&c), &c, size));
+    match tex {
+        Some(id) => {
+            ui.painter().image(id, r.shrink(2.0), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        }
+        None => {
+            // pixel-art cassette placeholder
+            let cell = (r.width() * 0.7 / 32.0).floor().max(1.0);
+            let origin = r.center() - Vec2::new(16.0 * cell, 6.5 * cell);
+            for (y, row) in CASSETTE.iter().enumerate() {
+                for (x, ch) in row.chars().enumerate() {
+                    if ch == '#' {
+                        fill(ui.painter(), Rect::from_min_size(origin + Vec2::new(x as f32 * cell, y as f32 * cell), Vec2::splat(cell)), pal.faint);
+                    }
+                }
+            }
+        }
+    }
+    frame_rect(ui.painter(), r, 2.0, pal.line_hi);
+}
+
+fn codec_label(t: &crate::store::Track) -> String {
+    let c = t.codec.to_uppercase();
+    if c.contains("LAYER 3") || c == "MPEG" { "MP3".into() } else { c.rsplit('/').next().unwrap_or("").split(' ').next().unwrap_or("").to_string() }
+}
+
+fn lcd(app: &App, ui: &mut Ui, r: Rect, st: &crate::audio::Status, t: Option<&crate::store::Track>, mini: bool) {
+    let pal = app.pal;
+    let p = ui.painter_at(r);
+    fill(&p, r, pal.lcd_bg);
+    frame_rect(&p, r, 2.0, pal.line_hi);
+    let x = r.left() + 8.0;
+    let glow = app.settings.lock().glow;
+    let text = |pos: Pos2, s: &str, f: egui::FontId, c: Color32| {
+        if glow {
+            p.text(pos + Vec2::new(0.0, 0.0), Align2::LEFT_TOP, s, f.clone(), with_alpha(c, 50));
+        }
+        p.text(pos, Align2::LEFT_TOP, s, f, c);
+    };
+    if !mini {
+        let state = if st.playing { "> PLAY" } else if t.is_some() { "|| PAUSE" } else { "STOP" };
+        text(Pos2::new(x, r.top() + 6.0), state, px(6.0), pal.lcd);
+        if let Some(t) = t {
+            let sw = p.layout_no_wrap(state.to_string(), px(6.0), pal.lcd).size().x;
+            let full = [t.bitrate.map(|b| format!("{b} KBPS")), t.sample_rate.map(|s| format!("{:.1} KHZ", s as f32 / 1000.0)), Some(codec_label(t))].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            let short = [t.bitrate.map(|b| format!("{b}K")), Some(codec_label(t))].into_iter().flatten().collect::<Vec<_>>().join(" ");
+            let fits = |s: &str| p.layout_no_wrap(s.to_string(), px(6.0), pal.lcd).size().x + sw + 24.0 < r.width();
+            let tech = if fits(&full) { full } else if fits(&short) { short } else { String::new() };
+            p.text(Pos2::new(r.right() - 8.0, r.top() + 6.0), Align2::RIGHT_TOP, tech, px(6.0), with_alpha(pal.lcd, 200));
+        }
+    }
+    let ty = if mini { r.top() + 4.0 } else { r.top() + 20.0 };
+    let big = if mini { 26.0 } else { 46.0 };
+    let el = fmt_time(st.position);
+    let g = p.layout_no_wrap(el.clone(), vt(big), pal.lcd);
+    let w = g.size().x;
+    text(Pos2::new(x, ty), &el, vt(big), pal.lcd);
+    p.text(Pos2::new(x + w + 6.0, ty + big * 0.42), Align2::LEFT_TOP, format!("/ {}", fmt_time(if st.duration > 0.0 { st.duration } else { t.map(|t| t.duration).unwrap_or(0.0) })), vt(big * 0.55), with_alpha(pal.lcd, 150));
+    // title: LCD-style marquee stepping one character at a time
+    let title = t.map(|t| t.title.clone()).unwrap_or_else(|| "NO TRACK LOADED".into());
+    let tf = vt(if mini { 20.0 } else { 25.0 });
+    let tw = p.layout_no_wrap(title.clone(), tf.clone(), pal.text).size().x;
+    let avail = r.width() - 16.0;
+    let shown = if tw > avail && st.playing {
+        let lp = format!("{title}   ·   ");
+        let chars: Vec<char> = lp.chars().collect();
+        let step = ((ui.ctx().input(|i| i.time) * 4.0) as usize) % chars.len();
+        chars[step..].iter().chain(chars[..step].iter()).collect::<String>()
+    } else {
+        title
+    };
+    let ty2 = if mini { r.top() + 30.0 } else { r.top() + 68.0 };
+    p.text(Pos2::new(x, ty2), Align2::LEFT_TOP, shown, tf, pal.text);
+    if !mini {
+        p.text(Pos2::new(x, r.top() + 94.0), Align2::LEFT_TOP, t.map(|t| t.artist.clone()).unwrap_or_else(|| "INSERT A TAPE".into()), vt(19.0), pal.text);
+        if let Some(t) = t {
+            let al = [t.album.clone(), t.year.map(|y| y.to_string()).unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+            p.text(Pos2::new(x, r.top() + 110.0), Align2::LEFT_TOP, al, vt(16.0), with_alpha(pal.text, 140));
+        }
+    }
+}
+
+fn waveform(app: &mut App, ui: &mut Ui, r: Rect, resp: &egui::Response, st: &crate::audio::Status) {
+    let pal = app.pal;
+    let p = ui.painter_at(r);
+    fill(&p, r, pal.bg);
+    frame_rect(&p, r, 2.0, pal.line_hi);
+    let inner = r.shrink(3.0);
+    let dur = if st.duration > 0.0 { st.duration } else { 0.0 };
+    let prog = if dur > 0.0 { (st.position / dur).clamp(0.0, 1.0) as f32 } else { 0.0 };
+    let hover = resp.hover_pos().map(|h| ((h.x - inner.left()) / inner.width()).clamp(0.0, 1.0));
+    let peaks = st.current.as_ref().and_then(|id| app.player.analyzer.get(id));
+    let mid = inner.center().y;
+    let bars = (inner.width() / 3.0) as usize;
+    for i in 0..bars {
+        let f = i as f32 / bars as f32;
+        let amp = match &peaks {
+            Some(pk) => {
+                let a = (f * pk.len() as f32) as usize;
+                let b = (((i + 1) as f32 / bars as f32) * pk.len() as f32) as usize;
+                let m = pk[a.min(pk.len() - 1)..b.max(a + 1).min(pk.len())].iter().copied().max().unwrap_or(0) as f32 / 255.0;
+                (m.powf(1.6) * (inner.height() / 2.0 - 1.0)).max(1.0)
+            }
+            None => 1.0,
+        };
+        let c = if f <= prog { pal.accent } else if hover.map(|h| f <= h).unwrap_or(false) { with_alpha(pal.accent2, 150) } else { pal.line_hi };
+        let x = inner.left() + i as f32 * 3.0;
+        fill(&p, Rect::from_min_max(Pos2::new(x, mid - amp), Pos2::new(x + 2.0, mid + amp)), c);
+    }
+    let px_ = inner.left() + prog * inner.width();
+    p.vline(px_, inner.y_range(), Stroke::new(1.0_f32, pal.text));
+    if let Some(h) = hover {
+        let tip = fmt_time(h as f64 * dur);
+        let pos = Pos2::new(inner.left() + h * inner.width(), r.top() - 2.0);
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("seek-tip")));
+        let g = painter.layout_no_wrap(tip, vt(18.0), pal.ink);
+        let br = Rect::from_center_size(pos - Vec2::new(0.0, g.size().y / 2.0 + 2.0), g.size() + Vec2::new(8.0, 2.0));
+        fill(&painter, br, pal.accent);
+        painter.galley(br.min + Vec2::new(4.0, 1.0), g, pal.ink);
+    }
+    if (resp.clicked() || resp.dragged()) && dur > 0.0 {
+        if let Some(h) = resp.interact_pointer_pos() {
+            let f = ((h.x - inner.left()) / inner.width()).clamp(0.0, 1.0);
+            app.player.seek(f as f64 * dur);
+        }
+    }
+    if peaks.is_none() && st.current.is_some() {
+        if let Some(id) = &st.current {
+            app.player.analyzer.request(id);
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(400));
+    }
+}
+
+/// Transport button (big play button = filled accent).
+pub fn tbtn(ui: &mut Ui, pal: &super::theme::Pal, label: &str, size: Vec2, on: bool, primary: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(size + Vec2::splat(3.0), Sense::click());
+    let pressed = resp.is_pointer_button_down_on();
+    let body = Rect::from_min_size(r.min + if pressed { Vec2::splat(3.0) } else { Vec2::ZERO }, size);
+    let p = ui.painter();
+    if !pressed {
+        fill(p, body.translate(Vec2::splat(3.0)), pal.shadow);
+    }
+    let (bg, fg, br) = if primary {
+        (pal.accent, pal.ink, pal.accent)
+    } else if on {
+        (pal.accent2, pal.ink, pal.accent2)
+    } else {
+        (pal.panel_hi, if resp.hovered() { pal.accent } else { pal.text }, if resp.hovered() { pal.accent } else { pal.line_hi })
+    };
+    fill(p, body, bg);
+    frame_rect(p, body, 2.0, br);
+    let font = if label.chars().all(|c| c.is_ascii_alphanumeric()) { px(7.0) } else { vt(if primary { 30.0 } else { 24.0 }) };
+    p.text(body.center(), Align2::CENTER_CENTER, label, font, fg);
+    resp
+}
+
+fn icon(ui: &mut Ui, pal: &super::theme::Pal, label: &str, on: bool) -> egui::Response {
+    let font = if label.chars().all(|c| c.is_ascii_alphanumeric()) { px(7.0) } else { vt(20.0) };
+    let g = ui.painter().layout_no_wrap(label.to_string(), font.clone(), pal.text);
+    let (r, resp) = ui.allocate_exact_size(Vec2::new(g.size().x.max(16.0) + 10.0, 26.0), Sense::click());
+    if resp.hovered() {
+        frame_rect(ui.painter(), r, 2.0, pal.line_hi);
+    }
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, label, font, if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
+    resp
+}

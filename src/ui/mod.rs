@@ -1,0 +1,855 @@
+//! The DK.FM window: custom title bar, dockable panels (egui_dock), overlays and shortcuts.
+//! The GUI only repaints when something changes (or ~4 Hz while playing / at the visualizer
+//! frame rate when the scope is visible), which is what keeps CPU and RAM low.
+pub mod browser;
+pub mod deck;
+pub mod eqpanel;
+pub mod import;
+pub mod lyrics;
+pub mod palette;
+pub mod queue;
+pub mod scope;
+pub mod settings;
+pub mod stats;
+pub mod theme;
+pub mod widgets;
+
+use crate::downloader::Downloader;
+use crate::library::Library;
+use crate::player::Player;
+use crate::store::Settings;
+use crate::system::{self, Media, Tray, UpdState};
+use crate::watcher::FolderWatcher;
+use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Order, Rect, Sense, Vec2, ViewportCommand};
+use egui_dock::{DockArea, DockState, NodeIndex};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use theme::{px, vt, Pal};
+use widgets::{fill, tb_button};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum Tab {
+    Deck,
+    Scope,
+    Library,
+    Queue,
+    Eq,
+    Lyrics,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 6] = [Tab::Deck, Tab::Scope, Tab::Library, Tab::Queue, Tab::Eq, Tab::Lyrics];
+    pub fn name(&self) -> &'static str {
+        match self {
+            Tab::Deck => "DECK",
+            Tab::Scope => "SCOPE",
+            Tab::Library => "LIBRARY",
+            Tab::Queue => "QUEUE",
+            Tab::Eq => "EQUALIZER",
+            Tab::Lyrics => "LYRICS",
+        }
+    }
+}
+
+pub enum Modal {
+    Settings(settings::SetTab),
+    Prompt { title: String, text: String, action: PromptAction },
+    Update,
+}
+
+#[derive(Clone)]
+pub enum PromptAction {
+    NewPlaylist(Vec<String>),
+    RenamePlaylist(String),
+    PasteYoutube(String, usize),
+}
+
+pub struct App {
+    pub lib: Arc<Library>,
+    pub player: Arc<Player>,
+    pub dl: Arc<Downloader>,
+    pub watcher: Arc<FolderWatcher>,
+    pub settings: Arc<Mutex<Settings>>,
+    pub settings_dirty: Arc<AtomicBool>,
+    pub pal: Pal,
+    theme_key: String,
+    dock: DockState<Tab>,
+    pub layout_edit: bool,
+    pub mini: bool,
+    normal_size: Option<Vec2>,
+    pub covers: widgets::Covers,
+    pub browser: browser::BrowserState,
+    pub import: import::ImportState,
+    pub scope: scope::ScopeState,
+    pub lyrics: lyrics::LyricsState,
+    pub stats: stats::StatsState,
+    pub toasts: Vec<(String, Instant, bool)>,
+    pub modal: Option<Modal>,
+    pub palette: Option<palette::PaletteState>,
+    pub update: Arc<Mutex<UpdState>>,
+    update_dismissed: Option<String>,
+    tray: Option<Tray>,
+    media: Option<Media>,
+    last_flush: Instant,
+    started_hidden: bool,
+    frames: u64,
+    pub drop_hover: bool,
+}
+
+pub fn default_dock() -> DockState<Tab> {
+    let mut d = DockState::new(vec![Tab::Library]);
+    let s = d.main_surface_mut();
+    let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
+    let [_deck, scope] = s.split_below(left, 0.46, vec![Tab::Scope, Tab::Eq]);
+    let _ = scope;
+    let [_lib, right] = s.split_right(lib, 0.72, vec![Tab::Queue]);
+    let _ = s.split_below(right, 0.58, vec![Tab::Lyrics]);
+    d
+}
+
+impl App {
+    pub fn new(cc: &eframe::CreationContext, lib: Arc<Library>, player: Arc<Player>, dl: Arc<Downloader>, watcher: Arc<FolderWatcher>, settings: Arc<Mutex<Settings>>, settings_dirty: Arc<AtomicBool>, hidden: bool) -> Self {
+        theme::install_fonts(&cc.egui_ctx);
+        let (tkey, accent, dock_json) = {
+            let s = settings.lock();
+            (s.theme.clone(), s.accent.clone(), s.dock.clone())
+        };
+        let pal = theme::palette(&tkey, accent.as_deref());
+        theme::apply(&cc.egui_ctx, &pal);
+        *system::CTX.lock() = Some(cc.egui_ctx.clone());
+
+        // window handle for tray / media keys / reliable show-hide on Windows
+        #[cfg(windows)]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if let Ok(h) = cc.window_handle() {
+                if let RawWindowHandle::Win32(w) = h.as_raw() {
+                    system::HWND.store(w.hwnd.get(), Ordering::Relaxed);
+                }
+            }
+        }
+        let ctx = cc.egui_ctx.clone();
+        *player.repaint.lock() = Some(Box::new(move || ctx.request_repaint()));
+        let ctx = cc.egui_ctx.clone();
+        *dl.repaint.lock() = Some(Box::new(move || ctx.request_repaint()));
+        *crate::single::WAKE.lock() = Some(Box::new(system::show_window));
+        std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(15)); // startup (scan, first frames) is done
+            system::trim_memory();
+        });
+        let (p, l) = (player.clone(), lib.clone());
+        *crate::single::COMMAND.lock() = Some(Box::new(move |cmd| match cmd {
+            "play-pause" if p.status().current.is_none() && p.current_id().is_none() => {
+                // nothing loaded yet: shuffle the whole library
+                let ids: Vec<String> = l.data.read().tracks.keys().cloned().collect();
+                p.play_list(ids, 0, Some(true));
+            }
+            "play-pause" => p.toggle(),
+            "next" => p.next(true),
+            "prev" => p.prev(),
+            _ => {}
+        }));
+
+        let dock = dock_json.and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok()).filter(|d| d.iter_all_tabs().count() > 0).unwrap_or_else(default_dock);
+        let tray = Tray::new(player.clone());
+        let media = Some(Media::new(player.clone()));
+        let update = Arc::new(Mutex::new(UpdState::Idle));
+        let auto = settings.lock().auto_update;
+        if auto {
+            let u = update.clone();
+            let ctx = cc.egui_ctx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(4));
+                loop {
+                    *u.lock() = match system::check_update() {
+                        Ok(Some(up)) => UpdState::Available(up),
+                        Ok(None) => UpdState::Latest,
+                        Err(e) => UpdState::Error(e),
+                    };
+                    ctx.request_repaint();
+                    std::thread::sleep(Duration::from_secs(30 * 60));
+                }
+            });
+        }
+        let mut covers = widgets::Covers::new();
+        covers.ctx = Some(cc.egui_ctx.clone());
+        Self {
+            lib,
+            player,
+            dl,
+            watcher,
+            settings,
+            settings_dirty,
+            pal,
+            theme_key: tkey,
+            dock,
+            layout_edit: false,
+            mini: false,
+            normal_size: None,
+            covers,
+            browser: browser::BrowserState::default(),
+            import: import::ImportState::default(),
+            scope: scope::ScopeState::new(),
+            lyrics: lyrics::LyricsState::default(),
+            stats: stats::StatsState::default(),
+            toasts: Vec::new(),
+            modal: None,
+            palette: None,
+            update,
+            update_dismissed: None,
+            tray,
+            media,
+            last_flush: Instant::now(),
+            started_hidden: hidden,
+            frames: 0,
+            drop_hover: false,
+        }
+    }
+
+    pub fn toast(&mut self, msg: impl Into<String>) {
+        self.toasts.push((msg.into(), Instant::now(), false));
+    }
+    pub fn toast_err(&mut self, msg: impl Into<String>) {
+        self.toasts.push((msg.into(), Instant::now(), true));
+    }
+
+    pub fn set_theme(&mut self, ctx: &egui::Context) {
+        let (k, a) = { let s = self.settings.lock(); (s.theme.clone(), s.accent.clone()) };
+        self.theme_key = k.clone();
+        self.pal = theme::palette(&k, a.as_deref());
+        theme::apply(ctx, &self.pal);
+        self.scope.invalidate();
+        self.settings_dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn edit_settings(&self, f: impl FnOnce(&mut Settings)) {
+        f(&mut self.settings.lock());
+        self.settings_dirty.store(true, Ordering::Relaxed);
+    }
+
+    pub fn music_folders(&self) -> Vec<PathBuf> {
+        let s = self.settings.lock();
+        let mut v: Vec<PathBuf> = s.music_folders.iter().map(PathBuf::from).collect();
+        v.push(PathBuf::from(&s.download_dir));
+        v.sort();
+        v.dedup();
+        v.into_iter().filter(|p| p.exists()).collect()
+    }
+
+    pub fn rescan(&self) {
+        let _ = std::fs::create_dir_all(&self.settings.lock().download_dir);
+        let f = self.music_folders();
+        self.lib.scan(f.clone());
+        self.watcher.watch(&f);
+    }
+
+    pub fn show_panel(&mut self, tab: Tab) {
+        if let Some(loc) = self.dock.find_tab(&tab) {
+            self.dock.set_active_tab(loc);
+        } else {
+            self.dock.main_surface_mut().push_to_first_leaf(tab);
+        }
+        self.save_dock();
+    }
+
+    pub fn toggle_panel(&mut self, tab: Tab) {
+        if let Some(loc) = self.dock.find_tab(&tab) {
+            if self.dock.iter_all_tabs().count() > 1 {
+                self.dock.remove_tab(loc);
+            }
+        } else {
+            self.dock.main_surface_mut().push_to_first_leaf(tab);
+        }
+        self.save_dock();
+    }
+
+    pub fn reset_layout(&mut self) {
+        self.dock = default_dock();
+        self.save_dock();
+    }
+
+    fn save_dock(&self) {
+        let v = serde_json::to_value(&self.dock).ok();
+        self.edit_settings(|s| s.dock = v);
+    }
+
+    pub fn toggle_mini(&mut self, ctx: &egui::Context) {
+        self.mini = !self.mini;
+        if self.mini {
+            self.normal_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
+            ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(460.0, 172.0)));
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+        } else {
+            ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.normal_size.unwrap_or(Vec2::new(1360.0, 860.0))));
+        }
+    }
+
+    pub fn current_track(&self) -> Option<crate::store::Track> {
+        self.player.current_id().and_then(|id| self.lib.track(&id))
+    }
+
+    // ------------------------------------------------------------ title bar
+    fn titlebar(&mut self, ctx: &egui::Context) {
+        let pal = self.pal;
+        egui::TopBottomPanel::top("titlebar").exact_height(if self.mini { 28.0 } else { 38.0 }).frame(egui::Frame::new().fill(pal.bg2).inner_margin(egui::Margin { left: 10, right: 0, top: 0, bottom: 0 })).show(ctx, |ui| {
+            let full = ui.max_rect();
+            let drag = ui.interact(full, Id::new("tb-drag"), Sense::click_and_drag());
+            if drag.drag_started() {
+                ctx.send_viewport_cmd(ViewportCommand::StartDrag);
+            }
+            if drag.double_clicked() && !self.mini {
+                let m = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                ctx.send_viewport_cmd(ViewportCommand::Maximized(!m));
+            }
+            ui.painter().hline(full.x_range(), full.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
+            ui.horizontal_centered(|ui| {
+                // logo
+                let blink = self.player.status().playing && (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
+                let logo = egui::text::LayoutJob::default();
+                let mut job = logo;
+                let f = px(if self.mini { 10.0 } else { 13.0 });
+                job.append("DK", 0.0, egui::TextFormat::simple(f.clone(), pal.accent));
+                job.append(".", 0.0, egui::TextFormat::simple(f.clone(), if blink { Color32::TRANSPARENT } else { pal.accent2 }));
+                job.append("FM", 0.0, egui::TextFormat::simple(f, pal.text));
+                ui.label(job);
+                ui.add_space(10.0);
+                if !self.mini {
+                    if tb_button(ui, &pal, "LAYOUT", self.layout_edit).clicked() {
+                        self.layout_edit = !self.layout_edit;
+                    }
+                    let r = tb_button(ui, &pal, "PANELS", false);
+                    let pid = ui.make_persistent_id("panels-menu");
+                    if r.clicked() {
+                        ui.memory_mut(|m| m.toggle_popup(pid));
+                    }
+                    egui::popup::popup_below_widget(ui, pid, &r, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
+                        ui.set_min_width(160.0);
+                        for t in Tab::ALL {
+                            let on = self.dock.find_tab(&t).is_some();
+                            if ui.button(format!("{} {}", if on { "✔" } else { "  " }, t.name())).clicked() {
+                                self.toggle_panel(t);
+                            }
+                        }
+                    });
+                    let r = tb_button(ui, &pal, "THEME", false);
+                    let mut chosen = None;
+                    let tid = ui.make_persistent_id("theme-menu");
+                    if r.clicked() {
+                        ui.memory_mut(|m| m.toggle_popup(tid));
+                    }
+                    egui::popup::popup_below_widget(ui, tid, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                        ui.set_min_width(180.0);
+                        for (k, name) in theme::THEMES {
+                            let sw = theme::palette(k, None).accent;
+                            let resp = ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                                fill(ui.painter(), r, sw);
+                                ui.button(format!("{} {name}", if self.theme_key == *k { "•" } else { " " }))
+                            });
+                            if resp.inner.clicked() {
+                                chosen = Some(k.to_string());
+                            }
+                        }
+                    });
+                    if let Some(k) = chosen {
+                        self.edit_settings(|s| s.theme = k);
+                        self.set_theme(ctx);
+                    }
+                    if tb_button(ui, &pal, "SETTINGS", false).clicked() {
+                        self.modal = Some(Modal::Settings(settings::SetTab::Appearance));
+                    }
+                    // centre status
+                    if self.lib.scanning.load(Ordering::Relaxed) {
+                        let (d, t) = (self.lib.scan_done.load(Ordering::Relaxed), self.lib.scan_total.load(Ordering::Relaxed));
+                        ui.add_space(20.0);
+                        ui.label(egui::RichText::new(format!("SCANNING LIBRARY… {d}/{t}")).color(pal.dim));
+                        ctx.request_repaint_after(Duration::from_millis(300));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    // window buttons drawn as pixel shapes (no font glyph needed)
+                    let wb = |ui: &mut egui::Ui, glyph: &str, close: bool| {
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(44.0, ui.available_height()), Sense::click());
+                        if resp.hovered() {
+                            fill(ui.painter(), r, if close { pal.accent } else { pal.panel_hi });
+                        }
+                        let c = if resp.hovered() && close { pal.ink } else if resp.hovered() { pal.text } else { pal.dim };
+                        let m = r.center();
+                        let px2 = |dx: f32, dy: f32| fill(ui.painter(), Rect::from_min_size(m + Vec2::new(dx, dy), Vec2::splat(2.0)), c);
+                        match glyph {
+                            "close" => (0..5).for_each(|i| { let d = i as f32 * 2.0 - 5.0; px2(d, d); px2(d, -d - 2.0); }),
+                            "min" => (0..5).for_each(|i| px2(i as f32 * 2.0 - 5.0, 3.0)),
+                            "max" => widgets::frame_rect(ui.painter(), Rect::from_center_size(m, Vec2::splat(10.0)), 2.0, c),
+                            _ => {
+                                widgets::frame_rect(ui.painter(), Rect::from_center_size(m + Vec2::new(-1.0, 1.0), Vec2::splat(8.0)), 2.0, c);
+                                widgets::frame_rect(ui.painter(), Rect::from_center_size(m + Vec2::new(2.0, -2.0), Vec2::splat(8.0)), 1.0, c);
+                            }
+                        }
+                        resp
+                    };
+                    if wb(ui, "close", true).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Close);
+                    }
+                    if !self.mini {
+                        let m = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+                        if wb(ui, if m { "restore" } else { "max" }, false).clicked() {
+                            ctx.send_viewport_cmd(ViewportCommand::Maximized(!m));
+                        }
+                    }
+                    if wb(ui, "min", false).clicked() {
+                        ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+                    }
+                    ui.add_space(6.0);
+                    if tb_button(ui, &pal, if self.mini { "FULL" } else { "MINI" }, self.mini).clicked() {
+                        self.toggle_mini(ctx);
+                    }
+                    let up = self.update.lock().clone();
+                    let label = match &up {
+                        UpdState::Available(u) => Some(format!("UPDATE > v{}", u.version)),
+                        UpdState::Downloading(p) => Some(format!("UPDATING {p}%")),
+                        _ => None,
+                    };
+                    if let (Some(l), false) = (label, self.mini) {
+                        ui.add_space(6.0);
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(l.len() as f32 * 8.0 + 16.0, 24.0), Sense::click());
+                        fill(ui.painter(), r, pal.accent2);
+                        ui.painter().text(r.center(), Align2::CENTER_CENTER, l, px(7.0), pal.ink);
+                        if resp.clicked() {
+                            self.modal = Some(Modal::Update);
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    // ------------------------------------------------------------ shortcuts
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let typing = ctx.wants_keyboard_input();
+        let (pressed, cmd, shift) = ctx.input(|i| {
+            let keys: Vec<Key> = i.events.iter().filter_map(|e| if let egui::Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect();
+            (keys, i.modifiers.command, i.modifiers.shift)
+        });
+        for k in pressed {
+            match (k, cmd) {
+                (Key::K, true) => self.palette = if self.palette.is_some() { None } else { Some(palette::PaletteState::default()) },
+                (Key::Comma, true) => self.modal = Some(Modal::Settings(settings::SetTab::Appearance)),
+                (Key::E, true) => self.layout_edit = !self.layout_edit,
+                (Key::M, true) => self.toggle_mini(ctx),
+                (Key::F, true) => {
+                    self.show_panel(Tab::Library);
+                    self.browser.focus_search = true;
+                }
+                (Key::I, true) => {
+                    self.show_panel(Tab::Library);
+                    self.browser.set_view(browser::View::Import);
+                }
+                (Key::ArrowRight, true) if !typing => self.player.next(true),
+                (Key::ArrowLeft, true) if !typing => self.player.prev(),
+                _ if typing || self.palette.is_some() || self.modal.is_some() => {}
+                (Key::Space, false) => self.player.toggle(),
+                (Key::ArrowRight, false) => self.player.seek(self.player.status().position + if shift { 30.0 } else { 5.0 }),
+                (Key::ArrowLeft, false) => self.player.seek(self.player.status().position - if shift { 30.0 } else { 5.0 }),
+                (Key::ArrowUp, false) => { let v = self.player.st.lock().opts.volume; self.player.set_volume(v + 0.05) }
+                (Key::ArrowDown, false) => { let v = self.player.st.lock().opts.volume; self.player.set_volume(v - 0.05) }
+                (Key::M, false) => self.player.toggle_mute(),
+                (Key::S, false) => self.player.toggle_shuffle(),
+                (Key::R, false) => self.player.cycle_repeat(),
+                (Key::L, false) => {
+                    if let Some(id) = self.player.current_id() {
+                        self.lib.toggle_like(&id);
+                    }
+                }
+                (Key::V, false) => self.scope.cycle(&self.player),
+                _ => {}
+            }
+        }
+    }
+
+    fn overlays(&mut self, ctx: &egui::Context) {
+        let pal = self.pal;
+        // toasts (bottom-right)
+        self.toasts.retain(|t| t.1.elapsed() < Duration::from_secs(if t.2 { 6 } else { 3 }));
+        if !self.toasts.is_empty() {
+            let screen = ctx.screen_rect();
+            let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("toasts")));
+            let mut y = screen.bottom() - 16.0;
+            for (msg, _, err) in self.toasts.iter().rev() {
+                let galley = painter.layout(msg.clone(), vt(19.0), if *err { pal.accent } else { pal.text }, 380.0);
+                let size = galley.size() + Vec2::new(24.0, 16.0);
+                let r = Rect::from_min_size(egui::pos2(screen.right() - 16.0 - size.x, y - size.y), size);
+                fill(&painter, r.translate(Vec2::splat(4.0)), pal.shadow);
+                fill(&painter, r, pal.panel);
+                widgets::frame_rect(&painter, r, 2.0, pal.accent);
+                painter.galley(r.min + Vec2::new(12.0, 8.0), galley, pal.text);
+                y -= size.y + 8.0;
+            }
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        // CRT scanlines + vignette
+        if self.settings.lock().scanlines {
+            let screen = ctx.screen_rect();
+            let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("scan")));
+            let c = if pal.dark { Color32::from_black_alpha(46) } else { Color32::from_black_alpha(10) };
+            let mut y = screen.top() + 2.0;
+            while y < screen.bottom() {
+                painter.hline(screen.x_range(), y, egui::Stroke::new(1.0_f32, c));
+                y += 3.0;
+            }
+        }
+        if self.drop_hover {
+            let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("drop")));
+            let s = ctx.screen_rect();
+            fill(&painter, s, Color32::from_black_alpha(170));
+            painter.text(s.center(), Align2::CENTER_CENTER, "DROP AUDIO FILES TO ADD", px(14.0), pal.accent);
+        }
+    }
+
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        self.drop_hover = ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        if dropped.is_empty() {
+            return;
+        }
+        let mut files = Vec::new();
+        for p in dropped {
+            if p.is_dir() {
+                for e in walkdir::WalkDir::new(&p).into_iter().flatten() {
+                    if crate::library::is_audio(e.path()) {
+                        files.push(e.into_path());
+                    }
+                }
+            } else {
+                files.push(p);
+            }
+        }
+        let ids = self.lib.add_files(&files, |_| {});
+        if ids.is_empty() {
+            self.toast_err("No playable audio files found");
+            return;
+        }
+        self.toast(format!("Added {} song{}", ids.len(), if ids.len() == 1 { "" } else { "s" }));
+        if self.player.current_id().is_none() { self.player.play_list(ids, 0, Some(false)) } else { self.player.enqueue(ids) }
+    }
+
+    /// Dev/testing only: DKFM_TEST_PLAY=1 starts playback; DKFM_SCREENSHOT=<png> saves a frame
+    /// after DKFM_SCREENSHOT_DELAY ms (default 3000) and quits.
+    fn dev_hooks(&mut self, ctx: &egui::Context) {
+        if self.frames == 3 && std::env::var("DKFM_TEST_PLAY").is_ok() {
+            let ids: Vec<String> = { let d = self.lib.data.read(); let mut v: Vec<_> = d.tracks.values().map(|t| (t.artist.clone(), t.title.clone(), t.id.clone())).collect(); v.sort(); v.into_iter().map(|x| x.2).collect() };
+            self.player.set_volume(0.03);
+            self.player.play_list(ids, 0, Some(false));
+        }
+        if self.frames == 3 {
+            match std::env::var("DKFM_VIEW").unwrap_or_default().as_str() {
+                "stats" => self.browser.set_view(browser::View::Stats),
+                "import" => self.browser.set_view(browser::View::Import),
+                "downloads" => self.browser.set_view(browser::View::Downloads),
+                "albums" => self.browser.set_view(browser::View::Albums),
+                "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Appearance)),
+                "palette" => self.palette = Some(palette::PaletteState { query: std::env::var("DKFM_QUERY").unwrap_or_default(), ..Default::default() }),
+                "mini" => self.toggle_mini(ctx),
+                "layout" => self.layout_edit = true,
+                "eq" => self.show_panel(Tab::Eq),
+                "radio" => {
+                    let t = self.lib.data.read().tracks.values().find(|t| t.title.contains("Guitar")).cloned();
+                    if let Some(t) = t { import::radio_for(self, &t); }
+                }
+                _ => {}
+            }
+        }
+        let Ok(path) = std::env::var("DKFM_SCREENSHOT") else { return };
+        let delay: f64 = std::env::var("DKFM_SCREENSHOT_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(3000.0);
+        let t = ctx.input(|i| i.time) * 1000.0;
+        static ASKED: AtomicBool = AtomicBool::new(false);
+        if t > delay && !ASKED.swap(true, Ordering::Relaxed) {
+            ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+        ctx.request_repaint_after(Duration::from_millis(100));
+        let shot = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None }));
+        if let Some(img) = shot {
+            let [w, h] = img.size;
+            let px: Vec<u8> = img.pixels.iter().flat_map(|c| [c.r(), c.g(), c.b(), 255]).collect();
+            if let Some(buf) = image::RgbaImage::from_raw(w as u32, h as u32, px) {
+                let _ = buf.save(&path);
+            }
+            system::QUIT.store(true, Ordering::Relaxed);
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+        }
+    }
+
+    fn persist(&mut self) {
+        if self.last_flush.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_flush = Instant::now();
+        let lib = self.lib.clone();
+        let save_settings = self.settings_dirty.swap(false, Ordering::Relaxed);
+        let s = if save_settings { Some(self.settings.lock().clone()) } else { None };
+        std::thread::spawn(move || {
+            lib.flush();
+            if let Some(s) = s {
+                s.save();
+            }
+        });
+    }
+}
+
+struct Viewer<'a> {
+    app: &'a mut App,
+}
+
+impl egui_dock::TabViewer for Viewer<'_> {
+    type Tab = Tab;
+    fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
+        egui::RichText::new(format!("■ {}", tab.name())).font(px(7.0)).into()
+    }
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
+        match tab {
+            Tab::Deck => deck::show(self.app, ui),
+            Tab::Scope => scope::show(self.app, ui),
+            Tab::Library => browser::show(self.app, ui),
+            Tab::Queue => queue::show(self.app, ui),
+            Tab::Eq => eqpanel::show(self.app, ui),
+            Tab::Lyrics => lyrics::show(self.app, ui),
+        }
+    }
+    fn closeable(&mut self, _tab: &mut Tab) -> bool {
+        self.app.layout_edit
+    }
+    fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
+        [false, false]
+    }
+}
+
+impl eframe::App for App {
+    fn clear_color(&self, _v: &egui::Visuals) -> [f32; 4] {
+        egui::Rgba::from(self.pal.bg).to_array()
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        let t_update = Instant::now();
+        self.frames += 1;
+        self.scope.drawn = false;
+        if self.frames == 2 && self.started_hidden {
+            system::hide_window();
+        }
+        // notices from background workers
+        let n: Vec<String> = self.player.notices.lock().drain(..).chain(self.dl.notices.lock().drain(..)).collect();
+        for m in n {
+            self.toast(m);
+        }
+        // close button -> tray (unless quitting for real)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let to_tray = self.settings.lock().close_to_tray && cfg!(not(target_os = "linux")) && self.tray.is_some();
+            if to_tray && !system::QUIT.load(Ordering::Relaxed) {
+                ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+                if self.mini {
+                    self.toggle_mini(ctx);
+                }
+                system::hide_window();
+                if !self.settings.lock().tray_hint_shown {
+                    self.edit_settings(|s| s.tray_hint_shown = true);
+                }
+            } else {
+                self.player.shutdown();
+                self.lib.flush();
+                self.settings.lock().save();
+            }
+        }
+        self.shortcuts(ctx);
+        self.handle_drops(ctx);
+        self.titlebar(ctx);
+
+        if self.mini {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::same(6))).show(ctx, |ui| deck::show_mini(self, ui));
+        } else {
+            let pal = self.pal;
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::same(4))).show(ctx, |ui| {
+                let mut style = egui_dock::Style::from_egui(ui.style().as_ref());
+                style.tab_bar.bg_fill = pal.bg2;
+                style.tab_bar.height = 24.0;
+                style.tab_bar.hline_color = pal.line;
+                style.tab.active.bg_fill = pal.panel;
+                style.tab.active.text_color = pal.accent;
+                style.tab.inactive.bg_fill = pal.bg2;
+                style.tab.inactive.text_color = pal.dim;
+                style.tab.focused.bg_fill = pal.panel;
+                style.tab.focused.text_color = pal.accent;
+                style.tab.hovered.text_color = pal.text;
+                style.tab.tab_body.bg_fill = pal.panel;
+                style.tab.tab_body.stroke = egui::Stroke::new(2.0_f32, pal.line);
+                style.tab.tab_body.inner_margin = egui::Margin::same(0);
+                style.separator.color_idle = pal.bg;
+                style.separator.color_hovered = pal.accent;
+                style.separator.color_dragged = pal.accent2;
+                style.separator.width = 5.0;
+                style.main_surface_border_stroke = egui::Stroke::NONE;
+                let mut dock = std::mem::replace(&mut self.dock, DockState::new(vec![]));
+                let before = serde_json::to_string(&dock).unwrap_or_default();
+                DockArea::new(&mut dock)
+                    .style(style)
+                    .draggable_tabs(self.layout_edit)
+                    .show_close_buttons(self.layout_edit)
+                    .show_add_buttons(false)
+                    .tab_context_menus(false)
+                    .show_leaf_close_all_buttons(false)
+                    .show_leaf_collapse_buttons(false)
+                    .show_inside(ui, &mut Viewer { app: self });
+                if dock.iter_all_tabs().count() == 0 {
+                    dock = default_dock();
+                }
+                let changed = serde_json::to_string(&dock).unwrap_or_default() != before;
+                self.dock = dock;
+                if changed {
+                    self.save_dock();
+                }
+            });
+            if self.layout_edit {
+                egui::Area::new(Id::new("layout-banner")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0]).order(Order::Foreground).show(ctx, |ui| {
+                    egui::Frame::new().fill(self.pal.accent2).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("DRAG PANEL TABS TO MOVE · DRAG GAPS TO RESIZE · × HIDES").font(px(8.0)).color(self.pal.ink));
+                            if ui.button("RESET").clicked() {
+                                self.reset_layout();
+                            }
+                            if ui.button("DONE").clicked() {
+                                self.layout_edit = false;
+                            }
+                        });
+                    });
+                });
+            }
+        }
+
+        // overlays: palette, modal, update popup
+        if self.palette.is_some() {
+            palette::show(self, ctx);
+        }
+        settings::show_modal(self, ctx);
+        if let UpdState::Available(u) = self.update.lock().clone() {
+            if self.update_dismissed.as_deref() != Some(&u.version) && self.modal.is_none() {
+                self.modal = Some(Modal::Update);
+                self.update_dismissed = Some(u.version.clone());
+            }
+        }
+        self.overlays(ctx);
+
+        // tray + OS media overlay
+        let st = self.player.status();
+        let cur = self.current_track();
+        if let Some(t) = &self.tray {
+            t.update(&cur.as_ref().map(|t| format!("{} — {}", t.title, t.artist)).unwrap_or_default(), st.playing);
+        }
+        if let (Some(m), Some(t)) = (self.media.as_mut(), cur.as_ref()) {
+            let cover = t.cover.as_ref().map(|c| self.lib.cover_path(c).to_string_lossy().into_owned());
+            m.update(&t.title, &t.artist, &t.album, cover.as_deref(), st.duration, st.playing, st.position);
+        }
+
+        // repaint cadence: idle = only on input; playing = 4 Hz (time readout), or the
+        // visualizer's fps while it's actually on screen; nothing while minimized or in the tray
+        let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        let tick = if st.playing && !minimized && !system::HIDDEN.load(Ordering::Relaxed) {
+            if self.scope.drawn && self.scope.mode != "off" {
+                1000 / self.player.st.lock().opts.vis_fps.clamp(10, 60)
+            } else {
+                250
+            }
+        } else {
+            0
+        };
+        ticker::set(ctx, tick);
+        self.persist();
+        self.dev_hooks(ctx);
+        profile(t_update.elapsed().as_secs_f32(), frame.info().cpu_usage.unwrap_or(0.0), ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.player.shutdown();
+        self.lib.flush();
+        self.settings.lock().save();
+    }
+}
+
+/// `DKFM_PROFILE=1`: every 5 s, log average time per frame in our UI code (`update`) and for the
+/// whole frame including egui's tessellation and painting, to profile.log in the data folder.
+fn profile(update_s: f32, frame_s: f32, ctx: &egui::Context) {
+    use std::io::Write;
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("DKFM_PROFILE").is_some()) {
+        return;
+    }
+    static ACC: Mutex<(u32, f32, f32, Option<Instant>)> = Mutex::new((0, 0.0, 0.0, None));
+    static CAUSES: Mutex<Option<std::collections::HashMap<String, u32>>> = Mutex::new(None);
+    for c in ctx.repaint_causes() {
+        *CAUSES.lock().get_or_insert_with(Default::default).entry(c.to_string()).or_default() += 1;
+    }
+    let mut a = ACC.lock();
+    a.0 += 1;
+    a.1 += update_s;
+    a.2 += frame_s;
+    let start = *a.3.get_or_insert_with(Instant::now);
+    if start.elapsed() >= Duration::from_secs(5) {
+        let causes = CAUSES.lock().take().unwrap_or_default();
+        let line = format!("{} frames/5s  update {:.2} ms  whole frame {:.2} ms  causes {:?}
+", a.0, a.1 / a.0 as f32 * 1000.0, a.2 / a.0 as f32 * 1000.0, causes);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(crate::store::data_dir().join("profile.log")) {
+            let _ = f.write_all(line.as_bytes());
+        }
+        *a = (0, 0.0, 0.0, Some(Instant::now()));
+    }
+}
+
+/// Paces animation frames from a timer thread. (egui's own `request_repaint_after` subtracts a
+/// predicted frame time from every delay, which roughly doubled the visualizer's frame rate.)
+mod ticker {
+    use super::egui;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    static PERIOD_MS: AtomicU32 = AtomicU32::new(0);
+    static THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
+
+    /// `ms` = 0 stops ticking (the thread sleeps until needed again).
+    pub fn set(ctx: &egui::Context, ms: u32) {
+        let old = PERIOD_MS.swap(ms, Ordering::Relaxed);
+        let t = THREAD.get_or_init(|| {
+            let ctx = ctx.clone();
+            std::thread::Builder::new().name("ticker".into()).spawn(move || run(ctx)).expect("ticker thread").thread().clone()
+        });
+        if old == 0 && ms != 0 {
+            t.unpark();
+        }
+    }
+
+    fn run(ctx: egui::Context) {
+        let mut next = Instant::now();
+        loop {
+            let ms = PERIOD_MS.load(Ordering::Relaxed);
+            if ms == 0 {
+                std::thread::park();
+                next = Instant::now();
+                continue;
+            }
+            next += Duration::from_millis(ms as u64);
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else {
+                next = now; // fell behind (e.g. the PC was asleep): don't try to catch up
+            }
+            if PERIOD_MS.load(Ordering::Relaxed) != 0 {
+                // a non-zero delay asks for exactly one frame (zero would ask for two)
+                ctx.request_repaint_after(Duration::from_nanos(1));
+            }
+        }
+    }
+}

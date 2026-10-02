@@ -4,6 +4,10 @@ A retro desktop music player for **Windows, macOS and Linux**. Plays your local 
 Spotify playlists into a local, tagged music collection by finding the best-matching studio
 version of each song on YouTube Music.
 
+Native app written in Rust: **one ~8 MB program**, no bundled browser. On Windows it uses about
+25 MB of RAM while playing (around 1.4% CPU with the visualizer on screen) and close to nothing
+when it's idle or in the tray.
+
 ## Features
 
 **Player**
@@ -15,6 +19,7 @@ version of each song on YouTube Music.
 - Queue with drag-to-reorder, play-next, save-as-playlist
 - Shuffle / repeat all / repeat one, playback speed, sleep timer
 - Mini player (always on top), OS media keys, keyboard shortcuts
+- Command line: `DK.FM --play-pause`, `--next`, `--prev` control the running copy (for hotkey tools and stream decks)
 
 **Library**
 - Scans your music folders; drag & drop files onto the window
@@ -44,26 +49,42 @@ version of each song on YouTube Music.
 - Scanlines, phosphor glow, pixel fonts (each can be turned off)
 - **Movable layout**: click LAYOUT, then drag panels between columns, resize them, collapse or hide them
 
-**Auto-update**: every push to `main` builds installers for all three OSes and publishes a GitHub
-Release (`v1.0.<build number>`). The app checks on launch and every 30 minutes. When a new
-version is out, an **Update available** popup shows the version and "What's new" (your commit
-messages since the last release), with **LATER** and **DOWNLOAD & RESTART** buttons. If someone
-picks LATER, an UPDATE button stays in the title bar and the popup returns on their next launch.
+**Auto-update**: every push to `main` builds all three OSes and publishes a GitHub Release
+(`v2.0.<build number>`). The app checks on launch and every 30 minutes. When a new version is
+out, an **Update available** popup shows the version and "What's new" (your commit messages since
+the last release), with **LATER** and **DOWNLOAD & RESTART** buttons. Updating swaps the one
+program file and restarts. Pushes to other branches only build, as a dry run.
 
 Write clear commit subjects. They become the release notes your users read.
 
 ## Develop
 
+Needs [Rust](https://rustup.rs) (and on Windows the Visual Studio C++ build tools).
+
 ```bash
-npm install
-npm start
+cargo run --release
 ```
 
-Build an installer for your current OS with `npm run dist` (output goes to `dist/`).
+The program ends up in `target/release/`. Useful for testing:
+
+- `DKFM_USER_DATA=<folder>` uses a separate profile instead of your real library and settings.
+- `DKFM_INSTALL_DIR=<folder>` makes the Windows installer install into a test folder.
+- `DKFM_PROFILE=1` logs frame times and repaint causes to `profile.log` in the data folder.
+- `dkfm --test-play [seconds]` plays the library without a window (audio engine check).
+
+## Windows install
+
+The release has two copies of the same program: `…-setup.exe` installs DK.FM (Start menu
+shortcut, Apps & features entry, uninstaller) and the plain `.exe` runs from anywhere without
+installing. Copies of the old Electron version (1.0.x) update to this one by themselves: the
+setup file replaces the Electron files and keeps the library, playlists and settings.
 
 ## Notes
 
-- `yt-dlp` is downloaded automatically on first run and updated daily. FFmpeg ships with the app.
-- macOS builds are unsigned: on first launch, right-click → Open. Auto-update on macOS
-  needs a signed app (Apple Developer ID). Windows and Linux (AppImage) auto-update without signing.
+- `yt-dlp`, FFmpeg and QuickJS (the small JavaScript runtime yt-dlp needs for YouTube) are
+  downloaded the first time you import music, then kept up to date. Only playing local
+  music needs none of them.
+- macOS builds are unsigned: on first launch, right-click → Open. On macOS the update popup
+  opens the release page instead of updating in place. Windows and Linux (AppImage) update
+  in place.
 - Only download music you have the rights to.

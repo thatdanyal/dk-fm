@@ -317,7 +317,7 @@ fn summary(s: &SharedSettings) -> Vec<(&'static str, String)> {
         ("Playback", format!("crossfade {} s · smart shuffle {} · volume matching {}", s.crossfade, on(s.smart_shuffle), on(s.match_volume))),
         ("Equalizer", format!("{} · {}", if s.eq.preset.is_empty() { "Flat" } else { &s.eq.preset }, on(s.eq.enabled))),
         ("Shortcuts", if s.keys.is_empty() { "defaults".into() } else { format!("{} changed", s.keys.len()) }),
-        ("Sidebar & start", format!("{} hidden · opens to {}", s.sidebar_hidden.len(), s.start_view)),
+        ("Tabs & start", format!("{} hidden · opens to {}", s.sidebar_hidden.len(), s.start_view)),
         ("Search", format!("{} · {} results · {} matching", sources.join(", "), s.search_results, s.match_strictness)),
     ]
 }

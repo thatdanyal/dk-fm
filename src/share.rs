@@ -170,7 +170,7 @@ impl SharedSettings {
             self.start_view = d.start_view.clone();
         }
         let side = |v: &mut Vec<String>| {
-            v.retain(|x| browser::SIDEBAR.iter().any(|s| s.0 == x));
+            v.retain(|x| browser::NAV.iter().any(|s| s.0 == x));
             v.dedup();
         };
         side(&mut self.sidebar_order);

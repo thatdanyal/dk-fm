@@ -69,7 +69,8 @@ fn main() -> eframe::Result {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("DK.FM")
             .with_app_id("dkfm")
-            .with_inner_size([1360.0, 860.0])
+            // DKFM_WIN=<w>,<h>: dev/testing window size
+            .with_inner_size(std::env::var("DKFM_WIN").ok().and_then(|v| v.split_once(',').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]))).unwrap_or([1360.0, 860.0]))
             .with_min_inner_size([380.0, 120.0])
             .with_decorations(false)
             .with_icon(Arc::new(icon)),

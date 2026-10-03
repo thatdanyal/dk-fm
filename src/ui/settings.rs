@@ -1,5 +1,5 @@
 //! Settings window, text prompts, and the "Update available" popup.
-use super::browser::{self, COLUMNS, SCREENS, SIDEBAR, SORTS, START};
+use super::browser::{self, COLUMNS, NAV, SCREENS, SORTS, START};
 use super::keys::{self, Combo};
 use super::theme::{self, px, vt, Pal};
 use super::widgets::{button, caption, dim, fill, frame_rect, switch, tb_button};
@@ -32,7 +32,7 @@ const TABS: [(SetTab, &str); 15] = [
     (SetTab::Look, "Look"),
     (SetTab::Layouts, "Layouts"),
     (SetTab::Lists, "Lists"),
-    (SetTab::Sidebar, "Sidebar"),
+    (SetTab::Sidebar, "Tabs & sidebar"),
     (SetTab::Search, "Search"),
     (SetTab::Discover, "Discover"),
     (SetTab::Library, "Library"),
@@ -46,9 +46,12 @@ const TABS: [(SetTab, &str); 15] = [
     (SetTab::About, "About"),
 ];
 
-/// A tab by its (lowercase) name, e.g. "look", "shortcuts", "backup".
+/// A tab by its (lowercase) name or first word, e.g. "look", "shortcuts", "tabs" (or "sidebar").
 pub fn tab_named(name: &str) -> SetTab {
-    TABS.iter().find(|t| t.1.eq_ignore_ascii_case(name)).map(|t| t.0).unwrap_or(SetTab::Look)
+    if name.eq_ignore_ascii_case("sidebar") {
+        return SetTab::Sidebar;
+    }
+    TABS.iter().find(|t| t.1.eq_ignore_ascii_case(name) || t.1.split(' ').next().is_some_and(|w| w.eq_ignore_ascii_case(name))).map(|t| t.0).unwrap_or(SetTab::Look)
 }
 
 /// State of the settings window between frames.
@@ -850,16 +853,16 @@ fn hidden_songs(app: &mut App, ui: &mut Ui) {
 
 fn sidebar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    let (mut order, mut hidden) = { let s = app.settings.lock(); (browser::sidebar_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
-    caption(ui, &pal, "SIDEBAR");
-    dim(ui, &pal, "Choose which shortcuts the library sidebar shows, and their order. Your playlists are always listed below them.");
+    let (mut order, mut hidden) = { let s = app.settings.lock(); (browser::nav_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
+    caption(ui, &pal, "TABS");
+    dim(ui, &pal, "Choose which screens the tabs above your library show, and their order. The left sidebar lists only your playlists. Hidden ones stay in the ••• menu at the right end.");
     let mut changed = false;
-    for g in ["LIBRARY", "GET MUSIC"] {
+    for (g, title) in [("tab", "TABS"), ("more", "RIGHT END: IMPORT · DOWNLOADS · ••• MENU")] {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new(g).font(px(6.0)).color(pal.dim));
-        let ids: Vec<&str> = order.iter().copied().filter(|id| SIDEBAR.iter().any(|s| s.0 == *id && s.1 == g)).collect();
+        ui.label(egui::RichText::new(title).font(px(6.0)).color(pal.dim));
+        let ids: Vec<&str> = order.iter().copied().filter(|id| NAV.iter().any(|s| s.0 == *id && s.1 == g)).collect();
         for (i, id) in ids.iter().enumerate() {
-            let (_, _, ico, label) = SIDEBAR.iter().find(|s| s.0 == *id).unwrap();
+            let (_, _, ico, _, label) = NAV.iter().find(|s| s.0 == *id).unwrap();
             let shown = !hidden.iter().any(|h| h == id);
             ui.horizontal(|ui| {
                 if tick(ui, &pal, shown) {
@@ -891,8 +894,8 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         app.edit_settings(|s| s.sidebar_covers = covers);
     }
     ui.add_space(8.0);
-    if button(ui, &pal, "RESET SIDEBAR", false, true).clicked() {
-        order = browser::sidebar_order(&[]);
+    if button(ui, &pal, "RESET TABS", false, true).clicked() {
+        order = browser::nav_order(&[]);
         hidden.clear();
         changed = true;
     }

@@ -100,22 +100,41 @@ pub const COLUMNS: [Col; 11] = [
     col("added", "ADDED", 84.0, 0.0, true, Some(SortKey::Added), "Date added", false),
 ];
 
-/// Sidebar entries above the playlists: (id, group, icon, label).
-pub const SIDEBAR: [(&str, &str, &str, &str); 11] = [
-    ("home", "LIBRARY", "🏠", "Home"), ("all", "LIBRARY", "♫", "All Tracks"), ("top", "LIBRARY", "★", "Most Played"), ("recent", "LIBRARY", "🕘", "Recently Added"),
-    ("albums", "LIBRARY", "💿", "Albums"), ("artists", "LIBRARY", "👤", "Artists"), ("stats", "LIBRARY", "📊", "Stats"), ("dupes", "LIBRARY", "📋", "Duplicates"),
-    ("import", "GET MUSIC", "📥", "Import Music"), ("downloads", "GET MUSIC", "⬇", "Downloads"), ("folder", "GET MUSIC", "+", "Add music folder"),
+/// Screens in the tab strip above the library (the sidebar lists only playlists):
+/// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
+/// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
+pub const NAV: [(&str, &str, &str, &str, &str); 11] = [
+    ("home", "tab", "🏠", "HOME", "Home"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
+    ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
+    ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
 
-/// Sidebar entries in your order (unknown ids dropped, new ones put in at their default place).
-pub fn sidebar_order(order: &[String]) -> Vec<&'static str> {
-    let mut v: Vec<&'static str> = order.iter().filter_map(|o| SIDEBAR.iter().find(|s| s.0 == o).map(|s| s.0)).collect();
-    for (i, s) in SIDEBAR.iter().enumerate() {
+/// Tabs in your order (unknown ids dropped, new ones put in at their default place).
+pub fn nav_order(order: &[String]) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = order.iter().filter_map(|o| NAV.iter().find(|s| s.0 == o).map(|s| s.0)).collect();
+    for (i, s) in NAV.iter().enumerate() {
         if !v.contains(&s.0) {
             v.insert(i.min(v.len()), s.0);
         }
     }
     v
+}
+
+/// The tab a screen belongs to (a playlist or Liked has none).
+fn nav_of(v: &View) -> Option<&'static str> {
+    Some(match v {
+        View::Home | View::Mix(_) => "home",
+        View::All => "all",
+        View::Albums | View::Album(_) => "albums",
+        View::Artists | View::Artist(_) | View::ArtistSongs(_) => "artists",
+        View::Recent => "recent",
+        View::Top => "top",
+        View::Stats => "stats",
+        View::Import => "import",
+        View::Downloads => "downloads",
+        View::Duplicates => "dupes",
+        View::Liked | View::Playlist(_) => return None,
+    })
 }
 
 /// Screens DK.FM can open to: (key, name).
@@ -182,12 +201,14 @@ pub fn artist_key(t: &Track) -> String {
 pub fn show(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let full = ui.available_rect_before_wrap();
-    let side_w = 182.0;
+    let side_w = (full.width() * 0.3).clamp(132.0, 184.0).round();
     let side = Rect::from_min_size(full.min, Vec2::new(side_w, full.height()));
     let main = Rect::from_min_max(Pos2::new(full.left() + side_w, full.top()), full.max);
     fill(ui.painter(), side, pal.bg2);
     ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(2.0_f32, pal.line));
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(side), |ui| sidebar(app, ui));
+    let strip_h = nav_strip(app, ui, Rect::from_min_max(Pos2::new(main.left() + 2.0, main.top()), main.max));
+    let main = Rect::from_min_max(Pos2::new(main.left(), main.top() + strip_h), main.max);
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(main.shrink2(Vec2::new(2.0, 0.0))), |ui| {
         ui.set_clip_rect(main);
         match app.browser.view.clone() {
@@ -203,6 +224,148 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
     });
     let _ = pal;
+}
+
+// ------------------------------------------------------------------------------- tab strip
+
+/// The tabs along the top of the library (HOME · SONGS · ...), with Import, Downloads and a ⋯
+/// menu at the right end. Tabs wrap onto more rows when the panel is narrow. Returns its height.
+fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
+    let pal = app.pal;
+    let (order, hidden) = { let s = app.settings.lock(); (nav_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
+    let shown: Vec<_> = order.iter().filter_map(|id| NAV.iter().find(|n| n.0 == *id)).filter(|n| !hidden.iter().any(|h| h == n.0)).collect();
+    let cur = nav_of(&app.browser.view);
+    let active_dl = app.dl.active_count();
+    let (font, row_h, pad) = (px(7.0), 30.0, 6.0);
+    let text_w = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), pal.text).size().x;
+    // right end: [+ IMPORT] [⬇ n] [⋯]
+    let mut right: Vec<(&str, f32)> = Vec::new();
+    for n in shown.iter().filter(|n| n.1 == "more") {
+        match n.0 {
+            "import" => right.push(("import", text_w(n.3) + 16.0)),
+            "downloads" => right.push(("downloads", 30.0 + if active_dl > 0 { text_w(&active_dl.to_string()) + 10.0 } else { 0.0 })),
+            _ => {}
+        }
+    }
+    right.push(("more", 30.0));
+    let right_w: f32 = right.iter().map(|r| r.1).sum::<f32>() + 4.0 * (right.len() - 1) as f32;
+    // tabs flow left to right; the first row leaves room for the right end
+    let mut tabs: Vec<(&str, &str, Rect)> = Vec::new();
+    let (mut x, mut y) = (area.left() + pad, area.top() + 4.0);
+    let mut limit = area.right() - pad - right_w - 6.0;
+    for n in shown.iter().filter(|n| n.1 == "tab") {
+        let w = text_w(n.3) + 14.0;
+        if x + w > limit && x > area.left() + pad {
+            (x, y, limit) = (area.left() + pad, y + row_h, area.right() - pad);
+        }
+        tabs.push((n.0, n.3, Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, row_h))));
+        x += w;
+    }
+    let h = (y - area.top()) + row_h + 6.0;
+    let strip = Rect::from_min_size(area.min, Vec2::new(area.width(), h));
+    ui.painter().hline(strip.x_range(), strip.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
+    let mut go: Option<&str> = None;
+    for (id, label, r) in &tabs {
+        let resp = ui.interact(*r, ui.id().with(("nav", *id)), Sense::click());
+        let on = cur == Some(*id);
+        if on {
+            fill(ui.painter(), r.shrink2(Vec2::new(0.0, 2.0)), pal.sel);
+            fill(ui.painter(), Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 3.0), r.max), pal.accent);
+        } else if resp.hovered() {
+            fill(ui.painter(), r.shrink2(Vec2::new(0.0, 2.0)), pal.panel_hi);
+        }
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, *label, font.clone(), if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            go = Some(id);
+        }
+    }
+    let mut rx = area.right() - pad - right_w;
+    let ry = area.top() + 7.0;
+    for (id, w) in right {
+        let r = Rect::from_min_size(Pos2::new(rx, ry), Vec2::new(w, row_h - 6.0));
+        rx += w + 4.0;
+        let resp = ui.interact(r, ui.id().with(("nav", id)), Sense::click());
+        let on = cur == Some(id) || id == "more" && cur == Some("dupes");
+        let p = ui.painter();
+        if on {
+            fill(p, r, pal.accent);
+        } else {
+            fill(p, r, pal.panel_hi);
+            frame_rect(p, r, 2.0, if resp.hovered() { pal.accent } else { pal.line_hi });
+        }
+        let fg = if on { pal.ink } else if resp.hovered() { pal.accent } else { pal.text };
+        match id {
+            "import" => {
+                p.text(r.center(), Align2::CENTER_CENTER, "+ IMPORT", font.clone(), fg);
+            }
+            "downloads" => {
+                p.text(Pos2::new(r.left() + 15.0, r.center().y), Align2::CENTER_CENTER, "⬇", vt(18.0), fg);
+                if active_dl > 0 {
+                    let b = Rect::from_min_max(Pos2::new(r.left() + 26.0, r.top() + 5.0), Pos2::new(r.right() - 5.0, r.bottom() - 5.0));
+                    fill(p, b, if on { pal.ink } else { pal.accent });
+                    p.text(b.center(), Align2::CENTER_CENTER, active_dl.to_string(), px(6.0), if on { pal.accent } else { pal.ink });
+                }
+            }
+            _ => {
+                for i in -1..=1 {
+                    fill(p, Rect::from_center_size(r.center() + Vec2::new(i as f32 * 6.0, 0.0), Vec2::splat(3.0)), fg);
+                }
+            }
+        }
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let resp = match id {
+            "import" => resp.on_hover_text("Import music: Spotify, YouTube, SoundCloud links or your own files"),
+            "downloads" => resp.on_hover_text(if active_dl > 0 { format!("Downloads ({active_dl} active)") } else { "Downloads".into() }),
+            _ => resp.on_hover_text("More"),
+        };
+        if id != "more" {
+            if resp.clicked() {
+                go = Some(id);
+            }
+            continue;
+        }
+        let pid = ui.make_persistent_id("nav-more");
+        if resp.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(pid));
+        }
+        egui::popup::popup_below_widget(ui, pid, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(190.0);
+            for n in shown.iter().filter(|n| n.1 == "more" && !matches!(n.0, "import" | "downloads")) {
+                if ui.button(format!("{}  {}", n.2, n.3)).clicked() {
+                    go = Some(n.0);
+                }
+            }
+            // a tab or button you hid is still one click away here
+            let hid: Vec<_> = NAV.iter().filter(|n| hidden.iter().any(|h| h == n.0) && !matches!(n.0, "dupes" | "folder")).collect();
+            if !hid.is_empty() {
+                ui.separator();
+                for n in hid {
+                    if ui.button(format!("{}  {}", n.2, n.4)).clicked() {
+                        go = Some(n.0);
+                    }
+                }
+            }
+            ui.separator();
+            if ui.button("Customize tabs…").clicked() {
+                app.modal = Some(Modal::Settings(super::settings::SetTab::Sidebar));
+            }
+        });
+    }
+    match go {
+        Some("folder") => add_folder(app),
+        Some(id) => {
+            if let Some(v) = view_for(id) {
+                app.browser.set_view(v);
+            }
+        }
+        None => {}
+    }
+    h
 }
 
 // ------------------------------------------------------------------------------- sidebar
@@ -258,10 +421,7 @@ enum SideAct {
 
 fn sidebar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    let (n_all, n_liked) = {
-        let d = app.lib.data.read();
-        (d.tracks.len(), d.stats.values().filter(|s| s.liked).count())
-    };
+    let n_liked = app.lib.data.read().stats.values().filter(|s| s.liked).count();
     let (sort, thumbs) = { let s = app.settings.lock(); (s.playlist_sort.clone(), s.sidebar_covers) };
     let custom = sort == "custom";
     let key = (app.lib.gen.load(std::sync::atomic::Ordering::Relaxed), app.plcovers.stamp(), sort.clone());
@@ -270,13 +430,7 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         app.browser.side_key = Some(key);
     }
     let rows = app.browser.side_rows.clone();
-    let active_dl = app.dl.active_count();
     ui.spacing_mut().item_spacing.y = 0.0;
-    let group = |ui: &mut Ui, s: &str| {
-        ui.add_space(10.0);
-        ui.label(egui::RichText::new(format!("  {s}")).font(px(6.0)).color(pal.dim));
-        ui.add_space(3.0);
-    };
     let mut go: Option<View> = None;
     let mut drops: Vec<(View, Vec<String>)> = Vec::new();
     // one sidebar row: `indent` px, a cover thumbnail instead of the icon, draggable, pinned mark
@@ -331,49 +485,39 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         resp
     };
-    // fixed navigation, in your order (Settings > Sidebar)
-    let (order, hidden) = { let s = app.settings.lock(); (sidebar_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
-    for g in ["LIBRARY", "GET MUSIC"] {
-        let items: Vec<_> = order.iter().filter_map(|id| SIDEBAR.iter().find(|s| s.0 == *id)).filter(|s| s.1 == g && !hidden.iter().any(|h| h == s.0)).collect();
-        if !items.is_empty() {
-            group(ui, g);
+    // header (as tall as one row of tabs, so the two lines meet): PLAYLISTS · ↕ sort/folders · + new
+    let (hr, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
+    ui.painter().hline(hr.x_range(), hr.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
+    ui.painter().text(Pos2::new(hr.left() + 10.0, hr.center().y), Align2::LEFT_CENTER, "PLAYLISTS", px(7.0), pal.accent2);
+    let hbtn = |ui: &mut Ui, x: f32, txt: &str, size: f32, on: bool, tip: &str, id: &str| {
+        let r = Rect::from_center_size(Pos2::new(x, hr.center().y), Vec2::splat(24.0));
+        let resp = ui.interact(r, ui.id().with(id), Sense::click()).on_hover_text(tip);
+        if resp.hovered() {
+            frame_rect(ui.painter(), r, 2.0, pal.line_hi);
         }
-        for (id, _, ico, label) in items {
-            let cnt = match *id { "all" => Some(n_all), "downloads" if active_dl > 0 => Some(active_dl), _ => None };
-            if item(ui, app, view_for(id), ico, label, cnt, 0.0, None, None, false).clicked() && *id == "folder" {
-                add_folder(app);
-            }
-        }
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, txt, vt(size), if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
+        resp
+    };
+    if hbtn(ui, hr.right() - 18.0, "+", 24.0, false, "New playlist", "pl-new").clicked() {
+        app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
     }
-    // playlists: their own scrolling list below a divider
-    ui.add_space(8.0);
-    ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(2.0_f32, pal.line));
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("  PLAYLISTS").font(px(6.0)).color(pal.dim));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if ui.add(egui::Label::new(egui::RichText::new("+ ").font(vt(20.0)).color(pal.dim)).sense(Sense::click())).on_hover_text("New playlist").clicked() {
-                app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
+    let r = hbtn(ui, hr.right() - 44.0, "↕", 15.0, !custom, "Sort playlists · new folder", "pl-sortb");
+    let id = ui.make_persistent_id("pl-sort");
+    if r.clicked() {
+        ui.memory_mut(|m| m.toggle_popup(id));
+    }
+    egui::popup::popup_below_widget(ui, id, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        ui.set_min_width(190.0);
+        ui.label(egui::RichText::new("SORT BY").font(px(6.0)).color(pal.dim));
+        for (k, name) in PL_SORTS {
+            if ui.button(format!("{} {name}", if sort == k { "•" } else { "  " })).clicked() {
+                app.edit_settings(|s| s.playlist_sort = k.to_string());
             }
-            let r = ui.add(egui::Label::new(egui::RichText::new("↕").font(vt(15.0)).color(if custom { pal.dim } else { pal.accent })).sense(Sense::click())).on_hover_text("Sort playlists · new folder");
-            let id = ui.make_persistent_id("pl-sort");
-            if r.clicked() {
-                ui.memory_mut(|m| m.toggle_popup(id));
-            }
-            egui::popup::popup_below_widget(ui, id, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-                ui.set_min_width(190.0);
-                ui.label(egui::RichText::new("SORT BY").font(px(6.0)).color(pal.dim));
-                for (k, name) in PL_SORTS {
-                    if ui.button(format!("{} {name}", if sort == k { "•" } else { "  " })).clicked() {
-                        app.edit_settings(|s| s.playlist_sort = k.to_string());
-                    }
-                }
-                ui.separator();
-                if ui.button("New folder…").clicked() {
-                    app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(None) });
-                }
-            });
-        });
+        }
+        ui.separator();
+        if ui.button("New folder…").clicked() {
+            app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(None) });
+        }
     });
     ui.add_space(3.0);
     let mut acts: Vec<SideAct> = Vec::new();

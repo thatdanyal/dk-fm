@@ -278,6 +278,9 @@ impl Downloader {
         }
         drop(q);
         self.jobs.lock().push(Job { id: job_id.clone(), col, folder, fmt, created: store::now_ms(), silent, target_playlist: target, cancel: Arc::new(AtomicBool::new(false)), tracks });
+        // songs you already have go into the playlist now (and learn their Spotify ids), even
+        // when nothing needs downloading
+        self.mirror_job(&job_id);
         self.touch();
         job_id
     }
@@ -480,7 +483,7 @@ impl Downloader {
                 }
             }
             let comment = format!("DK.FM · {}{}", if pick.id.is_empty() { t.direct_url.clone().unwrap_or_default() } else { format!("youtube:{}", pick.id) }, t.spotify_id.as_ref().map(|s| format!(" · spotify:{s}")).unwrap_or_default());
-            write_tags(&audio, &t, &album, &comment, cover)?;
+            write_tags(&audio, &t, &album, &comment, Some(pick.id.as_str()).filter(|i| !i.is_empty()), cover)?;
             if std::fs::rename(&audio, &out_file).is_err() {
                 std::fs::copy(&audio, &out_file).map_err(|e| e.to_string())?;
             }
@@ -536,14 +539,19 @@ impl Downloader {
         let idx = self.lib.key_index();
         let mut ordered: Vec<String> = Vec::new();
         let mut keys: Vec<Vec<String>> = Vec::new();
+        let mut links = Vec::new();
         for t in &col.tracks {
             if let Some(id) = lookup(&idx, t) {
+                if !exact(&idx, t) {
+                    links.push((id.clone(), t.spotify_id.clone(), t.youtube_id.clone(), t.source_key.clone()));
+                }
                 if !ordered.contains(id) {
                     ordered.push(id.clone());
                     keys.push(itrack_keys(t));
                 }
             }
         }
+        self.lib.link_ids(&links);
         let complete = col.complete;
         self.lib.edit_playlist(&pid, |p| {
             if p.edited {
@@ -623,6 +631,11 @@ fn lookup<'a>(idx: &'a std::collections::HashMap<String, String>, t: &ITrack) ->
     idx.get(&t.source_key).or_else(|| t.spotify_id.as_ref().and_then(|s| idx.get(&format!("sp:{s}")))).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)))
 }
 
+/// Found by its own id (not just artist + title).
+fn exact(idx: &std::collections::HashMap<String, String>, t: &ITrack) -> bool {
+    (!t.source_key.is_empty() && idx.contains_key(&t.source_key)) || t.spotify_id.as_ref().is_some_and(|s| idx.contains_key(&format!("sp:{s}"))) || t.youtube_id.as_ref().is_some_and(|y| idx.contains_key(&format!("yt:{y}")))
+}
+
 fn itrack_keys(t: &ITrack) -> Vec<String> {
     crate::library::track_keys(Some(&t.source_key), t.spotify_id.as_deref(), t.youtube_id.as_deref(), t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)
 }
@@ -670,7 +683,18 @@ fn search(t: &ITrack, cancel: &Arc<AtomicBool>) -> Result<Vec<Cand>, String> {
     Ok(out)
 }
 
-fn write_tags(path: &Path, t: &ITrack, album: &str, comment: &str, cover: Option<Vec<u8>>) -> Result<(), String> {
+/// The song's ids in its own tags, so a library rebuilt from the files still knows which
+/// Spotify / YouTube song it is.
+fn set_ids(tag: &mut lofty::tag::Tag, spotify: Option<&str>, youtube: Option<&str>) {
+    for (name, v) in [(crate::library::SPOTIFY_TAG, spotify), (crate::library::YOUTUBE_TAG, youtube)] {
+        if let Some(v) = v {
+            let key = crate::library::id_tag_key(tag.tag_type(), name);
+            tag.insert_unchecked(lofty::tag::TagItem::new(key, lofty::tag::ItemValue::Text(v.to_string())));
+        }
+    }
+}
+
+fn write_tags(path: &Path, t: &ITrack, album: &str, comment: &str, youtube_id: Option<&str>, cover: Option<Vec<u8>>) -> Result<(), String> {
     use lofty::config::WriteOptions;
     use lofty::file::{AudioFile, TaggedFileExt};
     use lofty::picture::{MimeType, Picture, PictureType};
@@ -693,6 +717,7 @@ fn write_tags(path: &Path, t: &ITrack, album: &str, comment: &str, cover: Option
         tag.set_track(n);
     }
     tag.set_comment(comment.to_string());
+    set_ids(tag, t.spotify_id.as_deref(), youtube_id.or(t.youtube_id.as_deref()));
     if let Some(c) = cover {
         tag.remove_picture_type(PictureType::CoverFront);
         tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(MimeType::Jpeg), None, c));
@@ -758,6 +783,74 @@ mod tests {
         // a plain import (no target) doesn't touch your playlists
         assert_eq!(d.playlists.len(), 1);
         drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn song_ids_survive_in_the_file_tags() {
+        use lofty::config::WriteOptions;
+        use lofty::file::TaggedFileExt;
+        use lofty::prelude::*;
+        let dir = std::env::temp_dir().join(format!("dkfm-tagtest-{}", std::process::id()));
+        std::env::set_var("DKFM_USER_DATA", &dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = Library::load();
+        // a tiny MP3: 20 silent MPEG-1 layer III frames (128 kbps, 44.1 kHz, 417 bytes each)
+        let path = dir.join("song.mp3");
+        let frame: Vec<u8> = [0xFF, 0xFB, 0x90, 0x00].into_iter().chain(std::iter::repeat(0).take(413)).collect();
+        std::fs::write(&path, frame.repeat(20)).unwrap();
+        let (sp, yt) = ("4cOdK2wGLETKBW3PvgPWqT", "FGBhQbmPwH8");
+        let t = ITrack { title: "One More Time".into(), artists: vec!["Daft Punk".into()], spotify_id: Some(sp.into()), source_key: format!("sp:{sp}"), ..Default::default() };
+        write_tags(&path, &t, "Discovery", &format!("DK.FM · youtube:{yt} · spotify:{sp}"), Some(yt), None).unwrap();
+        let ids = |lib: &Library| lib.read_track(&path).map(|t| (t.spotify_id, t.youtube_id, t.source_key)).unwrap();
+        assert_eq!(ids(&lib), (Some(sp.into()), Some(yt.into()), Some(format!("sp:{sp}"))));
+        // the TXXX fields alone are enough (comment gone)
+        let mut tf = lofty::read_from_path(&path).unwrap();
+        tf.primary_tag_mut().unwrap().remove_comment();
+        tf.save_to_path(&path, WriteOptions::default()).unwrap();
+        assert_eq!(ids(&lib).0.as_deref(), Some(sp));
+        // untagged files saved by yt-dlp: "<title> [<id>]"
+        for (name, want) in [("Song [dQw4w9WgXcQ].mp3", Some("dQw4w9WgXcQ")), ("Song [Instrumentl].mp3", None)] {
+            std::fs::write(dir.join(name), frame.repeat(20)).unwrap();
+            let t = lib.read_track(&dir.join(name)).unwrap();
+            assert_eq!((t.youtube_id.as_deref(), t.source_key), (want, want.map(|y| format!("yt:{y}"))));
+        }
+        // songs downloaded before: the "DK.FM · youtube:… · spotify:…" comment alone
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Mp4Ilst);
+        tag.set_comment(format!("DK.FM · youtube:{yt} · spotify:{sp}"));
+        assert_eq!(crate::library::ids_from_tag(&tag), (Some(sp.into()), Some(yt.into())));
+        tag.set_comment("DK.FM · https://soundcloud.com/a/b".into());
+        assert_eq!(crate::library::ids_from_tag(&tag), (None, None));
+        // MP4: iTunes freeform atoms, and back
+        let mut tag = lofty::tag::Tag::new(lofty::tag::TagType::Mp4Ilst);
+        set_ids(&mut tag, Some(sp), Some(yt));
+        let ilst: lofty::mp4::Ilst = tag.into();
+        let atom = lofty::mp4::AtomIdent::Freeform { mean: "com.apple.iTunes".into(), name: "SPOTIFY_TRACK_ID".into() };
+        assert!(ilst.get(&atom).is_some());
+        let back: lofty::tag::Tag = ilst.into();
+        assert_eq!(crate::library::ids_from_tag(&back), (Some(sp.into()), Some(yt.into())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_links_songs_you_already_have_to_spotify() {
+        let dir = std::env::temp_dir().join(format!("dkfm-linktest-{}", std::process::id()));
+        std::env::set_var("DKFM_USER_DATA", &dir);
+        let lib = Library::load();
+        // a song from a rebuilt library: no Spotify id, only artist + title
+        lib.data.write().tracks.insert("a".into(), store::Track { id: "a".into(), path: "/x/a.m4a".into(), artist: "Daft Punk".into(), title: "One More Time".into(), ..Default::default() });
+        let settings = Arc::new(Mutex::new(Settings { download_dir: dir.join("Music").display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        let sp = "0DiWol3AO6WpXZgp0goxAV";
+        let t = ITrack { title: "One More Time".into(), artists: vec!["Daft Punk".into()], spotify_id: Some(sp.into()), source_key: format!("sp:{sp}"), ..Default::default() };
+        let col = Collection { kind: "playlist".into(), id: "x".into(), name: "Mix".into(), tracks: vec![t], complete: true, source: "spotify".into(), ..Default::default() };
+        // nothing to download (you have it): it still lands in the playlist and learns its id
+        dl.start(col, Some(vec![]), true);
+        let d = lib.data.read();
+        assert_eq!(d.playlists.iter().find(|p| p.id == "sp-playlist-x").unwrap().track_ids, ["a"]);
+        assert_eq!((d.tracks["a"].spotify_id.as_deref(), d.tracks["a"].source_key.clone()), (Some(sp), Some(format!("sp:{sp}"))));
+        drop(d);
+        assert_eq!(lib.key_index().get(&format!("sp:{sp}")).map(|s| s.as_str()), Some("a"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

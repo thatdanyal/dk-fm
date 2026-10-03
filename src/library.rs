@@ -11,7 +11,29 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 pub const AUDIO_EXT: &[&str] = &["mp3", "m4a", "aac", "flac", "ogg", "opus", "wav", "aiff", "aif", "alac", "mp4"];
-const SCHEMA: u32 = 5;
+/// bumped when `read_track` learns something new, so the next scan re-reads every file once
+/// (6: Spotify / YouTube ids from the tags)
+const SCHEMA: u32 = 6;
+
+/// Tag fields DK.FM keeps a song's Spotify / YouTube ids in, so they survive a library rebuilt
+/// from the files.
+pub const SPOTIFY_TAG: &str = "SPOTIFY_TRACK_ID";
+pub const YOUTUBE_TAG: &str = "YOUTUBE_ID";
+
+/// The key for one of those fields: an iTunes freeform atom in MP4, else a user-defined field
+/// (ID3v2 TXXX, Vorbis comment, APE item).
+pub fn id_tag_key(tt: lofty::tag::TagType, name: &str) -> ItemKey {
+    ItemKey::Unknown(if tt == lofty::tag::TagType::Mp4Ilst { format!("----:com.apple.iTunes:{name}") } else { name.to_string() })
+}
+
+/// A song's (Spotify, YouTube) ids from its tags: DK.FM's own fields, else the
+/// "DK.FM · youtube:<id> · spotify:<id>" comment every DK.FM download has had.
+pub fn ids_from_tag(tag: &lofty::tag::Tag) -> (Option<String>, Option<String>) {
+    let field = |n: &str| tag.get_string(&id_tag_key(tag.tag_type(), n)).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let comment = tag.comment().filter(|c| c.contains("DK.FM")).map(|c| c.to_string()).unwrap_or_default();
+    let after = |pre: &str, len: usize| comment.split(pre).nth(1).map(|r| r.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').collect::<String>()).filter(|s| s.len() == len);
+    (field(SPOTIFY_TAG).or_else(|| after("spotify:", 22)), field(YOUTUBE_TAG).or_else(|| after("youtube:", 11)))
+}
 
 pub fn is_audio(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).map(|e| AUDIO_EXT.contains(&e.to_ascii_lowercase().as_str())).unwrap_or(false)
@@ -335,6 +357,10 @@ impl Library {
         }
         let (cover, thumb) = tag.and_then(|t| t.pictures().first()).map(|p| self.save_cover(p.data())).unwrap_or((None, None));
         let codec = tagged.as_ref().map(|t| format!("{:?}", t.file_type()).to_uppercase()).unwrap_or_default();
+        let (spotify_id, youtube_id) = tag.map(ids_from_tag).unwrap_or_default();
+        // yt-dlp's own file names end in " [<YouTube id>]"
+        let youtube_id = youtube_id.or_else(|| base.strip_suffix(']').and_then(|b| b.rsplit_once(" [")).map(|x| x.1).filter(|i| i.len() == 11 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && (i.chars().any(|c| c.is_ascii_digit() || c == '-' || c == '_') || i.chars().filter(char::is_ascii_uppercase).count() > 1)).map(String::from));
+        let source_key = spotify_id.as_ref().map(|s| format!("sp:{s}")).or_else(|| youtube_id.as_ref().map(|y| format!("yt:{y}")));
         Some(Track {
             id: id_for(file),
             path: std::path::absolute(file).unwrap_or(file.to_path_buf()).to_string_lossy().into_owned(),
@@ -355,6 +381,9 @@ impl Library {
             size: meta.len(),
             added_at: store::now_ms(),
             v: SCHEMA,
+            spotify_id,
+            youtube_id,
+            source_key,
             ..Default::default()
         })
     }
@@ -832,6 +861,30 @@ impl Library {
         drop(d);
         self.changed();
         Some(u)
+    }
+
+    /// Songs matched to a source song only by artist + title get its ids (track id, Spotify id,
+    /// YouTube id, source key), so the next sync finds them exactly. Ids a song already has stay.
+    pub fn link_ids(&self, links: &[(String, Option<String>, Option<String>, String)]) {
+        let mut n = 0;
+        {
+            let mut d = self.data.write();
+            for (id, sp, yt, key) in links {
+                let Some(t) = d.tracks.get_mut(id) else { continue };
+                if t.spotify_id.is_some() && sp.is_some() && t.spotify_id != *sp {
+                    continue; // another release of the song: leave it alone
+                }
+                for (have, new) in [(&mut t.spotify_id, sp.clone()), (&mut t.youtube_id, yt.clone()), (&mut t.source_key, Some(key.clone()).filter(|k| !k.is_empty()))] {
+                    if have.is_none() && new.is_some() {
+                        *have = new;
+                        n += 1;
+                    }
+                }
+            }
+        }
+        if n > 0 {
+            self.changed();
+        }
     }
 
     /// sourceKey / Spotify / YouTube / artist+title -> track id

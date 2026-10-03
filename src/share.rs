@@ -327,11 +327,7 @@ fn parse(kind: &str, v: Value) -> Result<Share, String> {
                 // the panel menus' texts are always our own, never a friend's
                 m.insert("translations".into(), serde_json::to_value(egui_dock::Translations::english()).unwrap_or_default());
             }
-            let dock: egui_dock::DockState<crate::ui::Tab> = serde_json::from_value(l.dock.clone()).map_err(|_| BAD)?;
-            let n = dock.iter_all_tabs().count();
-            if n == 0 || n > 64 {
-                return Err(BAD.into());
-            }
+            crate::ui::load_dock(&l.dock).ok_or(BAD)?;
             Ok(Share::Layout(NamedLayout { name: short(&l.name, 60).or_if_empty("Shared layout"), dock: l.dock }))
         }
         "settings" => serde_json::from_value::<SharedSettings>(v).map(|s| Share::Settings(Box::new(s.sanitize()))).map_err(|_| BAD.into()),

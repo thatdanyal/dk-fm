@@ -36,7 +36,7 @@ use crate::store::Settings;
 use crate::system::{self, Media, Tray, UpdState};
 use crate::watcher::FolderWatcher;
 use eframe::egui::{self, Align2, Color32, Id, LayerId, Order, Rect, Sense, Vec2, ViewportCommand};
-use egui_dock::{DockArea, DockState, NodeIndex};
+use egui_dock::{DockArea, DockState, Node, NodeIndex};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -137,6 +137,68 @@ pub struct App {
     pub explore: explore::Explore,
     /// full-screen now playing
     pub nowplaying: bool,
+    /// the library view last shown (`browser.nav`)
+    seen_nav: u64,
+}
+
+/// A saved or shared layout, if it's sound: each panel at most once, every split with both
+/// sides, sane sizes. Collapsed panels are opened (DK.FM has no button to expand them).
+pub fn load_dock(v: &serde_json::Value) -> Option<DockState<Tab>> {
+    let mut v = v.clone();
+    crate::share::fix_rects(&mut v);
+    let mut d: DockState<Tab> = serde_json::from_value(v).ok()?;
+    let mut seen = std::collections::HashSet::new();
+    d.set_focused_node_and_surface((egui_dock::SurfaceIndex::main(), NodeIndex(usize::MAX))); // = none
+    for (s, tree) in d.iter_surfaces_mut().enumerate().filter_map(|(s, x)| Some((s, x.node_tree_mut()?))) {
+        tree.set_focused_node(NodeIndex(usize::MAX));
+        let used: Vec<bool> = tree.iter().map(|n| !matches!(n, Node::Empty)).collect();
+        let kids = |i: usize| (used.get(2 * i + 1) == Some(&true), used.get(2 * i + 2) == Some(&true));
+        // (a floating window needs a panel; the main area may be an empty one)
+        if s > 0 && used.first() != Some(&true) {
+            return None;
+        }
+        for (i, node) in tree.iter_mut().enumerate() {
+            let ok = match node {
+                Node::Empty => kids(i) == (false, false),
+                Node::Leaf { tabs, active, collapsed, .. } => {
+                    *collapsed = false;
+                    (if tabs.is_empty() { s == 0 } else { active.0 < tabs.len() }) && tabs.iter().all(|t| seen.insert(*t)) && kids(i) == (false, false)
+                }
+                Node::Vertical { fraction, fully_collapsed, collapsed_leaf_count, .. } | Node::Horizontal { fraction, fully_collapsed, collapsed_leaf_count, .. } => {
+                    (*fully_collapsed, *collapsed_leaf_count) = (false, 0);
+                    *fraction = fraction.clamp(0.05, 0.95);
+                    fraction.is_finite() && kids(i) == (true, true)
+                }
+            };
+            if !ok {
+                return None;
+            }
+        }
+    }
+    (!seen.is_empty()).then_some(d)
+}
+
+/// Brings `tab` to the front where it is, or puts it back into the biggest panel. True when the
+/// layout changed.
+pub fn reveal(dock: &mut DockState<Tab>, tab: Tab) -> bool {
+    if let Some((s, n, t)) = dock.find_tab(&tab) {
+        let front = matches!(dock.get_surface(s).and_then(|x| x.node_tree()).map(|tr| &tr[n]), Some(Node::Leaf { active, .. }) if *active == t);
+        if !front {
+            dock.set_active_tab((s, n, t));
+        }
+        return !front;
+    }
+    let tree = dock.main_surface_mut();
+    let area = |n: &Node<Tab>| match n { Node::Leaf { rect, .. } if rect.is_finite() => rect.area(), _ => 0.0 };
+    let biggest = tree.iter().enumerate().filter(|(_, n)| matches!(n, Node::Leaf { .. })).max_by(|a, b| area(a.1).total_cmp(&area(b.1))).map(|(i, _)| NodeIndex(i));
+    match biggest {
+        Some(i) => {
+            tree[i].append_tab(tab);
+            tree.set_focused_node(i);
+        }
+        None => tree.push_to_first_leaf(tab),
+    }
+    true
 }
 
 /// The deck (play / pause, volume) is always on screen and big enough to use: it's put back if a
@@ -245,7 +307,7 @@ impl App {
             _ => {}
         }));
 
-        let dock = dock_json.and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok()).filter(|d| d.iter_all_tabs().count() > 0).unwrap_or_else(default_dock);
+        let dock = dock_json.as_ref().and_then(load_dock).unwrap_or_else(default_dock);
         let tray = Tray::new(player.clone(), lib.clone());
         let media = Some(Media::new(player.clone()));
         let update = Arc::new(Mutex::new(UpdState::Idle));
@@ -313,9 +375,19 @@ impl App {
             recs: Default::default(),
             explore: Default::default(),
             nowplaying: false,
+            seen_nav: 0,
         };
         app.apply_look(&cc.egui_ctx);
         app.modal = welcome::first_modal(&app);
+        app.seen_nav = app.browser.nav;
+        // the library file is gone (lost, damaged, new PC) but there's a backup: offer it once
+        if !crate::store::data_dir().join("library.json").exists() {
+            if let Some(b) = crate::backup::list().into_iter().next() {
+                app.lib.quiet_changed(); // (saved, so this isn't asked again)
+                app.modal = Some(Modal::Settings(settings::SetTab::Backup));
+                app.setui.ask_restore(b.path);
+            }
+        }
         app
     }
 
@@ -409,7 +481,7 @@ impl App {
         let s = self.settings.lock().clone();
         self.set_theme(ctx);
         self.apply_look(ctx);
-        self.dock = s.dock.clone().and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok()).filter(|d| d.iter_all_tabs().count() > 0).unwrap_or_else(default_dock);
+        self.dock = s.dock.as_ref().and_then(load_dock).unwrap_or_else(default_dock);
         self.player.set_volume(s.player.volume);
         self.apply_player(&s);
         self.browser.set_view(browser::View::All);
@@ -457,8 +529,8 @@ impl App {
 
     /// Switch to a built-in or saved layout by name.
     pub fn apply_layout(&mut self, name: &str) -> bool {
-        let saved = self.settings.lock().layouts.iter().find(|l| l.name == name).and_then(|l| serde_json::from_value::<DockState<Tab>>(l.dock.clone()).ok());
-        match saved.filter(|d| d.iter_all_tabs().count() > 0).or_else(|| Self::preset(name)) {
+        let saved = self.settings.lock().layouts.iter().find(|l| l.name == name).and_then(|l| load_dock(&l.dock));
+        match saved.or_else(|| Self::preset(name)) {
             Some(d) => {
                 self.dock = d;
                 self.save_dock();
@@ -506,13 +578,16 @@ impl App {
         self.watcher.watch(&f);
     }
 
+    /// Puts a panel on screen however the layout was changed (also leaves the mini player and
+    /// full-screen now playing).
     pub fn show_panel(&mut self, tab: Tab) {
-        if let Some(loc) = self.dock.find_tab(&tab) {
-            self.dock.set_active_tab(loc);
-        } else {
-            self.dock.main_surface_mut().push_to_first_leaf(tab);
+        self.nowplaying = false;
+        if let (true, Some(ctx)) = (self.mini, self.covers.ctx.clone()) {
+            self.toggle_mini(&ctx);
         }
-        self.save_dock();
+        if reveal(&mut self.dock, tab) {
+            self.save_dock();
+        }
     }
 
     pub fn toggle_panel(&mut self, tab: Tab) {
@@ -524,7 +599,7 @@ impl App {
                 self.dock.remove_tab(loc);
             }
         } else {
-            self.dock.main_surface_mut().push_to_first_leaf(tab);
+            reveal(&mut self.dock, tab);
         }
         self.save_dock();
     }
@@ -609,7 +684,11 @@ impl App {
                 ui.label(job);
                 ui.add_space(10.0);
                 if !self.mini {
-                    if tb_button(ui, &pal, "LAYOUT", self.layout_edit).clicked() {
+                    // in a narrow window the less needed buttons go (PANELS and the window buttons stay)
+                    let room = |ui: &egui::Ui, w: f32| ui.available_width() > 200.0 + w;
+                    let no_deck = self.dock.find_tab(&Tab::Deck).is_none();
+                    let later = if no_deck { 170.0 } else { 0.0 }; // play / skip come first
+                    if room(ui, 240.0 + later) && tb_button(ui, &pal, "LAYOUT", self.layout_edit).clicked() {
                         self.layout_edit = !self.layout_edit;
                     }
                     let r = tb_button(ui, &pal, "PANELS", false);
@@ -628,8 +707,12 @@ impl App {
                                 self.toggle_panel(t);
                             }
                         }
+                        ui.separator();
+                        if ui.button("   RESET LAYOUT").clicked() {
+                            self.reset_layout();
+                        }
                     });
-                    let r = tb_button(ui, &pal, "THEME", false);
+                    let r = if room(ui, 160.0 + later) { tb_button(ui, &pal, "THEME", false) } else { ui.allocate_response(Vec2::ZERO, Sense::hover()) };
                     let mut chosen = None;
                     let tid = ui.make_persistent_id("theme-menu");
                     if r.clicked() {
@@ -654,10 +737,20 @@ impl App {
                         self.edit_settings(|s| s.theme = k);
                         self.set_theme(ctx);
                     }
-                    if tb_button(ui, &pal, "SETTINGS", false).clicked() {
+                    if room(ui, 90.0 + later) && tb_button(ui, &pal, "SETTINGS", false).clicked() {
                         self.modal = Some(Modal::Settings(settings::SetTab::Look));
                     }
-                    if self.lib.private.load(Ordering::Relaxed) {
+                    // the deck panel is closed: keep play / skip on screen
+                    if no_deck && room(ui, 170.0) {
+                        ui.add_space(10.0);
+                        let playing = self.player.status().playing;
+                        for (l, a) in [("PREV", "prev"), (if playing { "PAUSE" } else { "PLAY" }, "play"), ("NEXT", "next")] {
+                            if tb_button(ui, &pal, l, false).clicked() {
+                                self.run_action(ctx, a);
+                            }
+                        }
+                    }
+                    if self.lib.private.load(Ordering::Relaxed) && room(ui, 100.0) {
                         ui.add_space(10.0);
                         let (r, resp) = ui.allocate_exact_size(Vec2::new(86.0, 22.0), Sense::click());
                         fill(ui.painter(), r, pal.accent2);
@@ -667,7 +760,7 @@ impl App {
                         }
                     }
                     // centre status
-                    if self.lib.scanning.load(Ordering::Relaxed) {
+                    if self.lib.scanning.load(Ordering::Relaxed) && room(ui, 220.0) {
                         let (d, t) = (self.lib.scan_done.load(Ordering::Relaxed), self.lib.scan_total.load(Ordering::Relaxed));
                         ui.add_space(20.0);
                         ui.label(egui::RichText::new(format!("SCANNING LIBRARY… {d}/{t}")).color(pal.dim));
@@ -767,10 +860,7 @@ impl App {
                 self.show_panel(Tab::Library);
                 self.browser.focus_search = true;
             }
-            "import" => {
-                self.show_panel(Tab::Library);
-                self.browser.set_view(browser::View::Import);
-            }
+            "import" => self.browser.set_view(browser::View::Import),
             "next" => self.player.next(true),
             "prev" => self.player.prev(),
             "play" => self.player.toggle(),
@@ -1148,6 +1238,11 @@ impl eframe::App for App {
             }
         }
         self.handle_drops(ctx);
+        // something opened a library view (Ctrl+K, Home, a link, a share…): make sure it's on screen
+        if self.browser.nav != self.seen_nav {
+            self.seen_nav = self.browser.nav;
+            self.show_panel(Tab::Library);
+        }
         self.titlebar(ctx);
 
         if self.mini {
@@ -1344,5 +1439,57 @@ mod ticker {
                 ctx.request_repaint_after(Duration::from_nanos(1));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_panel_can_be_restored() {
+        let mut starts = vec![default_dock(), App::preset("Minimal").unwrap()];
+        starts.extend(Tab::ALL.map(|t| DockState::new(vec![t])));
+        let mut win = DockState::new(vec![]); // everything closed but one floating window
+        win.add_window(vec![Tab::Queue]);
+        starts.push(win);
+        for start in starts {
+            for tab in Tab::ALL {
+                let mut d = start.clone();
+                reveal(&mut d, tab);
+                let (s, n, t) = d.find_tab(&tab).unwrap_or_else(|| panic!("{tab:?} missing"));
+                assert!(matches!(&d.get_surface(s).and_then(|x| x.node_tree()).unwrap()[n], Node::Leaf { active, .. } if *active == t), "{tab:?} in front");
+                assert!(!reveal(&mut d, tab), "already showing: nothing changes");
+                // ... and it still loads after a save
+                assert!(load_dock(&serde_json::to_value(&d).unwrap()).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn broken_layouts_are_refused() {
+        use serde_json::{json, Value};
+        let ok = serde_json::to_value(default_dock()).unwrap();
+        assert!(load_dock(&ok).is_some(), "never-drawn layouts (null rects) load");
+        let leaf = ok["surfaces"][0]["Main"]["nodes"].as_array().unwrap().iter().position(|n| n.get("Leaf").is_some()).unwrap();
+        let edit = |f: &dyn Fn(&mut Vec<Value>)| {
+            let mut v = ok.clone();
+            f(v["surfaces"][0]["Main"]["nodes"].as_array_mut().unwrap());
+            load_dock(&v)
+        };
+        // a panel twice, a split with a missing side, an open tab that isn't there, no panels
+        assert!(edit(&|n| n[leaf]["Leaf"]["tabs"] = json!(["Library", "Library"])).is_none());
+        assert!(edit(&|n| n.truncate(2)).is_none());
+        assert!(edit(&|n| n[leaf]["Leaf"]["active"] = json!(5)).is_none());
+        assert!(load_dock(&serde_json::to_value(DockState::<Tab>::new(vec![])).unwrap()).is_none());
+        assert!(load_dock(&json!({"a": 1})).is_none());
+        // collapsed panels open again, extreme splits stay usable
+        let d = edit(&|n| {
+            n[leaf]["Leaf"]["collapsed"] = json!(true);
+            n[0]["Horizontal"]["fraction"] = json!(0.0);
+        })
+        .unwrap();
+        assert!(d.iter_all_nodes().all(|(_, n)| !n.is_collapsed()));
+        assert!(matches!(d.main_surface()[NodeIndex(0)], Node::Horizontal { fraction, .. } if fraction == 0.05));
     }
 }

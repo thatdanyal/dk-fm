@@ -20,6 +20,8 @@ pub struct ImportState {
     cover: Option<TextureHandle>,
     pub selected: HashSet<usize>,
     collapsed: HashSet<String>,
+    /// keys of every library song, rebuilt when the library changes
+    keys: Option<(u64, Arc<HashSet<String>>)>,
 }
 
 impl ImportState {
@@ -28,8 +30,16 @@ impl ImportState {
     }
 }
 
-fn library_keys(app: &App) -> HashSet<String> {
-    app.lib.key_index().into_keys().collect()
+fn library_keys(app: &mut App) -> Arc<HashSet<String>> {
+    let gen = app.lib.gen.load(std::sync::atomic::Ordering::Relaxed);
+    match &app.import.keys {
+        Some((g, k)) if *g == gen => k.clone(),
+        _ => {
+            let k: Arc<HashSet<String>> = Arc::new(app.lib.key_index().into_keys().collect());
+            app.import.keys = Some((gen, k.clone()));
+            k
+        }
+    }
 }
 
 pub fn owned(keys: &HashSet<String>, t: &ITrack) -> bool {

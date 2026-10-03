@@ -135,7 +135,7 @@ fn test_download(args: &[String]) {
             for t in &j.tracks {
                 if t.status == downloader::TStatus::Skipped { continue; }
                 let lt = t.track_id.as_ref().and_then(|id| lib.track(id));
-                println!("{:?} | {} — {} | match: {:?} | file: {:?} | tags: {:?}", t.status, t.t.title, t.t.artists.join(", "), t.matched.as_ref().map(|m| &m.title), lt.as_ref().map(|l| &l.path), lt.as_ref().map(|l| (&l.title, &l.artist, &l.album, l.cover.is_some(), l.bitrate)));
+                println!("{:?} {} | {} — {} | match: {:?} | file: {:?} | tags: {:?}", t.status, t.note.as_deref().unwrap_or(""), t.t.title, t.t.artists.join(", "), t.matched.as_ref().map(|m| &m.title), lt.as_ref().map(|l| &l.path), lt.as_ref().map(|l| (&l.title, &l.artist, &l.album, l.cover.is_some(), l.bitrate)));
                 if let Some(e) = &t.error { println!("   error: {e}"); }
             }
             break;

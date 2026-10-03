@@ -10,7 +10,7 @@ pub const WHATS_NEW: &str = "biggest-update-2026-10";
 
 /// What's new, in plain words, one line each.
 const NEWS: &[(&str, &str)] = &[
-    ("🧭", "DISCOVER: new music picked from the artists you play and the songs you like."),
+    ("🔍", "DISCOVER: new music picked from the artists you play and the songs you like."),
     ("♫", "WHAT'S PLAYING? (on FIND SONGS, or Ctrl+K): DK.FM names the song playing on your PC, like Shazam, and offers to get it."),
     ("🌐", "FIND SONGS: search YouTube and pick the version you want (clean, explicit, live, instrumental...), then + GET it."),
     ("🎤", "A new DK.FM logo, everywhere: the app, the taskbar and the tray."),
@@ -21,7 +21,7 @@ const NEWS: &[(&str, &str)] = &[
     ("☰", "Drag songs in the queue to reorder them; hover a cover and click ▶ to play it."),
     ("💿", "Album covers next to every song in your lists."),
     ("📝", "Lyrics grow and shrink with their panel, and come from YouTube captions when nothing else has them."),
-    ("⏯", "Play, pause and skip from the taskbar thumbnail and your keyboard's media keys."),
+    ("▶", "Play, pause and skip from the taskbar thumbnail and your keyboard's media keys."),
     ("🎧", "Better sound: downloads now get the best audio YouTube has (HIGH), or LOSSLESS FLAC in Settings > Downloads."),
     ("🚪", "Closing DK.FM really quits: nothing left running in the background (keep it in the tray in Settings > System if you like)."),
 ];
@@ -146,7 +146,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
                 ui.add_space(4.0);
                 title(ui, &pal, "YOU'RE ALL SET");
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                    line(ui, &pal, "⏯", "Space plays and pauses; Ctrl+← / Ctrl+→ skip.");
+                    line(ui, &pal, "▶", "Space plays and pauses; Ctrl+← / Ctrl+→ skip.");
                     line(ui, &pal, "🖥", "F11: full-screen now playing with lyrics.");
                     line(ui, &pal, "🧩", "Ctrl+E: move panels around. Ctrl+, : Settings.");
                 });

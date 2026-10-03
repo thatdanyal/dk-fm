@@ -77,6 +77,11 @@ enum Confirm {
 }
 
 impl SetUi {
+    /// Ask whether to restore this backup (Settings > Backup).
+    pub fn ask_restore(&mut self, p: PathBuf) {
+        self.confirm = Some(Confirm::Restore(p));
+    }
+
     /// Open the theme editor on a palette (dev hook for screenshots).
     pub fn edit_theme(&mut self, p: Pal, name: &str) {
         self.draft = Some(p);
@@ -1497,7 +1502,8 @@ fn backups(app: &mut App, ui: &mut Ui) {
         Some(Confirm::Restore(p)) => {
             let mut keep = true;
             egui::Frame::new().fill(pal.bg2).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
-                ui.label(egui::RichText::new(format!("Restore the backup \"{}\"?", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).color(pal.text));
+                let when = p.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| fmt_date(d.as_secs() as i64)).unwrap_or_default();
+                ui.label(egui::RichText::new(format!("Restore your playlists and library from the backup of {when}?")).color(pal.text));
                 dim(ui, &pal, "Your library, playlists, play counts, history and settings go back to that point. What you have now is backed up first, so you can undo this.");
                 ui.horizontal(|ui| {
                     if button(ui, &pal, "CANCEL", false, true).clicked() {

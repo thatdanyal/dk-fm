@@ -130,7 +130,7 @@ fn open(app: &mut App, s: Share) {
             let idx = app.lib.key_index();
             (p.songs.iter().map(|x| x.keys().iter().find_map(|k| idx.get(k).cloned())).collect(), p.name.clone(), None)
         }
-        Share::Layout(l) => (Vec::new(), l.name.clone(), serde_json::from_value(l.dock.clone()).ok()),
+        Share::Layout(l) => (Vec::new(), l.name.clone(), super::load_dock(&l.dock)),
         Share::Theme(t) => (Vec::new(), t.name.clone(), None),
         Share::Settings(_) => (Vec::new(), String::new(), None),
     };
@@ -290,12 +290,19 @@ fn apply(app: &mut App, ctx: &egui::Context, inc: Incoming) {
             let mut seen = std::collections::HashSet::new();
             let have: Vec<String> = inc.owned.iter().flatten().filter(|id| seen.insert((*id).clone())).cloned().collect();
             let missing: Vec<usize> = inc.owned.iter().enumerate().filter(|(_, o)| o.is_none()).map(|(i, _)| i).collect();
-            let pid = app.lib.new_playlist(&name, have);
+            // the same code again: fill the playlist it made before (unless you've changed it)
+            let again = app.lib.data.read().playlists.iter().find(|p| p.name == name && p.source.as_deref() == Some("user") && !p.track_ids.is_empty() && p.track_ids.iter().all(|t| have.contains(t))).map(|p| p.id.clone());
+            let pid = match again {
+                Some(id) => {
+                    app.lib.edit_playlist(&id, |p| p.track_ids = have);
+                    id
+                }
+                None => app.lib.new_playlist(&name, have),
+            };
             if !missing.is_empty() {
                 let col = Collection { kind: "shared".into(), id: pid.clone(), name: name.clone(), owner: "a friend".into(), tracks: p.songs.iter().map(|s| s.to_itrack()).collect(), complete: true, via: "share".into(), source: "share".into(), ..Default::default() };
                 app.dl.start_to(col, Some(missing.clone()), Some(pid.clone()));
             }
-            app.show_panel(Tab::Library);
             app.browser.set_view(View::Playlist(pid));
             app.toast(if missing.is_empty() { format!("Imported \"{name}\"") } else { format!("Imported \"{name}\": downloading {} song{}", missing.len(), if missing.len() == 1 { "" } else { "s" }) });
         }

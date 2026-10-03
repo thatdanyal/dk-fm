@@ -108,7 +108,7 @@ pub const COLUMNS: [Col; 11] = [
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
 pub const NAV: [(&str, &str, &str, &str, &str); 13] = [
-    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🧭", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
+    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🔍", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
     ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
@@ -182,17 +182,20 @@ pub struct BrowserState {
     pub web: super::websearch::WebState,
     side_key: Option<(u64, u64, String)>,
     side_rows: Vec<SideRow>,
+    /// counts view changes (the window shows the library panel when it changes)
+    pub nav: u64,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new() }
+        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0 }
     }
 }
 
 impl BrowserState {
     pub fn set_view(&mut self, v: View) {
         self.view = v;
+        self.nav += 1;
         self.search.clear();
         self.sort = None;
         self.selection.clear();

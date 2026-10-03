@@ -174,8 +174,14 @@ impl Library {
         let cover_dir = dir.join("covers");
         let _ = std::fs::create_dir_all(&cover_dir);
         let _ = std::fs::create_dir_all(dir.join("waves"));
+        // a damaged library file is kept aside (not overwritten), so a backup can be offered
+        let file = dir.join("library.json");
+        let data = std::fs::read(&file).ok().map(|b| serde_json::from_slice(&b).unwrap_or_else(|_| {
+            let _ = std::fs::rename(&file, dir.join("library.damaged.json"));
+            LibraryData::default()
+        }));
         let lib = Arc::new(Self {
-            data: RwLock::new(store::load_json(&dir.join("library.json"))),
+            data: RwLock::new(data.unwrap_or_default()),
             history: RwLock::new(store::load_json(&dir.join("history.json"))),
             gen: AtomicU64::new(1),
             scanning: AtomicBool::new(false),

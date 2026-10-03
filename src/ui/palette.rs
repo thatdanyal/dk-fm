@@ -48,6 +48,8 @@ enum Act {
     Undo,
     PlayFolder(String),
     NowPlaying,
+    ResetLayout,
+    Panel(Tab),
 }
 
 struct Item {
@@ -92,7 +94,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         (format!("Private listening: {}", if app.lib.private.load(std::sync::atomic::Ordering::Relaxed) { "on > off" } else { "off > on" }), "incognito stats history record secret", "🔒", Act::Private),
         ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
         ("Now playing (full screen)".into(), "big cover lyrics fullscreen f11 karaoke", "🗖", Act::NowPlaying),
-        ("Discover new music".into(), "discover new recommendations similar radio explore", "🧭", Act::View(View::Discover)),
+        ("Discover new music".into(), "discover new recommendations similar radio explore", "🔍", Act::View(View::Discover)),
         ("What's playing? Name the song playing on this PC".into(), "shazam identify recognize listen what song is this", "♫", Act::Listen),
         ("Find songs online (pick the version)".into(), "search youtube web download get new song clean explicit live instrumental version", "🌐", Act::View(View::Web)),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
@@ -114,6 +116,10 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
     let s = app.settings.lock().clone();
     for (k, name) in theme::all_themes(&s) {
         v.push((format!("Theme: {name}"), "color look appearance", "■", Act::Theme(k)));
+    }
+    v.push(("Reset layout".into(), "default panels restore missing broken", "■", Act::ResetLayout));
+    for t in Tab::ALL.into_iter().filter(|t| app.dock.find_tab(t).is_none()) {
+        v.push((format!("Show the {} panel", t.name().to_lowercase()), "panels layout open missing", "■", Act::Panel(t)));
     }
     for name in app.layout_names() {
         v.push((format!("Layout: {name}"), "panels arrange switch saved", "■", Act::ApplyLayout(name)));
@@ -186,7 +192,6 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         }
         Act::Radio => {
             if let Some(t) = app.current_track() {
-                app.show_panel(Tab::Library);
                 super::import::radio_for(app, &t);
             }
         }
@@ -208,7 +213,6 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
             super::websearch::listen(app, ctx);
         }
         Act::Import(u) => {
-            app.show_panel(Tab::Library);
             app.browser.set_view(View::Import);
             super::import::fetch_link(app, ctx, u);
         }
@@ -236,7 +240,9 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         Act::Private => app.run_action(ctx, "private"),
         Act::Undo => app.undo(),
         Act::PlayFolder(id) => super::browser::play_folder(app, &id, false),
-        Act::NowPlaying => app.nowplaying = true,
+        Act::NowPlaying => app.nowplaying = !app.mini,
+        Act::ResetLayout => app.reset_layout(),
+        Act::Panel(t) => app.show_panel(t),
         Act::ApplyLayout(name) => {
             if app.apply_layout(&name) {
                 app.toast(format!("Layout: {name}"));

@@ -65,7 +65,7 @@ impl Library {
         let cover_dir = dir.join("covers");
         let _ = std::fs::create_dir_all(&cover_dir);
         let _ = std::fs::create_dir_all(dir.join("waves"));
-        Arc::new(Self {
+        let lib = Arc::new(Self {
             data: RwLock::new(store::load_json(&dir.join("library.json"))),
             history: RwLock::new(store::load_json(&dir.join("history.json"))),
             gen: AtomicU64::new(1),
@@ -75,7 +75,21 @@ impl Library {
             dirty: AtomicBool::new(false),
             history_dirty: AtomicBool::new(false),
             cover_dir,
-        })
+        });
+        // save changes every few seconds even while the window is hidden or minimized (no frames
+        // are drawn then), so downloads and auto-sync survive a crash, shutdown or forced close
+        let weak = Arc::downgrade(&lib);
+        std::thread::Builder::new()
+            .name("lib-save".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                match weak.upgrade() {
+                    Some(l) => l.flush(),
+                    None => break,
+                }
+            })
+            .ok();
+        lib
     }
 
     pub fn cover_path(&self, name: &str) -> PathBuf {
@@ -93,6 +107,9 @@ impl Library {
     }
 
     pub fn flush(&self) {
+        // one writer at a time (background saver, UI, exit)
+        static SAVING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+        let _g = SAVING.lock();
         if self.dirty.swap(false, Ordering::Relaxed) {
             store::save_json(&data_dir().join("library.json"), &*self.data.read());
         }

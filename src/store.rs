@@ -187,6 +187,12 @@ pub struct Settings {
     #[serde(default)] pub private_listening: bool,
     /// keep it on after a restart (else it turns off)
     #[serde(default)] pub keep_private: bool,
+    // ---- discovery
+    /// "Recommended" songs under each playlist (YouTube Music radio of a few of its songs)
+    #[serde(default = "d_true")] pub recommend: bool,
+    /// Home: new releases from your top artists (checked online at most once a day)
+    #[serde(default = "d_true")] pub new_releases: bool,
+    #[serde(default = "d_ten")] pub release_artists: u32,
     /// keep any keys this version doesn't know about
     #[serde(flatten)] pub extra: Map<String, Value>,
 }

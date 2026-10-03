@@ -45,6 +45,7 @@ enum Act {
     Private,
     Undo,
     PlayFolder(String),
+    NowPlaying,
 }
 
 struct Item {
@@ -87,6 +88,8 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         (format!("Shuffle: {}", if o.shuffle { "on > off" } else { "off > on" }), "toggle", "🔀", Act::ToggleShuffle),
         (format!("Repeat: {} > next mode", o.repeat), "loop toggle", "🔁", Act::CycleRepeat),
         (format!("Private listening: {}", if app.lib.private.load(std::sync::atomic::Ordering::Relaxed) { "on > off" } else { "off > on" }), "incognito stats history record secret", "🔒", Act::Private),
+        ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
+        ("Now playing (full screen)".into(), "big cover lyrics fullscreen f11 karaoke", "🗖", Act::NowPlaying),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
         ("Open a playlist file from a friend (.dkfm)…".into(), "share shared import friend code", "📂", Act::OpenShare),
@@ -223,6 +226,7 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         Act::Private => app.run_action(ctx, "private"),
         Act::Undo => app.undo(),
         Act::PlayFolder(id) => super::browser::play_folder(app, &id, false),
+        Act::NowPlaying => app.nowplaying = true,
         Act::ApplyLayout(name) => {
             if app.apply_layout(&name) {
                 app.toast(format!("Layout: {name}"));

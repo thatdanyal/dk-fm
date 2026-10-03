@@ -73,7 +73,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             if icon(ui, &pal, if muted || vol == 0.0 { "🔇" } else { "🔊" }, muted).clicked() {
                 app.player.toggle_mute();
             }
-            let sw = (ui.available_width() - 136.0).max(40.0);
+            let sw = (ui.available_width() - 170.0).max(40.0);
             ui.spacing_mut().slider_width = sw;
             if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false)).changed() {
                 app.player.set_volume(vol);
@@ -82,6 +82,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             let private = app.lib.private.load(std::sync::atomic::Ordering::Relaxed);
             if icon(ui, &pal, "PRV", private).on_hover_text(if private { "Private listening is on: plays and history aren't recorded" } else { "Private listening: don't record plays and history" }).clicked() {
                 app.set_private(!private);
+            }
+            if icon(ui, &pal, "🗖", false).on_hover_text("Full-screen now playing (F11)").clicked() {
+                app.nowplaying = true;
             }
             let sleep = app.player.st.lock().sleep;
             let label = match sleep { Sleep::Off => "ZZ".to_string(), Sleep::EndOfTrack => "EOT".into(), Sleep::At(t) => format!("{}M", (t.saturating_duration_since(Instant::now()).as_secs() / 60 + 1)) };
@@ -210,7 +213,7 @@ fn lcd(app: &App, ui: &mut Ui, r: Rect, st: &crate::audio::Status, t: Option<&cr
     }
 }
 
-fn waveform(app: &mut App, ui: &mut Ui, r: Rect, resp: &egui::Response, st: &crate::audio::Status) {
+pub(super) fn waveform(app: &mut App, ui: &mut Ui, r: Rect, resp: &egui::Response, st: &crate::audio::Status) {
     let pal = app.pal;
     let p = ui.painter_at(r);
     fill(&p, r, pal.bg);

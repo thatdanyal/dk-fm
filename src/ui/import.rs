@@ -26,7 +26,7 @@ fn library_keys(app: &App) -> HashSet<String> {
     app.lib.key_index().into_keys().collect()
 }
 
-fn owned(keys: &HashSet<String>, t: &ITrack) -> bool {
+pub fn owned(keys: &HashSet<String>, t: &ITrack) -> bool {
     keys.contains(&t.source_key) || t.spotify_id.as_ref().map(|s| keys.contains(&format!("sp:{s}"))).unwrap_or(false) || t.youtube_id.as_ref().map(|y| keys.contains(&format!("yt:{y}"))).unwrap_or(false) || keys.contains(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title))
 }
 

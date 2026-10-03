@@ -4,7 +4,7 @@ use eframe::egui::{Key, Modifiers};
 use std::collections::BTreeMap;
 
 /// (action, what it does, default binding)
-pub const ACTIONS: [(&str, &str, &str); 23] = [
+pub const ACTIONS: [(&str, &str, &str); 24] = [
     ("play", "Play / pause", "Space"),
     ("fwd", "Seek forward 5 s", "Right"),
     ("back", "Seek back 5 s", "Left"),
@@ -28,6 +28,7 @@ pub const ACTIONS: [(&str, &str, &str); 23] = [
     ("rescan", "Rescan library", ""),
     ("undo", "Undo the last removal / move / delete / merge", "Ctrl+Z"),
     ("private", "Private listening on / off", ""),
+    ("nowplaying", "Full-screen now playing (Esc leaves)", "F11"),
 ];
 
 /// These work even while typing in a text box (they use Ctrl and don't edit text).

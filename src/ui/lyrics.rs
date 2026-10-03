@@ -37,6 +37,11 @@ fn parse_lrc(src: &str) -> Vec<(f64, String)> {
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
+    show_sized(app, ui, 1.0);
+}
+
+/// Lyrics at `scale` times the panel's text size (full-screen now playing uses bigger ones).
+pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
     let pal = app.pal;
     let Some(t) = app.current_track() else {
         ui.centered_and_justified(|ui| ui.label(egui::RichText::new("NO LYRICS").color(pal.dim)));
@@ -74,7 +79,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         Lyr::Instrumental => center(ui, "♪ INSTRUMENTAL ♪", &pal),
         Lyr::Plain(s) => {
             egui::ScrollArea::vertical().auto_shrink([false; 2]).id_salt("lyr").show(ui, |ui| {
-                egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| ui.label(egui::RichText::new(s).font(vt(19.0)).color(pal.text)));
+                egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| ui.label(egui::RichText::new(s).font(vt(19.0 * scale)).color(pal.text)));
             });
         }
         Lyr::Synced(lines) => {
@@ -86,7 +91,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.add_space(ui.available_height() * 0.35);
                 ui.vertical_centered(|ui| {
                     for (i, (t, text)) in lines.iter().enumerate() {
-                        let (size, color) = if Some(i) == active { (25.0, pal.accent) } else if active.map(|a| i < a).unwrap_or(false) { (21.0, pal.faint) } else { (21.0, pal.dim) };
+                        let (size, color) = if Some(i) == active { (25.0 * scale, pal.accent) } else if active.map(|a| i < a).unwrap_or(false) { (21.0 * scale, pal.faint) } else { (21.0 * scale, pal.dim) };
                         let txt = if text.is_empty() { "♪" } else { text.as_str() };
                         let r = ui.add(egui::Label::new(egui::RichText::new(txt).font(vt(size)).color(color)).wrap().sense(egui::Sense::click()));
                         if r.clicked() {

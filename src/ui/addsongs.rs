@@ -39,13 +39,14 @@ pub const SOURCES: [(&str, &str); 3] = [("songs", "SONGS"), ("youtube", "YOUTUBE
 enum Btn {
     Add,
     Added,
+    Have,
     Get,
     Busy(String),
     Retry,
 }
 
-/// One result row; returns true when its button was clicked.
-fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>, btn: Btn) -> bool {
+/// One result row; returns true when its button was clicked. `tip` = what + GET does.
+fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>, btn: Btn, tip: &str) -> bool {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click());
     let br = Rect::from_min_size(Pos2::new(r.right() - 92.0, r.top() + 3.0), Vec2::new(86.0, 20.0));
     let over = resp.hovered() && ui.input(|i| i.pointer.hover_pos()).map(|q| br.contains(q)).unwrap_or(false);
@@ -67,6 +68,7 @@ fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>
         Btn::Get => ("+ GET".to_string(), true),
         Btn::Retry => ("FAILED ↻".to_string(), true),
         Btn::Added => ("✔ ADDED".to_string(), false),
+        Btn::Have => ("✔ HAVE IT".to_string(), false),
         Btn::Busy(s) => (s.clone(), false),
     };
     if clickable {
@@ -77,7 +79,7 @@ fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>
     if clickable && over {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         if matches!(btn, Btn::Get | Btn::Retry) {
-            resp.clone().on_hover_text("Download it into this playlist");
+            resp.clone().on_hover_text(tip);
         }
     }
     clickable && resp.clicked() && over
@@ -169,7 +171,7 @@ fn library_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, q: &str, gen: u64, w:
     for id in &local {
         let Some(t) = app.lib.track(id) else { continue };
         let inp = pl.track_ids.contains(id);
-        if row(ui, &pal, w, &t.title, &format!("{} · {}", t.artist, t.album).trim_end_matches(" · ").to_string(), Some(t.duration), if inp { Btn::Added } else { Btn::Add }) {
+        if row(ui, &pal, w, &t.title, &format!("{} · {}", t.artist, t.album).trim_end_matches(" · ").to_string(), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "") {
             app.lib.playlist_add(&pl.id, std::slice::from_ref(id));
             app.edit_settings(|s| s.last_playlist = pl.id.clone());
         }
@@ -235,14 +237,27 @@ fn online_section(app: &mut App, ui: &mut Ui, pl: &Playlist, at: (&str, u64, f32
 }
 
 fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[ITrack], gen: u64, w: f32) {
-    let pal = app.pal;
     // which results you already have (recomputed only when the library or the results change)
     if app.browser.add.owned.as_ref().map(|o| o.0 != gen || o.1 != *key).unwrap_or(true) {
-        let idx = app.lib.key_index();
-        let owned = found.iter().map(|t| idx.get(&t.source_key).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title))).cloned()).collect();
+        let owned = owned_ids(app, found);
         app.browser.add.owned = Some((gen, key.clone(), owned));
     }
     let owned = app.browser.add.owned.as_ref().map(|o| o.2.clone()).unwrap_or_default();
+    if result_rows(app, ui, Some(pl), found, &owned, w) {
+        app.edit_settings(|s| s.last_playlist = pl.id.clone());
+    }
+}
+
+/// The library songs these online results are, if you have them.
+pub fn owned_ids(app: &App, found: &[ITrack]) -> Vec<Option<String>> {
+    let idx = app.lib.key_index();
+    found.iter().map(|t| idx.get(&t.source_key).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title))).cloned()).collect()
+}
+
+/// Online results, each with + ADD (you have it) / + GET (download it, into `pl` if given) or its
+/// download progress. Returns true when a button was clicked.
+pub fn result_rows(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, found: &[ITrack], owned: &[Option<String>], w: f32) -> bool {
+    let pal = app.pal;
     // download progress of results being fetched
     let jobs: HashMap<String, (TStatus, f32)> = {
         let want: HashSet<String> = found.iter().map(|t| format!("track-{}", col_id(t))).collect();
@@ -251,11 +266,13 @@ fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[IT
     if jobs.values().any(|j| j.0.active()) {
         ui.ctx().request_repaint_after(Duration::from_millis(400));
     }
+    let tip = if pl.is_some() { "Download it into this playlist" } else { "Download it to your library" };
+    let mut clicked = false;
     for (i, t) in found.iter().enumerate() {
         let cid = col_id(t);
         let have = owned.get(i).cloned().flatten();
         let btn = match (&have, jobs.get(&format!("track-{cid}"))) {
-            (Some(id), _) if pl.track_ids.contains(id) => Btn::Added,
+            (Some(id), _) if pl.map(|p| p.track_ids.contains(id)).unwrap_or(true) => if pl.is_some() { Btn::Added } else { Btn::Have },
             (Some(_), _) => Btn::Add,
             (None, Some((s, p))) => match s {
                 TStatus::Queued => Btn::Busy("QUEUED".into()),
@@ -267,21 +284,23 @@ fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[IT
             (None, None) => Btn::Get,
         };
         let sub = [t.artists.join(", "), t.album.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-        if row(ui, &pal, w, &t.title, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn) {
-            match have {
-                Some(id) => {
+        if row(ui, &pal, w, &t.title, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn, tip) {
+            clicked = true;
+            match (have, pl) {
+                (Some(id), Some(pl)) => {
                     app.lib.playlist_add(&pl.id, &[id]);
                 }
-                None => {
+                (Some(_), None) => {}
+                (None, _) => {
                     let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
                     let col = Collection { kind: "track".into(), id: cid.clone(), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
-                    app.dl.start_to(col, None, false, Some(pl.id.clone()));
-                    app.toast(format!("Downloading \"{}\" into \"{}\"", t.title, pl.name));
+                    app.dl.start_to(col, None, false, pl.map(|p| p.id.clone()));
+                    app.toast(match pl { Some(p) => format!("Downloading \"{}\" into \"{}\"", t.title, p.name), None => format!("Downloading \"{}\"", t.title) });
                 }
             }
-            app.edit_settings(|s| s.last_playlist = pl.id.clone());
         }
     }
+    clicked
 }
 
 /// Download job id for a result ("yt" + video id, or "sc" + SoundCloud id).

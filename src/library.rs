@@ -423,10 +423,12 @@ impl Library {
             }
         }
         let ids: HashSet<&String> = d.tracks.keys().collect();
-        let old = |p: &Path| p.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() > 600).unwrap_or(false)).unwrap_or(false);
+        let older = |p: &Path, secs: u64| p.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() > secs).unwrap_or(false)).unwrap_or(false);
+        let old = |p: &Path| older(p, 600);
         for e in std::fs::read_dir(&self.cover_dir).into_iter().flatten().flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if !used.contains(&n) && old(&e.path()) {
+            // (mosaics of Home's mixes aren't any playlist's: they're kept for a week)
+            if !used.contains(&n) && older(&e.path(), if n.starts_with("mz_") { 7 * 86400 } else { 600 }) {
                 let _ = std::fs::remove_file(e.path());
             }
         }

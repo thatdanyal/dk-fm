@@ -3,6 +3,7 @@
 mod analysis;
 mod audio;
 mod backup;
+mod discover;
 mod downloader;
 #[cfg(windows)]
 mod install;

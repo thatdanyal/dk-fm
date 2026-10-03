@@ -609,9 +609,14 @@ fn yt_track(id: &str, title: String, artists: Vec<String>, album: String, secs: 
     ITrack { title, artists, album, duration_ms: secs.map(|d| (d * 1000.0) as u64), cover, youtube_id: Some(id.into()), direct_url: Some(format!("https://{host}/watch?v={id}")), source_key: format!("yt:{id}"), ..Default::default() }
 }
 
+/// A YouTube Music web API call (`endpoint` = search | browse | next | player).
+fn ytm(endpoint: &str, mut body: Value) -> Result<Value, String> {
+    body["context"] = serde_json::json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en" } });
+    net::post_json(&format!("https://music.youtube.com/youtubei/v1/{endpoint}?prettyPrint=false"), &[("User-Agent", net::UA), ("Origin", "https://music.youtube.com")], &body)
+}
+
 fn music_search(q: &str, n: usize) -> Result<Vec<ITrack>, String> {
-    let body = serde_json::json!({ "context": { "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20250101.01.00", "hl": "en" } }, "query": q, "params": "EgWKAQIIAWoKEAoQAxAEEAkQBQ==" });
-    let v = net::post_json("https://music.youtube.com/youtubei/v1/search?prettyPrint=false", &[("User-Agent", net::UA), ("Origin", "https://music.youtube.com")], &body)?;
+    let v = ytm("search", serde_json::json!({ "query": q, "params": "EgWKAQIIAWoKEAoQAxAEEAkQBQ==" }))?;
     let mut items = Vec::new();
     find_key(&v, "musicResponsiveListItemRenderer", &mut items);
     let runs = |r: &Value, col: usize| r["flexColumns"][col]["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"].as_array().cloned().unwrap_or_default();
@@ -659,6 +664,118 @@ fn find_key<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
         Value::Array(a) => a.iter().for_each(|x| find_key(x, key, out)),
         _ => {}
     }
+}
+
+// ------------------------------------------------------------------------------- artists & releases
+
+/// An album, EP or single on YouTube Music.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Release {
+    pub title: String,
+    pub artist: String,
+    /// Album | EP | Single
+    pub kind: String,
+    #[serde(default)]
+    pub year: Option<u32>,
+    /// its playlist ("OLAK5uy_…"): what gets downloaded, and its id
+    pub playlist: String,
+    #[serde(default)]
+    pub cover: Option<String>,
+}
+
+impl Release {
+    pub fn url(&self) -> String {
+        format!("https://music.youtube.com/playlist?list={}", self.playlist)
+    }
+}
+
+/// An artist's YouTube Music page: top songs, and albums / singles newest first.
+#[derive(Clone, Debug, Default)]
+pub struct ArtistPage {
+    pub songs: Vec<ITrack>,
+    pub releases: Vec<Release>,
+}
+
+fn runs_text(v: &Value) -> String {
+    v["runs"].as_array().map(|r| r.iter().filter_map(|t| t["text"].as_str()).collect()).unwrap_or_default()
+}
+
+fn first_thumb(v: &Value) -> Option<String> {
+    let mut t = Vec::new();
+    find_key(v, "thumbnails", &mut t);
+    t.first().and_then(|a| a[0]["url"].as_str()).map(String::from)
+}
+
+/// The YouTube Music channel of an artist (None = no artist by exactly that name).
+pub fn artist_id(name: &str) -> Result<Option<String>, String> {
+    let v = ytm("search", serde_json::json!({ "query": name, "params": "EgWKAQIgAWoKEAoQAxAEEAkQBQ==" }))?;
+    let mut items = Vec::new();
+    find_key(&v, "musicResponsiveListItemRenderer", &mut items);
+    let want = norm(name);
+    Ok(items.iter().find_map(|r| {
+        let id = r["navigationEndpoint"]["browseEndpoint"]["browseId"].as_str()?;
+        (norm(&runs_text(&r["flexColumns"][0]["musicResponsiveListItemFlexColumnRenderer"]["text"])) == want).then(|| id.to_string())
+    }))
+}
+
+pub fn artist_page(id: &str) -> Result<ArtistPage, String> {
+    let v = ytm("browse", serde_json::json!({ "browseId": id }))?;
+    let mut head = Vec::new();
+    find_key(&v, "musicImmersiveHeaderRenderer", &mut head);
+    find_key(&v, "musicVisualHeaderRenderer", &mut head);
+    let name = head.first().map(|h| runs_text(&h["title"])).unwrap_or_default();
+    let mut page = ArtistPage::default();
+    let album_page = |r: &Value| r["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"] == "MUSIC_PAGE_TYPE_ALBUM";
+    // "Top songs": title | artists | plays | album
+    let mut shelves = Vec::new();
+    find_key(&v, "musicShelfRenderer", &mut shelves);
+    for r in shelves.iter().flat_map(|s| s["contents"].as_array().map(|a| a.as_slice()).unwrap_or(&[])).map(|it| &it["musicResponsiveListItemRenderer"]) {
+        let Some(vid) = r["playlistItemData"]["videoId"].as_str() else { continue };
+        let cols: Vec<&Value> = r["flexColumns"].as_array().map(|a| a.iter().map(|c| &c["musicResponsiveListItemFlexColumnRenderer"]["text"]).collect()).unwrap_or_default();
+        let Some(title) = cols.first().map(|c| runs_text(c)) else { continue };
+        let artists: Vec<String> = cols.get(1).and_then(|c| c["runs"].as_array()).map(|a| a.iter().filter_map(|t| t["text"].as_str()).map(str::trim).filter(|t| !t.is_empty() && !matches!(*t, "&" | "," | "•")).map(String::from).collect()).unwrap_or_default();
+        let album = cols.iter().filter_map(|c| c["runs"].as_array()).flatten().find(|t| album_page(t)).and_then(|t| t["text"].as_str()).unwrap_or("").to_string();
+        page.songs.push(yt_track(vid, title, if artists.is_empty() { vec![name.clone()] } else { artists }, album, None, first_thumb(&r["thumbnail"]), "songs"));
+    }
+    // "Albums" and "Singles & EPs"
+    let mut shelves = Vec::new();
+    find_key(&v, "musicCarouselShelfRenderer", &mut shelves);
+    for s in shelves {
+        let head = runs_text(&s["header"]["musicCarouselShelfBasicHeaderRenderer"]["title"]);
+        if head != "Albums" && !head.starts_with("Singles") {
+            continue;
+        }
+        for r in s["contents"].as_array().map(|a| a.as_slice()).unwrap_or(&[]).iter().map(|it| &it["musicTwoRowItemRenderer"]).filter(|r| album_page(r)) {
+            let mut eps = Vec::new();
+            find_key(r, "watchPlaylistEndpoint", &mut eps);
+            let Some(pl) = eps.iter().filter_map(|e| e["playlistId"].as_str()).find(|p| p.starts_with("OLAK")) else { continue };
+            // "Single • 2026", "EP • 2024" or just "2025"
+            let sub = runs_text(&r["subtitle"]);
+            let parts: Vec<&str> = sub.split('•').map(str::trim).collect();
+            let kind = parts.iter().find(|p| matches!(**p, "Album" | "EP" | "Single")).map(|k| k.to_string()).unwrap_or_else(|| if head == "Albums" { "Album".into() } else { "Single".into() });
+            page.releases.push(Release { title: runs_text(&r["title"]), artist: name.clone(), kind, year: parts.iter().find_map(|p| p.parse::<u32>().ok().filter(|y| *y > 1900)), playlist: pl.into(), cover: first_thumb(&r["thumbnailRenderer"]) });
+        }
+    }
+    Ok(page)
+}
+
+/// When a release came out (unix seconds): the upload date of its first song.
+pub fn release_date(playlist: &str) -> Result<i64, String> {
+    let v = ytm("next", serde_json::json!({ "playlistId": playlist }))?;
+    let mut ids = Vec::new();
+    find_key(&v, "videoId", &mut ids);
+    let vid = ids.iter().find_map(|x| x.as_str()).ok_or("empty release")?;
+    let p = ytm("player", serde_json::json!({ "videoId": vid }))?;
+    let mf = &p["microformat"]["microformatDataRenderer"];
+    let d = mf["publishDate"].as_str().or(mf["uploadDate"].as_str()).ok_or("no release date")?;
+    day_of(d).ok_or_else(|| format!("bad date {d}"))
+}
+
+/// "2026-06-07T12:00:36-07:00" / "2026-06-07" -> unix seconds (noon UTC that day).
+pub fn day_of(d: &str) -> Option<i64> {
+    let mut p = d.get(..10)?.split('-').map(|x| x.parse::<u32>().ok());
+    let date = chrono::NaiveDate::from_ymd_opt(p.next()?? as i32, p.next()??, p.next()??)?;
+    Some(date.and_hms_opt(12, 0, 0)?.and_utc().timestamp())
 }
 
 // ------------------------------------------------------------------------------- matcher

@@ -8,13 +8,16 @@ pub mod deck;
 pub mod dupes;
 pub mod eqpanel;
 pub mod fonts;
+pub mod home;
 pub mod import;
 pub mod keys;
 pub mod lyrics;
+pub mod nowplaying;
 pub mod palette;
 pub mod plcover;
 pub mod plpick;
 pub mod queue;
+pub mod recs;
 pub mod scope;
 pub mod settings;
 pub mod sharing;
@@ -121,6 +124,10 @@ pub struct App {
     pub plcovers: plcover::PlCovers,
     /// "Removed 3 songs from Chill · UNDO" (the last undoable change, for a few seconds)
     pub undo_toast: Option<(String, Instant)>,
+    pub home: home::HomeState,
+    pub recs: recs::Recs,
+    /// full-screen now playing
+    pub nowplaying: bool,
 }
 
 pub fn default_dock() -> DockState<Tab> {
@@ -240,6 +247,9 @@ impl App {
             incoming: None,
             plcovers: Default::default(),
             undo_toast: None,
+            home: Default::default(),
+            recs: Default::default(),
+            nowplaying: false,
         };
         app.apply_look(&cc.egui_ctx);
         app
@@ -683,6 +693,7 @@ impl App {
                 let on = !self.lib.private.load(Ordering::Relaxed);
                 self.set_private(on);
             }
+            "nowplaying" => self.nowplaying = !self.nowplaying && !self.mini,
             _ => {}
         }
     }
@@ -791,6 +802,23 @@ impl App {
         if self.frames == 3 {
             match std::env::var("DKFM_VIEW").unwrap_or_default().as_str() {
                 "stats" => self.browser.set_view(browser::View::Stats),
+                "home" => self.browser.set_view(browser::View::Home),
+                // the first "Made from your library" mix
+                "mix" => {
+                    self.home.mixes = crate::discover::mixes(&self.lib.data.read(), crate::store::now_ms());
+                    if let Some(m) = self.home.mixes.first() { self.browser.set_view(browser::View::Mix(m.id.clone())); }
+                }
+                "nowplaying" => self.nowplaying = true,
+                // artist=<name>: that artist's page; artist: your top artist's
+                v if v.starts_with("artist") => {
+                    let k = v.strip_prefix("artist=").map(|n| n.to_lowercase()).or_else(|| crate::discover::top_artists(&self.lib.data.read(), 1).first().map(|a| a.0.clone()));
+                    if let Some(k) = k { self.browser.set_view(browser::View::Artist(k)); }
+                }
+                // a short playlist, so its Recommended section is on screen
+                "recs" => {
+                    let p = self.lib.data.read().playlists.iter().filter(|p| (3..=8).contains(&p.track_ids.len())).map(|p| p.id.clone()).next();
+                    if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
+                }
                 "import" => self.browser.set_view(browser::View::Import),
                 "downloads" => self.browser.set_view(browser::View::Downloads),
                 "albums" => self.browser.set_view(browser::View::Albums),
@@ -881,6 +909,10 @@ impl App {
         let delay: f64 = std::env::var("DKFM_SCREENSHOT_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(3000.0);
         let t = ctx.input(|i| i.time) * 1000.0;
         static ASKED: AtomicBool = AtomicBool::new(false);
+        // DKFM_SCROLL=<px>: Home / an artist page kept scrolled down (it grows as things load)
+        if t > 500.0 {
+            self.home.scroll = std::env::var("DKFM_SCROLL").ok().and_then(|v| v.parse().ok());
+        }
         if t > delay && !ASKED.swap(true, Ordering::Relaxed) {
             ctx.send_viewport_cmd(ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -990,6 +1022,8 @@ impl eframe::App for App {
 
         if self.mini {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::same(6))).show(ctx, |ui| deck::show_mini(self, ui));
+        } else if self.nowplaying {
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg)).show(ctx, |ui| nowplaying::show(self, ui));
         } else {
             let pal = self.pal;
             egui::CentralPanel::default().frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::same(4))).show(ctx, |ui| {

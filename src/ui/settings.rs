@@ -16,6 +16,7 @@ pub enum SetTab {
     Lists,
     Sidebar,
     Search,
+    Discover,
     Library,
     Downloads,
     Spotify,
@@ -27,12 +28,13 @@ pub enum SetTab {
     About,
 }
 
-const TABS: [(SetTab, &str); 14] = [
+const TABS: [(SetTab, &str); 15] = [
     (SetTab::Look, "Look"),
     (SetTab::Layouts, "Layouts"),
     (SetTab::Lists, "Lists"),
     (SetTab::Sidebar, "Sidebar"),
     (SetTab::Search, "Search"),
+    (SetTab::Discover, "Discover"),
     (SetTab::Library, "Library"),
     (SetTab::Downloads, "Downloads"),
     (SetTab::Spotify, "Spotify"),
@@ -280,6 +282,7 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
                 SetTab::Lists => lists(app, ui),
                 SetTab::Sidebar => sidebar(app, ui),
                 SetTab::Search => search(app, ui),
+                SetTab::Discover => discover(app, ui),
                 SetTab::Library => library(app, ui),
                 SetTab::Downloads => downloads(app, ui),
                 SetTab::Spotify => spotify(app, ui),
@@ -971,6 +974,30 @@ fn search(app: &mut App, ui: &mut Ui) {
         "strict" => "Strict: only clear matches; more songs may be skipped (pick them by hand in Downloads).",
         _ => "Normal: a good balance (recommended).",
     });
+}
+
+fn discover(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let s = app.settings.lock().clone();
+    caption(ui, &pal, "HOME");
+    dim(ui, &pal, "Home (top of the sidebar) shows what you played lately, mixes made from your library right on this PC, your top songs this month and new releases. Make it your start screen in Lists > When DK.FM starts.");
+    let mut nr = s.new_releases;
+    if switch(ui, &pal, &mut nr, "NEW RELEASES FROM YOUR ARTISTS") {
+        app.edit_settings(|s| s.new_releases = nr);
+    }
+    dim(ui, &pal, "Looks up your most played artists on YouTube Music at most once a day, and only while Home is open. Nothing downloads until you press + GET.");
+    row(ui, &pal, "Artists to check", |ui| {
+        if let Some(n) = choice(ui, &pal, &s.release_artists, &[(5, "5"), (10, "10"), (20, "20"), (30, "30")]) {
+            app.edit_settings(|s| s.release_artists = n);
+        }
+    });
+    spacer(ui);
+    caption(ui, &pal, "PLAYLISTS");
+    let mut rec = s.recommend;
+    if switch(ui, &pal, &mut rec, "RECOMMENDED SONGS UNDER EACH PLAYLIST") {
+        app.edit_settings(|s| s.recommend = rec);
+    }
+    dim(ui, &pal, "At the end of a playlist DK.FM suggests 10 songs like it (YouTube Music radio of a few of its songs), leaving out songs you have or hid. + downloads one straight into the playlist; REFRESH shows others. Only looked up when you scroll down to it.");
 }
 
 fn library(app: &mut App, ui: &mut Ui) {

@@ -49,6 +49,14 @@ pub fn post_form_json(url: &str, headers: &[(&str, &str)], form: &[(&str, &str)]
     r.send_form(form).map_err(err)?.into_json::<Value>().map_err(|e| e.to_string())
 }
 
+pub fn post_json(url: &str, headers: &[(&str, &str)], body: &Value) -> Result<Value, String> {
+    let mut r = AGENT.post(url);
+    for (k, v) in headers {
+        r = r.set(k, v);
+    }
+    r.send_json(body).map_err(err)?.into_json::<Value>().map_err(|e| e.to_string())
+}
+
 pub fn get_bytes(url: &str) -> Result<Vec<u8>, String> {
     let mut v = Vec::new();
     req(url, &[]).call().map_err(err)?.into_reader().take(50 * 1024 * 1024).read_to_end(&mut v).map_err(|e| e.to_string())?;

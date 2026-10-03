@@ -1,6 +1,7 @@
 //! The DK.FM window: custom title bar, dockable panels (egui_dock), overlays and shortcuts.
 //! The GUI only repaints when something changes (or ~4 Hz while playing / at the visualizer
 //! frame rate when the scope is visible), which is what keeps CPU and RAM low.
+pub mod addsongs;
 pub mod browser;
 pub mod cjk;
 pub mod deck;
@@ -9,6 +10,7 @@ pub mod eqpanel;
 pub mod import;
 pub mod lyrics;
 pub mod palette;
+pub mod plpick;
 pub mod queue;
 pub mod scope;
 pub mod settings;
@@ -92,6 +94,8 @@ pub struct App {
     pub toasts: Vec<(String, Instant, bool)>,
     pub modal: Option<Modal>,
     pub palette: Option<palette::PaletteState>,
+    /// "Add to playlist" checklist opened from a song's right-click menu
+    pub pick: Option<plpick::Popup>,
     pub update: Arc<Mutex<UpdState>>,
     update_dismissed: Option<String>,
     tray: Option<Tray>,
@@ -202,6 +206,7 @@ impl App {
             toasts: Vec::new(),
             modal: None,
             palette: None,
+            pick: None,
             update,
             update_dismissed: None,
             tray,
@@ -241,6 +246,13 @@ impl App {
 
     pub fn toast(&mut self, msg: impl Into<String>) {
         self.toasts.push((msg.into(), Instant::now(), false));
+    }
+    /// Replace an earlier toast (by its timestamp) with a new message, or just remove it.
+    pub fn toast_update(&mut self, prev: Option<Instant>, msg: Option<String>) -> Option<Instant> {
+        self.toasts.retain(|t| Some(t.1) != prev);
+        let now = Instant::now();
+        self.toasts.push((msg?, now, false));
+        Some(now)
     }
     pub fn toast_err(&mut self, msg: impl Into<String>) {
         self.toasts.push((msg.into(), Instant::now(), true));
@@ -589,6 +601,25 @@ impl App {
                 }
                 "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Appearance)),
                 "palette" => self.palette = Some(palette::PaletteState { query: std::env::var("DKFM_QUERY").unwrap_or_default(), ..Default::default() }),
+                // Ctrl+K playlist picker for the first song matching DKFM_QUERY
+                "palette-pick" => {
+                    let q = std::env::var("DKFM_QUERY").unwrap_or_default().to_lowercase();
+                    let id = self.lib.data.read().tracks.values().find(|t| t.title.to_lowercase().contains(&q)).map(|t| t.id.clone());
+                    self.palette = Some(palette::PaletteState { query: q, pick: id.map(|i| plpick::Picker::new(vec![i])), ..Default::default() });
+                }
+                // right-click > Add to playlist… for 3 songs of the first playlist (one is in it, so its box is half-ticked)
+                "pick" => {
+                    let ids: Vec<String> = { let d = self.lib.data.read(); let p = d.playlists.iter().find(|p| p.track_ids.len() > 3); let mut v: Vec<String> = p.map(|p| p.track_ids.iter().take(1).cloned().collect()).unwrap_or_default(); let more: Vec<String> = d.tracks.keys().filter(|k| !v.contains(k)).take(2).cloned().collect(); v.extend(more); v };
+                    self.browser.set_view(browser::View::All);
+                    self.pick = Some(plpick::Popup::new(ids, egui::pos2(700.0, 200.0)));
+                }
+                // playlist view with the add-songs box open, searching DKFM_QUERY (online results too)
+                "playlist-add" => {
+                    let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
+                    if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
+                    self.browser.add.open = true;
+                    self.browser.add.query = std::env::var("DKFM_QUERY").unwrap_or_default();
+                }
                 "mini" => self.toggle_mini(ctx),
                 "layout" => self.layout_edit = true,
                 "eq" => self.show_panel(Tab::Eq),
@@ -765,6 +796,7 @@ impl eframe::App for App {
         }
 
         // overlays: palette, modal, update popup
+        plpick::show_popup(self, ctx);
         if self.palette.is_some() {
             palette::show(self, ctx);
         }

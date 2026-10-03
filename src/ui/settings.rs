@@ -153,7 +153,10 @@ fn run_prompt(app: &mut App, action: PromptAction, text: String) {
     match action {
         PromptAction::NewPlaylist(ids) => {
             let n = ids.len();
-            app.lib.new_playlist(&text, ids);
+            let id = app.lib.new_playlist(&text, ids);
+            if n > 0 {
+                app.edit_settings(|s| s.last_playlist = id);
+            }
             app.toast(if n > 0 { format!("Saved \"{text}\" ({n} songs)") } else { format!("Created \"{text}\"") });
         }
         PromptAction::RenamePlaylist(id) => app.lib.edit_playlist(&id, |p| p.name = text),

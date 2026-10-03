@@ -51,6 +51,8 @@ pub struct Job {
     pub fmt: String,
     pub created: f64,
     pub silent: bool,
+    /// existing library playlist that finished songs are added to (e.g. "find new songs")
+    pub target_playlist: Option<String>,
     pub cancel: Arc<AtomicBool>,
     pub tracks: Vec<JTrack>,
 }
@@ -128,6 +130,11 @@ impl Downloader {
 
     /// Queue a collection; `selected` = indices to download (None = all).
     pub fn start(&self, col: Collection, selected: Option<Vec<usize>>, silent: bool) -> String {
+        self.start_to(col, selected, silent, None)
+    }
+
+    /// Like `start`, but every song that finishes is also added to the playlist `target`.
+    pub fn start_to(&self, col: Collection, selected: Option<Vec<usize>>, silent: bool, target: Option<String>) -> String {
         let job_id = format!("{}-{}", col.kind, col.id);
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
@@ -176,7 +183,7 @@ impl Downloader {
             }
         }
         drop(q);
-        self.jobs.lock().push(Job { id: job_id.clone(), col, folder, fmt, created: store::now_ms(), silent, cancel: Arc::new(AtomicBool::new(false)), tracks });
+        self.jobs.lock().push(Job { id: job_id.clone(), col, folder, fmt, created: store::now_ms(), silent, target_playlist: target, cancel: Arc::new(AtomicBool::new(false)), tracks });
         self.touch();
         job_id
     }
@@ -273,7 +280,6 @@ impl Downloader {
             }
             (jt.t.clone(), j.folder.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone())
         };
-        ytdlp::ensure()?;
         let (ext, args) = fmt_args(&fmt);
         let _ = std::fs::create_dir_all(&folder);
         let first_artist = t.artists.first().cloned().unwrap_or_else(|| "Unknown".into());
@@ -286,10 +292,12 @@ impl Downloader {
                 jt.note = Some("Already downloaded".into());
                 jt.track_id = ids.first().cloned();
             });
+            self.deliver(job_id, &ids);
             self.mirror_job(job_id);
             return Ok(());
         }
 
+        ytdlp::ensure()?;
         self.with_track(job_id, idx, |jt| jt.status = TStatus::Searching);
         let want = t.duration_ms.map(|d| d as f64 / 1000.0);
         let order: Vec<Cand> = if let Some(f) = forced {
@@ -385,12 +393,21 @@ impl Downloader {
                 jt.status = TStatus::Done;
                 jt.track_id = ids.first().cloned();
             });
+            self.deliver(job_id, &ids);
             Ok(())
         })();
         let _ = std::fs::remove_dir_all(&tmp);
         result?;
         self.mirror_job(job_id);
         Ok(())
+    }
+
+    /// A finished song goes into the job's target playlist, if it has one.
+    fn deliver(&self, job_id: &str, ids: &[String]) {
+        let target = self.jobs.lock().iter().find(|j| j.id == job_id).and_then(|j| j.target_playlist.clone());
+        if let (Some(pid), false) = (target, ids.is_empty()) {
+            self.lib.playlist_add(&pid, &ids[..1]);
+        }
     }
 
     fn mirror_job(&self, job_id: &str) {
@@ -570,4 +587,67 @@ fn write_tags(path: &Path, t: &ITrack, album: &str, comment: &str, cover: Option
         tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(MimeType::Jpeg), None, c));
     }
     tf.save_to_path(path, WriteOptions::default()).map_err(|e| format!("Tagging failed: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finished_song_goes_into_target_playlist() {
+        // a file that's already downloaded finishes without yt-dlp or network
+        let dir = std::env::temp_dir().join(format!("dkfm-dltest-{}", std::process::id()));
+        std::env::set_var("DKFM_USER_DATA", &dir);
+        let music = dir.join("Music");
+        std::fs::create_dir_all(music.join("Singles")).unwrap();
+        std::fs::write(music.join("Singles").join("Daft Punk - One More Time.m4a"), b"not really audio").unwrap();
+        let lib = Library::load();
+        let pid = lib.new_playlist("Mine", vec![]);
+        let settings = Arc::new(Mutex::new(Settings { download_dir: music.display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        let t = ITrack { title: "One More Time".into(), artists: vec!["Daft Punk".into()], youtube_id: Some("abcdefghijk".into()), direct_url: Some("https://music.youtube.com/watch?v=abcdefghijk".into()), source_key: "yt:abcdefghijk".into(), ..Default::default() };
+        let col = Collection { kind: "track".into(), id: "ytabcdefghijk".into(), name: t.title.clone(), tracks: vec![t], complete: true, source: "youtube".into(), ..Default::default() };
+        let job = dl.start_to(col, None, false, Some(pid.clone()));
+        let t0 = std::time::Instant::now();
+        while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let tid = dl.jobs.lock().iter().find(|j| j.id == job).and_then(|j| j.tracks[0].track_id.clone()).expect("song finished");
+        let d = lib.data.read();
+        assert_eq!(d.playlists.iter().find(|p| p.id == pid).unwrap().track_ids, vec![tid.clone()]);
+        assert_eq!(d.tracks[&tid].youtube_id.as_deref(), Some("abcdefghijk"));
+        // a plain import (no target) doesn't touch your playlists
+        assert_eq!(d.playlists.len(), 1);
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Real search + download into a playlist (network): `cargo test -- --ignored` with
+    /// DKFM_USER_DATA pointing at a test profile (songs land in its Music folder).
+    #[test]
+    #[ignore]
+    fn downloads_search_result_into_playlist() {
+        let dir = std::path::PathBuf::from(std::env::var("DKFM_USER_DATA").expect("use a test profile"));
+        let lib = Library::load();
+        let pid = lib.new_playlist("Found online", vec![]);
+        let settings = Arc::new(Mutex::new(Settings { download_dir: dir.join("Music").display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        let t = sources::search("daft punk one more time radio edit", "songs", 1).unwrap().remove(0);
+        let col = Collection { kind: "track".into(), id: format!("yt{}", t.youtube_id.clone().unwrap()), name: t.title.clone(), tracks: vec![t], complete: true, source: "youtube".into(), ..Default::default() };
+        dl.start_to(col, None, false, Some(pid.clone()));
+        let t0 = std::time::Instant::now();
+        while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(180) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        let j = dl.jobs.lock()[0].tracks[0].clone();
+        assert_eq!(j.status, TStatus::Done, "{:?}", j.error);
+        let d = lib.data.read();
+        let tr = &d.tracks[j.track_id.as_ref().unwrap()];
+        eprintln!("{} - {} [{}] {}", tr.artist, tr.title, tr.album, tr.path);
+        assert!(std::path::Path::new(&tr.path).starts_with(std::path::absolute(&dir).unwrap()));
+        assert_eq!(d.playlists.iter().find(|p| p.id == pid).unwrap().track_ids, vec![tr.id.clone()]);
+        drop(d);
+        lib.delete_playlist(&pid);
+        lib.flush();
+    }
 }

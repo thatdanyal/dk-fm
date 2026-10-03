@@ -1,6 +1,8 @@
 //! Ctrl+K command palette: songs, albums, artists, playlists, actions, themes — or paste a link.
-//! Enter = do it · Shift+Enter = add song to queue · Alt+Enter = play song next.
+//! Enter = do it · Shift+Enter = add song to queue · Alt+Enter = play song next ·
+//! Tab (or the + on a song) = add it to playlists (Esc goes back).
 use super::browser::{album_key, artist_key, View};
+use super::plpick::{self, Picker};
 use super::theme::{self, px, vt};
 use super::widgets::{fill, frame_rect};
 use super::{App, Modal, Tab};
@@ -12,6 +14,8 @@ pub struct PaletteState {
     pub query: String,
     pub active: usize,
     pub focused: bool,
+    /// playlist picker for a song (Tab on a song, or "Add current song to playlist…")
+    pub pick: Option<Picker>,
 }
 
 #[derive(Clone)]
@@ -23,6 +27,7 @@ enum Act {
     ShuffleLiked,
     Radio,
     LikeCurrent,
+    PickCurrent,
     ToggleShuffle,
     CycleRepeat,
     View(View),
@@ -47,7 +52,7 @@ struct Item {
     act: Act,
 }
 
-fn score(hay: &str, toks: &[String]) -> Option<f32> {
+pub fn score(hay: &str, toks: &[String]) -> Option<f32> {
     let mut s = 0.0;
     for t in toks {
         let i = hay.find(t.as_str())?;
@@ -71,6 +76,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
     if let Some(t) = &cur {
         v.push((format!("More like \"{}\"", t.title), "radio similar discover recommend", "✨", Act::Radio));
         v.push((format!("{} \"{}\"", if app.lib.stat(&t.id).liked { "Unlike" } else { "Like" }, t.title), "heart favorite", "♥", Act::LikeCurrent));
+        v.push(("Add current song to playlist…".into(), "save playing track playlists", "+", Act::PickCurrent));
     }
     v.extend([
         (format!("Shuffle: {}", if o.shuffle { "on > off" } else { "off > on" }), "toggle", "🔀", Act::ToggleShuffle),
@@ -160,6 +166,7 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
                 super::import::radio_for(app, &t);
             }
         }
+        Act::PickCurrent => {} // handled in show(): switches the palette to the picker
         Act::LikeCurrent => {
             if let Some(id) = app.player.current_id() {
                 app.lib.toggle_like(&id);
@@ -201,27 +208,33 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
-    let pal = app.pal;
     let Some(mut st) = app.palette.take() else { return };
+    if st.pick.is_some() {
+        if !show_pick(app, ctx, &mut st) {
+            app.palette = Some(st);
+        }
+        return;
+    }
+    let pal = app.pal;
     let items = search(app, &st.query);
     st.active = st.active.min(items.len().saturating_sub(1));
-    let (down, up, enter, esc, shift, alt) = ctx.input(|i| (i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowUp), i.key_pressed(Key::Enter), i.key_pressed(Key::Escape), i.modifiers.shift, i.modifiers.alt));
+    let (down, up, enter, esc, shift, alt, tab) = ctx.input(|i| (i.key_pressed(Key::ArrowDown), i.key_pressed(Key::ArrowUp), i.key_pressed(Key::Enter), i.key_pressed(Key::Escape), i.modifiers.shift, i.modifiers.alt, i.key_pressed(Key::Tab)));
     if down {
         st.active = (st.active + 1).min(items.len().saturating_sub(1));
     }
     if up {
         st.active = st.active.saturating_sub(1);
     }
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("pal-dim")));
-    fill(&painter, ctx.screen_rect(), Color32::from_black_alpha(140));
+    dim_screen(ctx);
     let mut chosen: Option<(usize, u8)> = if enter && !items.is_empty() { Some((st.active, if shift { 1 } else if alt { 2 } else { 0 })) } else { None };
+    let mut pick: Option<String> = if tab { items.get(st.active).and_then(|it| it.song.clone()) } else { None };
     let mut close = esc;
+    let w = width(ctx);
     let screen = ctx.screen_rect();
-    let w = 640.0f32.min(screen.width() - 32.0);
-    egui::Area::new(Id::new("palette")).order(egui::Order::Foreground).fixed_pos(Pos2::new(screen.center().x - w / 2.0, screen.top() + screen.height() * 0.12)).show(ctx, |ui| {
+    egui::Area::new(Id::new("palette")).order(egui::Order::Foreground).fixed_pos(top_left(ctx, w)).show(ctx, |ui| {
         egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).show(ui, |ui| {
             ui.set_width(w);
-            let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text("Search songs, albums, artists, playlists, actions — or paste a link").font(vt(24.0)).desired_width(w).margin(egui::Margin::symmetric(12, 10)).frame(false));
+            let te = ui.add(egui::TextEdit::singleline(&mut st.query).hint_text("Search songs, albums, artists, playlists, actions — or paste a link").font(vt(24.0)).desired_width(w).margin(egui::Margin::symmetric(12, 10)).frame(false).lock_focus(true));
             if !st.focused {
                 te.request_focus();
                 st.focused = true;
@@ -261,17 +274,32 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             ui.painter().text(ic.center(), Align2::CENTER_CENTER, &it.icon, vt(18.0), color);
                         }
                     }
-                    let clip = ui.painter().with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 70.0, r.bottom())));
+                    let right = if it.song.is_some() && on { 190.0 } else { 70.0 };
+                    let clip = ui.painter().with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - right, r.bottom())));
                     let g = clip.layout_no_wrap(it.label.clone(), vt(20.0), if on { pal.ink } else { pal.text });
                     let gw = g.size().x;
                     clip.galley(Pos2::new(r.left() + 44.0, r.center().y - g.size().y / 2.0), g, pal.text);
                     if !it.sub.is_empty() {
                         clip.text(Pos2::new(r.left() + 52.0 + gw, r.center().y), Align2::LEFT_CENTER, &it.sub, vt(17.0), if on { pal.ink } else { pal.dim });
                     }
+                    let mut plus_hit = false;
                     if it.song.is_some() {
-                        ui.painter().text(Pos2::new(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, "ENTER play", vt(16.0), if on { pal.ink } else { pal.dim });
+                        // "+" = add to playlists (same as Tab)
+                        let pr = Rect::from_center_size(Pos2::new(r.right() - 22.0, r.center().y), Vec2::new(26.0, 24.0));
+                        let ph = ui.input(|i| i.pointer.hover_pos()).map(|q| pr.contains(q)).unwrap_or(false);
+                        frame_rect(ui.painter(), pr, 2.0, if on { pal.ink } else if ph { pal.accent } else { pal.line_hi });
+                        ui.painter().text(pr.center(), Align2::CENTER_CENTER, "+", vt(22.0), if on { pal.ink } else { pal.accent2 });
+                        if on {
+                            ui.painter().text(Pos2::new(r.right() - 44.0, r.center().y), Align2::RIGHT_CENTER, "ENTER play · TAB playlist", vt(16.0), pal.ink);
+                        }
+                        plus_hit = resp.clicked() && resp.interact_pointer_pos().map(|q| pr.contains(q)).unwrap_or(false);
+                        if ph {
+                            resp.clone().on_hover_text("Add to playlist (Tab)");
+                        }
                     }
-                    if resp.clicked() {
+                    if plus_hit {
+                        pick = it.song.clone();
+                    } else if resp.clicked() {
                         chosen = Some((i, 0));
                     }
                 }
@@ -280,7 +308,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
             });
             ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(2.0_f32, pal.line));
-            ui.label(egui::RichText::new("  UP/DOWN move · ENTER do it · SHIFT+ENTER add to queue · ALT+ENTER play next · ESC close").color(pal.dim));
+            ui.label(egui::RichText::new("  UP/DOWN move · ENTER do it · SHIFT+ENTER queue · ALT+ENTER next · TAB playlist · ESC close").color(pal.dim));
         });
     });
     if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_area() {
@@ -288,14 +316,73 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     if let Some((i, mode)) = chosen {
         let it = &items[i];
-        match (&it.song, mode) {
-            (Some(id), 1) => app.player.enqueue(vec![id.clone()]),
-            (Some(id), 2) => app.player.play_next(vec![id.clone()]),
+        match (&it.song, mode, &it.act) {
+            (None, _, Act::PickCurrent) => pick = app.player.current_id(),
+            (Some(id), 1, _) => app.player.enqueue(vec![id.clone()]),
+            (Some(id), 2, _) => app.player.play_next(vec![id.clone()]),
             _ => run(app, ctx, it.act.clone()),
         }
         close = true;
     }
+    if let Some(id) = pick {
+        st.pick = Some(Picker::new(vec![id]));
+        close = false;
+    }
     if !close {
         app.palette = Some(st);
     }
+}
+
+fn width(ctx: &egui::Context) -> f32 {
+    640.0f32.min(ctx.screen_rect().width() - 32.0)
+}
+
+fn top_left(ctx: &egui::Context, w: f32) -> Pos2 {
+    let s = ctx.screen_rect();
+    Pos2::new(s.center().x - w / 2.0, s.top() + s.height() * 0.12)
+}
+
+fn dim_screen(ctx: &egui::Context) {
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, Id::new("pal-dim")));
+    fill(&painter, ctx.screen_rect(), Color32::from_black_alpha(140));
+}
+
+/// Playlist-picker mode: type to filter, click to tick/untick, Enter adds & closes, Esc goes back.
+/// Returns true when the palette should close.
+fn show_pick(app: &mut App, ctx: &egui::Context, st: &mut PaletteState) -> bool {
+    let pal = app.pal;
+    let Some(mut pk) = st.pick.take() else { return false };
+    if ctx.input(|i| i.key_pressed(Key::Escape)) {
+        st.focused = false; // back to the search, focused again
+        return false;
+    }
+    let title = pk.songs.first().and_then(|id| app.lib.track(id)).map(|t| format!("{} — {}", t.title, t.artist)).unwrap_or_default();
+    dim_screen(ctx);
+    let w = width(ctx);
+    let max_h = ctx.screen_rect().height() * 0.5;
+    let mut close = false;
+    egui::Area::new(Id::new("palette")).order(egui::Order::Foreground).fixed_pos(top_left(ctx, w)).show(ctx, |ui| {
+        egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).show(ui, |ui| {
+            ui.set_width(w);
+            let te = ui.add(egui::TextEdit::singleline(&mut pk.filter).hint_text("Find a playlist…").font(vt(24.0)).desired_width(w).margin(egui::Margin::symmetric(12, 10)).frame(false).lock_focus(true));
+            te.request_focus();
+            if te.changed() {
+                pk.active = 1;
+            }
+            ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(2.0_f32, pal.line));
+            ui.horizontal(|ui| {
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("ADD TO PLAYLIST").font(px(6.0)).color(pal.dim));
+                ui.label(egui::RichText::new(&title).font(vt(18.0)).color(pal.accent2));
+            });
+            close = plpick::list(app, ui, &mut pk, w, max_h, true, true);
+            ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(2.0_f32, pal.line));
+            ui.label(egui::RichText::new("  UP/DOWN move · CLICK tick / untick · ENTER add & close · ESC back").color(pal.dim));
+        });
+    });
+    if ctx.input(|i| i.pointer.any_click()) && !ctx.is_pointer_over_area() {
+        close = true;
+    }
+    st.pick = Some(pk);
+    close || app.modal.is_some()
 }

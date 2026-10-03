@@ -52,11 +52,12 @@ pub struct BrowserState {
     albums: Vec<(String, String, String, Option<String>, Option<u32>, usize)>, // key, name, artist, cover, year, n
     artists: Vec<(String, String, Option<String>, usize)>,
     pub dupes: super::dupes::DupeState,
+    pub add: super::addsongs::AddBox,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default() }
+        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default() }
     }
 }
 
@@ -184,14 +185,7 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 0.0;
         item(ui, app, Some(View::Liked), "♥", "Liked", Some(n_liked));
         for p in &playlists {
-            let ico = match (p.url(), p.source.as_deref()) {
-                (Some("spotify:liked"), _) => "♥",
-                (_, Some("youtube")) => "▶",
-                (_, Some("soundcloud")) => "☁",
-                _ if p.is_imported() => "♪",
-                _ => "☰",
-            };
-            let r = item(ui, app, Some(View::Playlist(p.id.clone())), ico, &p.name, Some(p.track_ids.len()));
+            let r = item(ui, app, Some(View::Playlist(p.id.clone())), playlist_icon(p), &p.name, Some(p.track_ids.len()));
             let pl = p.clone();
             r.context_menu(|ui| playlist_menu_ui(app, ui, &pl));
         }
@@ -204,6 +198,16 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
     }
     for (v, ids) in drops {
         drop_songs(app, &v, &ids);
+    }
+}
+
+pub fn playlist_icon(p: &crate::store::Playlist) -> &'static str {
+    match (p.url(), p.source.as_deref()) {
+        (Some("spotify:liked"), _) => "♥",
+        (_, Some("youtube")) => "▶",
+        (_, Some("soundcloud")) => "☁",
+        _ if p.is_imported() => "♪",
+        _ => "☰",
     }
 }
 
@@ -426,6 +430,11 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     ui.set_min_width(180.0);
                     playlist_menu_ui(app, ui, &p);
                 });
+                let open = app.browser.add.open;
+                if button(ui, &pal, if open { "ADD SONGS ▲" } else { "+ ADD SONGS" }, false, true).on_hover_text("Find songs in your library or online and add them here").clicked() {
+                    app.browser.add.open = !open;
+                    app.browser.add.focus = !open;
+                }
             }
             let te = ui.add(egui::TextEdit::singleline(&mut app.browser.search).hint_text("SEARCH…").desired_width(200.0).font(vt(19.0)));
             if app.browser.focus_search {
@@ -434,6 +443,12 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+    // add-songs box: open on request, and always in an empty playlist
+    if let Some(p) = &cfg.playlist {
+        if app.browser.add.open || ids.is_empty() && app.browser.search.is_empty() {
+            super::addsongs::show(app, ui, p);
+        }
+    }
     if app.lib.data.read().tracks.is_empty() || ids.is_empty() && app.browser.search.is_empty() {
         empty_state(app, ui);
         return;
@@ -590,7 +605,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         None => {}
     }
     // keyboard: Ctrl+A / Enter / Delete
-    if !ui.ctx().wants_keyboard_input() && app.palette.is_none() && app.modal.is_none() {
+    if !ui.ctx().wants_keyboard_input() && app.palette.is_none() && app.modal.is_none() && app.pick.is_none() {
         let (all, enter, del) = ui.input(|i| (i.modifiers.command && i.key_pressed(egui::Key::A), i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Delete)));
         if all {
             app.browser.selection = ids.iter().cloned().collect();
@@ -639,25 +654,11 @@ fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, playlist: Op
         }
         ui.close_menu();
     }
-    ui.menu_button("Add to playlist", |ui| {
-        if ui.button("+ New playlist…").clicked() {
-            app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(sel.clone()) });
-            ui.close_menu();
-        }
-        let mut pls: Vec<_> = app.lib.data.read().playlists.clone();
-        pls.sort_by_key(|p| (p.url() != Some("spotify:liked"), !p.is_imported()));
-        if !pls.is_empty() {
-            ui.separator();
-        }
-        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-            for p in pls {
-                if ui.button(&p.name).clicked() {
-                    drop_songs(app, &View::Playlist(p.id.clone()), &sel);
-                    ui.close_menu();
-                }
-            }
-        });
-    });
+    if ui.button("Add to playlist…").clicked() {
+        let pos = ui.ctx().pointer_latest_pos().unwrap_or(ui.min_rect().right_top());
+        app.pick = Some(super::plpick::Popup::new(sel.clone(), pos));
+        ui.close_menu();
+    }
     ui.separator();
     let liked = one.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);
     if ui.button(if liked { "Unlike" } else { "Like" }).clicked() {
@@ -707,7 +708,7 @@ fn empty_state(app: &mut App, ui: &mut Ui) {
     ui.vertical_centered(|ui| {
         let lib_empty = app.lib.data.read().tracks.is_empty();
         let (title, msg) = match (&app.browser.view, lib_empty) {
-            (View::Playlist(_), false) => ("EMPTY PLAYLIST", "Right-click songs > Add to playlist."),
+            (View::Playlist(_), false) => ("EMPTY PLAYLIST", "Search above, or right-click songs anywhere > Add to playlist."),
             (_, false) => ("NOTHING HERE YET", ""),
             _ => ("YOUR LIBRARY IS EMPTY", "Add a music folder, drop audio files on the window, or import a playlist."),
         };

@@ -51,6 +51,8 @@ fn d_vis() -> String { "bars".into() }
 fn d_fps() -> u32 { 30 }
 fn d_repeat() -> String { "off".into() }
 fn d_one() -> f32 { 1.0 }
+fn d_songs() -> String { "songs".into() }
+fn d_ten() -> u32 { 10 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +113,11 @@ pub struct Settings {
     #[serde(default)] pub session: Session,
     /// egui_dock layout (the Electron layout format isn't compatible, so it lives under a new key)
     #[serde(default)] pub dock: Option<Value>,
+    /// "find new songs" in a playlist: "songs" (YouTube Music) or "youtube", and how many results
+    #[serde(default = "d_songs")] pub search_source: String,
+    #[serde(default = "d_ten")] pub search_results: u32,
+    /// playlist songs were last added to (listed first in Ctrl+K's playlist picker)
+    #[serde(default)] pub last_playlist: String,
     /// keep any keys this version doesn't know about
     #[serde(flatten)] pub extra: Map<String, Value>,
 }

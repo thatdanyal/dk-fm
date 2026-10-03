@@ -27,12 +27,15 @@ pub struct ScopeState {
     im: Vec<f32>,
     spec: Vec<f32>,
     loaded: bool,
+    /// Settings > Look: custom colours (low, mid, peak) and bar count (0 = fit)
+    pub colors: Option<[Color32; 3]>,
+    pub bars: u32,
 }
 
 impl ScopeState {
     pub fn new() -> Self {
         let fft = Fft::new(FFT);
-        Self { mode: "bars".into(), drawn: false, tex: None, w: 0, h: 0, buf: Vec::new(), glow: Vec::new(), peaks: Vec::new(), vu: [0.0; 2], hold: [0; 2], fft, re: vec![0.0; FFT], im: vec![0.0; FFT], spec: vec![0.0; FFT / 2], loaded: false }
+        Self { mode: "bars".into(), drawn: false, tex: None, w: 0, h: 0, buf: Vec::new(), glow: Vec::new(), peaks: Vec::new(), vu: [0.0; 2], hold: [0; 2], fft, re: vec![0.0; FFT], im: vec![0.0; FFT], spec: vec![0.0; FFT / 2], loaded: false, colors: None, bars: 0 }
     }
     pub fn invalidate(&mut self) {
         self.w = 0;
@@ -63,7 +66,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     let (w, h) = ((r.width() / 2.0).max(1.0) as usize, (r.height() / 2.0).max(1.0) as usize);
     let s = &mut app.scope;
-    let col = Cols::new(&pal);
+    let col = Cols::new(&pal, s.colors);
     if s.w != w || s.h != h {
         s.w = w;
         s.h = h;
@@ -125,8 +128,9 @@ struct Cols {
 }
 
 impl Cols {
-    fn new(p: &super::theme::Pal) -> Self {
-        let stops = [p.lcd_bg, p.accent, p.accent2, p.text];
+    fn new(p: &super::theme::Pal, custom: Option<[Color32; 3]>) -> Self {
+        let [a, b, top] = custom.unwrap_or([p.accent, p.accent2, p.text]);
+        let stops = [p.lcd_bg, a, b, top];
         let heat = (0..256)
             .map(|i| {
                 let t = i as f32 / 255.0 * 3.0;
@@ -137,7 +141,7 @@ impl Cols {
                 Color32::from_rgb(m(c0.r(), c1.r()), m(c0.g(), c1.g()), m(c0.b(), c1.b()))
             })
             .collect();
-        Self { bg: p.lcd_bg, a: p.accent, b: p.accent2, text: p.text, dim: p.faint, heat }
+        Self { bg: p.lcd_bg, a, b, text: top, dim: p.faint, heat }
     }
 }
 
@@ -186,8 +190,13 @@ fn band(s: &ScopeState, i: usize, n: usize, sr: f32) -> f32 {
 fn bars(s: &mut ScopeState, c: &Cols, sr: f32) {
     s.buf.fill(c.bg);
     let (w, h) = (s.w as i32, s.h as i32);
-    let bw = if w > 300 { 5 } else { 3 };
-    let n = ((w - 2) / (bw + 1)).max(8) as usize;
+    let (bw, n) = if s.bars > 0 {
+        let n = (s.bars as i32).min((w - 2) / 2).max(4);
+        (((w - 2) / n - 1).max(1), n as usize)
+    } else {
+        let bw = if w > 300 { 5 } else { 3 };
+        (bw, ((w - 2) / (bw + 1)).max(8) as usize)
+    };
     let segs = ((h - 4) / 3).max(1);
     if s.peaks.len() != n {
         s.peaks = vec![0.0; n];

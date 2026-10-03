@@ -1,5 +1,7 @@
 //! Themes (same palettes as the Electron version) and fonts.
+use crate::store::{CustomTheme, Settings};
 use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke};
+use parking_lot::Mutex;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
@@ -54,16 +56,83 @@ pub fn palette(name: &str, accent: Option<&str>) -> Pal {
     p
 }
 
+/// "#rrggbb" or "#rrggbbaa".
 pub fn parse_hex(s: &str) -> Option<Color32> {
     let s = s.trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
+    let v = u32::from_str_radix(s, 16).ok()?;
+    match s.len() {
+        6 => Some(hex(v)),
+        8 => Some(Color32::from_rgba_unmultiplied((v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8)),
+        _ => None,
     }
-    u32::from_str_radix(s, 16).ok().map(hex)
 }
 
 pub fn to_hex(c: Color32) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 { format!("#{r:02x}{g:02x}{b:02x}") } else { format!("#{r:02x}{g:02x}{b:02x}{a:02x}") }
+}
+
+/// Palette fields by name, for the theme editor and custom themes.
+pub const FIELDS: [(&str, &str); 16] = [
+    ("bg", "Background"), ("bg2", "Sidebar & title bar"), ("panel", "Panels"), ("panel_hi", "Hover / raised"),
+    ("line", "Lines"), ("line_hi", "Borders"), ("text", "Text"), ("dim", "Dim text"),
+    ("faint", "Faint text"), ("accent", "Accent"), ("accent2", "Second accent"), ("ink", "Text on accent"),
+    ("lcd_bg", "Display background"), ("lcd", "Display text"), ("shadow", "Shadows"), ("sel", "Selection"),
+];
+
+impl Pal {
+    pub fn field(&mut self, name: &str) -> Option<&mut Color32> {
+        Some(match name {
+            "bg" => &mut self.bg, "bg2" => &mut self.bg2, "panel" => &mut self.panel, "panel_hi" => &mut self.panel_hi,
+            "line" => &mut self.line, "line_hi" => &mut self.line_hi, "text" => &mut self.text, "dim" => &mut self.dim,
+            "faint" => &mut self.faint, "accent" => &mut self.accent, "accent2" => &mut self.accent2, "ink" => &mut self.ink,
+            "lcd_bg" => &mut self.lcd_bg, "lcd" => &mut self.lcd, "shadow" => &mut self.shadow, "sel" => &mut self.sel,
+            _ => return None,
+        })
+    }
+    pub fn to_custom(mut self, name: &str) -> CustomTheme {
+        let colors = FIELDS.iter().map(|(f, _)| (f.to_string(), to_hex(*self.field(f).unwrap()))).collect();
+        CustomTheme { name: name.into(), dark: self.dark, colors }
+    }
+    pub fn from_custom(c: &CustomTheme) -> Pal {
+        let mut p = palette("", None);
+        p.dark = c.dark;
+        for (f, v) in &c.colors {
+            if let (Some(slot), Some(col)) = (p.field(f), parse_hex(v)) {
+                *slot = col;
+            }
+        }
+        p
+    }
+}
+
+pub const CUSTOM: &str = "custom:";
+
+/// The palette the settings ask for: a built-in theme (+ accent), or a custom one by name.
+pub fn resolve(s: &Settings) -> Pal {
+    if let Some(name) = s.theme.strip_prefix(CUSTOM) {
+        if let Some(c) = s.custom_themes.iter().find(|c| c.name == name) {
+            let mut p = Pal::from_custom(c);
+            if let Some(a) = s.accent.as_deref().and_then(parse_hex) {
+                p.accent = a;
+                p.lcd = a;
+            }
+            return p;
+        }
+    }
+    palette(&s.theme, s.accent.as_deref())
+}
+
+/// Every theme to pick from: built-ins, then custom ones (key, name).
+pub fn all_themes(s: &Settings) -> Vec<(String, String)> {
+    THEMES.iter().map(|(k, n)| (k.to_string(), n.to_string())).chain(s.custom_themes.iter().map(|c| (format!("{CUSTOM}{}", c.name), c.name.clone()))).collect()
+}
+
+pub fn theme_pal(s: &Settings, key: &str) -> Pal {
+    match key.strip_prefix(CUSTOM).and_then(|n| s.custom_themes.iter().find(|c| c.name == n)) {
+        Some(c) => Pal::from_custom(c),
+        None => palette(key, None),
+    }
 }
 
 pub fn vt(size: f32) -> FontId {
@@ -73,7 +142,18 @@ pub fn px(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name("px".into()))
 }
 
-pub fn install_fonts(ctx: &egui::Context) {
+/// Chosen font ("pixel" / "clean" / "sys:<file>") and whether headings stay pixel.
+static FONT: Mutex<(String, bool)> = Mutex::new((String::new(), true));
+
+/// Applies the font settings; does nothing (no font rebuild) when they haven't changed.
+pub fn set_font(ctx: &egui::Context, choice: &str, pixel_headings: bool) {
+    {
+        let mut f = FONT.lock();
+        if f.0 == choice && f.1 == pixel_headings {
+            return;
+        }
+        *f = (choice.to_string(), pixel_headings);
+    }
     ctx.set_fonts(font_definitions());
 }
 
@@ -81,11 +161,47 @@ pub fn font_definitions() -> FontDefinitions {
     // Only our own fonts (egui's built-in set is 1.4 MB). Fallbacks, tried in order for any
     // character the retro fonts lack: accented/Greek/Cyrillic text, emoji, UI icons, then the
     // pixel font (arrows and triangles).
+    let mut f = base_fonts();
+    // another font for body text (and headings unless they stay pixel): the same bytes twice,
+    // scaled to the sizes the retro fonts are used at
+    let (choice, pixel_heads) = FONT.lock().clone();
+    let bytes: Option<&'static [u8]> = match choice.as_str() {
+        "clean" => Some(TEXT_FONT),
+        c => c.strip_prefix("sys:").and_then(super::fonts::load),
+    };
+    if let Some(b) = bytes {
+        for (name, scale) in [("body", 0.8), ("head", 1.55)] {
+            let mut fd = FontData::from_static(b);
+            fd.tweak.scale = scale;
+            f.font_data.insert(name.into(), Arc::new(fd));
+        }
+        let chain = |first: &str| [first, "text", "emoji", "icons", "press"].iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for fam in [FontFamily::Name("vt".into()), FontFamily::Proportional, FontFamily::Monospace] {
+            f.families.insert(fam, chain("body"));
+        }
+        if !pixel_heads {
+            f.families.insert(FontFamily::Name("px".into()), chain("head"));
+        }
+    }
+    // Japanese / Korean / Chinese system fonts loaded so far
+    for (name, fd) in super::cjk::loaded() {
+        f.font_data.insert(name.clone(), Arc::new(fd));
+        for fam in f.families.values_mut() {
+            fam.push(name.clone());
+        }
+    }
+    f
+}
+
+/// Ubuntu (subset): fallback for accented text, and the "clean" font
+const TEXT_FONT: &[u8] = include_bytes!("../../assets/fallback-text.ttf");
+
+fn base_fonts() -> FontDefinitions {
     let mut f = FontDefinitions::empty();
     let fonts: [(&str, &'static [u8]); 5] = [
         ("vt323", include_bytes!("../../assets/VT323-Regular.ttf")),
         ("press", include_bytes!("../../assets/PressStart2P-Regular.ttf")),
-        ("text", include_bytes!("../../assets/fallback-text.ttf")),
+        ("text", TEXT_FONT),
         ("icons", include_bytes!("../../assets/fallback-icons.ttf")),
         ("emoji", include_bytes!("../../assets/fallback-emoji.ttf")),
     ];

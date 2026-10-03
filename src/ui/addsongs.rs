@@ -34,7 +34,7 @@ pub struct AddBox {
     owned: Option<(u64, Key, Vec<Option<String>>)>,
 }
 
-const SOURCES: [(&str, &str); 2] = [("songs", "SONGS"), ("youtube", "YOUTUBE")];
+pub const SOURCES: [(&str, &str); 3] = [("songs", "SONGS"), ("youtube", "YOUTUBE"), ("soundcloud", "SOUNDCLOUD")];
 
 enum Btn {
     Add,
@@ -86,7 +86,12 @@ fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>
 pub fn show(app: &mut App, ui: &mut Ui, pl: &Playlist) {
     let pal = app.pal;
     let gen = app.lib.gen.load(std::sync::atomic::Ordering::Relaxed);
-    let (source, n) = { let s = app.settings.lock(); (if s.search_source == "youtube" { "youtube" } else { "songs" }.to_string(), s.search_results.clamp(1, 50) as usize) };
+    // where to look (Settings > Search): library and online sources, in order
+    let (order, picked, n) = { let s = app.settings.lock(); (s.search_sources.clone(), s.search_source.clone(), s.search_results.clamp(1, 50) as usize) };
+    let online: Vec<(&str, &str)> = order.iter().filter_map(|k| SOURCES.iter().find(|s| s.0 == k).copied()).collect();
+    let use_lib = order.iter().any(|k| k == "library");
+    let lib_first = use_lib && order.iter().position(|k| k == "library") < order.iter().position(|k| SOURCES.iter().any(|s| s.0 == k));
+    let source = online.iter().find(|s| s.0 == picked).or(online.first()).map(|s| s.0.to_string());
     // finished online searches
     let done: Vec<(Key, Found)> = app.browser.add.slot.lock().drain(..).collect();
     for (k, r) in done {
@@ -125,78 +130,16 @@ pub fn show(app: &mut App, ui: &mut Ui, pl: &Playlist) {
         let w = ui.available_width();
         egui::ScrollArea::vertical().id_salt("addsongs").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            // ---- your library
-            if app.browser.add.local.as_ref().map(|l| l.0 != q || l.1 != gen).unwrap_or(true) {
-                let toks: Vec<String> = q.to_lowercase().split_whitespace().map(String::from).collect();
-                let d = app.lib.data.read();
-                let mut hits: Vec<(f32, &String)> = d.tracks.values().filter_map(|t| super::palette::score(&format!("{} {} {}", t.title, t.artist, t.album).to_lowercase(), &toks).map(|s| (s + d.stats.get(&t.id).map(|x| x.plays as f32 * 0.5).unwrap_or(0.0), &t.id))).collect();
-                hits.sort_by(|a, b| b.0.total_cmp(&a.0));
-                let ids = hits.into_iter().take(6).map(|h| h.1.clone()).collect();
-                drop(d);
-                app.browser.add.local = Some((q.clone(), gen, ids));
+            if lib_first {
+                library_rows(app, ui, pl, &q, gen, w);
+                ui.add_space(8.0);
             }
-            ui.label(egui::RichText::new("IN YOUR LIBRARY").font(px(6.0)).color(pal.dim));
-            ui.add_space(2.0);
-            let local = app.browser.add.local.as_ref().map(|l| l.2.clone()).unwrap_or_default();
-            if local.is_empty() {
-                ui.label(egui::RichText::new("  No matches in your library").color(pal.dim));
+            if let Some(source) = &source {
+                online_section(app, ui, pl, (&q, gen, w), &online, source, n, enter);
             }
-            for id in &local {
-                let Some(t) = app.lib.track(id) else { continue };
-                let inp = pl.track_ids.contains(id);
-                if row(ui, &pal, w, &t.title, &format!("{} · {}", t.artist, t.album).trim_end_matches(" · ").to_string(), Some(t.duration), if inp { Btn::Added } else { Btn::Add }) {
-                    app.lib.playlist_add(&pl.id, std::slice::from_ref(id));
-                    app.edit_settings(|s| s.last_playlist = pl.id.clone());
-                }
-            }
-            // ---- find new songs
-            ui.add_space(8.0);
-            let mut switch = None;
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("FIND NEW SONGS").font(px(6.0)).color(pal.dim));
-                ui.add_space(6.0);
-                for (k, label) in SOURCES {
-                    if tb_button(ui, &pal, label, source == k).on_hover_text(if k == "songs" { "Songs on YouTube Music (studio versions)" } else { "Any video on YouTube" }).clicked() && source != k {
-                        switch = Some(k);
-                    }
-                }
-            });
-            let source = match switch {
-                Some(k) => {
-                    app.edit_settings(|s| s.search_source = k.to_string());
-                    k.to_string()
-                }
-                None => source.clone(),
-            };
-            let key: Key = (source.clone(), q.clone());
-            let b = &mut app.browser.add;
-            let cached = b.online.iter().find(|x| x.0 == key).map(|x| x.1.clone());
-            let idle = b.edited.map(|t| t.elapsed() >= Duration::from_millis(700)).unwrap_or(true);
-            if cached.is_none() && !b.busy.contains(&key) && q.chars().count() >= 2 {
-                if idle || enter || switch.is_some() {
-                    b.busy.insert(key.clone());
-                    let (slot, ctx, k) = (b.slot.clone(), ui.ctx().clone(), key.clone());
-                    std::thread::spawn(move || {
-                        let r = sources::search(&k.1, &k.0, n);
-                        if let Ok(v) = &r {
-                            super::cjk::ensure(&ctx, &v.iter().map(|t| format!("{} {}", t.title, t.artists.join(" "))).collect::<String>());
-                        }
-                        slot.lock().push((k, r));
-                        ctx.request_repaint();
-                    });
-                } else {
-                    ui.ctx().request_repaint_after(Duration::from_millis(250));
-                }
-            }
-            match cached {
-                None => {
-                    let tools = crate::ytdlp::STATUS.lock().state.clone();
-                    ui.label(egui::RichText::new(if tools == "installing" { "SEARCHING… (getting the download tools first)" } else { "SEARCHING…" }).font(px(6.0)).color(pal.accent));
-                }
-                Some(Err(e)) => {
-                    ui.label(egui::RichText::new(format!("  {e}")).color(pal.accent));
-                }
-                Some(Ok(found)) => online_rows(app, ui, pl, &key, &found, gen, w),
+            if use_lib && !lib_first {
+                ui.add_space(8.0);
+                library_rows(app, ui, pl, &q, gen, w);
             }
         });
     });
@@ -204,6 +147,91 @@ pub fn show(app: &mut App, ui: &mut Ui, pl: &Playlist) {
         app.browser.add.open = false;
     }
     ui.add_space(6.0);
+}
+
+fn library_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, q: &str, gen: u64, w: f32) {
+    let pal = app.pal;
+    if app.browser.add.local.as_ref().map(|l| l.0 != q || l.1 != gen).unwrap_or(true) {
+        let toks: Vec<String> = q.to_lowercase().split_whitespace().map(String::from).collect();
+        let d = app.lib.data.read();
+        let mut hits: Vec<(f32, &String)> = d.tracks.values().filter_map(|t| super::palette::score(&format!("{} {} {}", t.title, t.artist, t.album).to_lowercase(), &toks).map(|s| (s + d.stats.get(&t.id).map(|x| x.plays as f32 * 0.5).unwrap_or(0.0), &t.id))).collect();
+        hits.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let ids = hits.into_iter().take(6).map(|h| h.1.clone()).collect();
+        drop(d);
+        app.browser.add.local = Some((q.to_string(), gen, ids));
+    }
+    ui.label(egui::RichText::new("IN YOUR LIBRARY").font(px(6.0)).color(pal.dim));
+    ui.add_space(2.0);
+    let local = app.browser.add.local.as_ref().map(|l| l.2.clone()).unwrap_or_default();
+    if local.is_empty() {
+        ui.label(egui::RichText::new("  No matches in your library").color(pal.dim));
+    }
+    for id in &local {
+        let Some(t) = app.lib.track(id) else { continue };
+        let inp = pl.track_ids.contains(id);
+        if row(ui, &pal, w, &t.title, &format!("{} · {}", t.artist, t.album).trim_end_matches(" · ").to_string(), Some(t.duration), if inp { Btn::Added } else { Btn::Add }) {
+            app.lib.playlist_add(&pl.id, std::slice::from_ref(id));
+            app.edit_settings(|s| s.last_playlist = pl.id.clone());
+        }
+    }
+}
+
+/// `at` = (query, lib.gen, width)
+fn online_section(app: &mut App, ui: &mut Ui, pl: &Playlist, at: (&str, u64, f32), online: &[(&str, &str)], source: &str, n: usize, enter: bool) {
+    let (q, gen, w) = at;
+    let pal = app.pal;
+    let mut switch = None;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("FIND NEW SONGS").font(px(6.0)).color(pal.dim));
+        ui.add_space(6.0);
+        for (k, label) in online {
+            let tip = match *k { "songs" => "Songs on YouTube Music (studio versions)", "youtube" => "Any video on YouTube", _ => "Tracks on SoundCloud" };
+            if tb_button(ui, &pal, label, source == *k).on_hover_text(tip).clicked() && source != *k {
+                switch = Some(*k);
+            }
+        }
+    });
+    let source = match switch {
+        Some(k) => {
+            app.edit_settings(|s| s.search_source = k.to_string());
+            k.to_string()
+        }
+        None => source.to_string(),
+    };
+    let key: Key = (source.clone(), q.to_string());
+    let b = &mut app.browser.add;
+    let cached = b.online.iter().find(|x| x.0 == key).map(|x| x.1.clone());
+    let idle = b.edited.map(|t| t.elapsed() >= Duration::from_millis(700)).unwrap_or(true);
+    if cached.is_none() && !b.busy.contains(&key) && q.chars().count() >= 2 {
+        if idle || enter || switch.is_some() {
+            b.busy.insert(key.clone());
+            let (slot, ctx, k) = (b.slot.clone(), ui.ctx().clone(), key.clone());
+            std::thread::spawn(move || {
+                let r = sources::search(&k.1, &k.0, n);
+                if let Ok(v) = &r {
+                    super::cjk::ensure(&ctx, &v.iter().map(|t| format!("{} {}", t.title, t.artists.join(" "))).collect::<String>());
+                }
+                slot.lock().push((k, r));
+                ctx.request_repaint();
+            });
+        } else {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+    }
+    match cached {
+        None => {
+            let tools = crate::ytdlp::STATUS.lock().state.clone();
+            ui.label(egui::RichText::new(if tools == "installing" { "SEARCHING… (getting the download tools first)" } else { "SEARCHING…" }).font(px(6.0)).color(pal.accent));
+        }
+        Some(Err(e)) => {
+            ui.label(egui::RichText::new(format!("  {e}")).color(pal.accent));
+        }
+        Some(Ok(found)) => {
+            // "hide explicit songs": only where the source marks them (YouTube Music)
+            let found: Vec<ITrack> = if app.settings.lock().hide_explicit { found.into_iter().filter(|t| !t.explicit).collect() } else { found };
+            online_rows(app, ui, pl, &key, &found, gen, w)
+        }
+    }
 }
 
 fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[ITrack], gen: u64, w: f32) {
@@ -217,16 +245,16 @@ fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[IT
     let owned = app.browser.add.owned.as_ref().map(|o| o.2.clone()).unwrap_or_default();
     // download progress of results being fetched
     let jobs: HashMap<String, (TStatus, f32)> = {
-        let want: HashSet<String> = found.iter().map(|t| format!("track-yt{}", t.youtube_id.as_deref().unwrap_or(""))).collect();
+        let want: HashSet<String> = found.iter().map(|t| format!("track-{}", col_id(t))).collect();
         app.dl.jobs.lock().iter().filter(|j| want.contains(&j.id)).filter_map(|j| j.tracks.first().map(|t| (j.id.clone(), (t.status.clone(), t.progress)))).collect()
     };
     if jobs.values().any(|j| j.0.active()) {
         ui.ctx().request_repaint_after(Duration::from_millis(400));
     }
     for (i, t) in found.iter().enumerate() {
-        let yid = t.youtube_id.clone().unwrap_or_default();
+        let cid = col_id(t);
         let have = owned.get(i).cloned().flatten();
-        let btn = match (&have, jobs.get(&format!("track-yt{yid}"))) {
+        let btn = match (&have, jobs.get(&format!("track-{cid}"))) {
             (Some(id), _) if pl.track_ids.contains(id) => Btn::Added,
             (Some(_), _) => Btn::Add,
             (None, Some((s, p))) => match s {
@@ -245,7 +273,8 @@ fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[IT
                     app.lib.playlist_add(&pl.id, &[id]);
                 }
                 None => {
-                    let col = Collection { kind: "track".into(), id: format!("yt{yid}"), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: "youtube".into(), source: "youtube".into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
+                    let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
+                    let col = Collection { kind: "track".into(), id: cid.clone(), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
                     app.dl.start_to(col, None, false, Some(pl.id.clone()));
                     app.toast(format!("Downloading \"{}\" into \"{}\"", t.title, pl.name));
                 }
@@ -253,4 +282,9 @@ fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[IT
             app.edit_settings(|s| s.last_playlist = pl.id.clone());
         }
     }
+}
+
+/// Download job id for a result ("yt" + video id, or "sc" + SoundCloud id).
+fn col_id(t: &ITrack) -> String {
+    t.source_key.replace(':', "")
 }

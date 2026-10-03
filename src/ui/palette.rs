@@ -39,6 +39,7 @@ enum Act {
     Rescan,
     Settings,
     Theme(String),
+    ApplyLayout(String),
     PlaySong(Vec<String>, usize),
 }
 
@@ -95,8 +96,12 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         ("Rescan library".into(), "refresh folders", "🔄", Act::Rescan),
         ("Settings".into(), "preferences options", "⚙", Act::Settings),
     ]);
-    for (k, name) in theme::THEMES {
-        v.push((format!("Theme: {name}"), "color look appearance", "■", Act::Theme(k.to_string())));
+    let s = app.settings.lock().clone();
+    for (k, name) in theme::all_themes(&s) {
+        v.push((format!("Theme: {name}"), "color look appearance", "■", Act::Theme(k)));
+    }
+    for name in app.layout_names() {
+        v.push((format!("Layout: {name}"), "panels arrange switch saved", "■", Act::ApplyLayout(name)));
     }
     v
 }
@@ -198,12 +203,17 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
             app.rescan();
             app.toast("Scanning library…");
         }
-        Act::Settings => app.modal = Some(Modal::Settings(super::settings::SetTab::Appearance)),
+        Act::Settings => app.modal = Some(Modal::Settings(super::settings::SetTab::Look)),
         Act::Theme(k) => {
             app.edit_settings(|s| s.theme = k);
             app.set_theme(ctx);
         }
         Act::PlaySong(ids, i) => app.player.play_list(ids, i, Some(false)),
+        Act::ApplyLayout(name) => {
+            if app.apply_layout(&name) {
+                app.toast(format!("Layout: {name}"));
+            }
+        }
     }
 }
 
@@ -270,7 +280,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                             ui.painter().image(t, ic, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                         }
                         None => {
-                            let color = if let Act::Theme(k) = &it.act { theme::palette(k, None).accent } else { pal.accent2 }; // the icon box stays dark on the highlighted row too
+                            let color = if let Act::Theme(k) = &it.act { theme::theme_pal(&app.settings.lock(), k).accent } else { pal.accent2 }; // the icon box stays dark on the highlighted row too
                             ui.painter().text(ic.center(), Align2::CENTER_CENTER, &it.icon, vt(18.0), color);
                         }
                     }

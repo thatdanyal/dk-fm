@@ -6,7 +6,6 @@ use super::theme;
 use eframe::egui::{self, FontData};
 use parking_lot::Mutex;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Script {
@@ -85,25 +84,25 @@ pub fn ensure(ctx: &egui::Context, text: &str) {
         }
     }
     if added {
-        let mut defs = theme::font_definitions();
-        let names: Vec<String> = st
-            .loaded
-            .iter()
-            .enumerate()
-            .map(|(n, (_, index, bytes))| {
-                let name = format!("cjk{n}");
-                let mut fd = FontData::from_static(bytes);
-                fd.index = *index;
-                defs.font_data.insert(name.clone(), Arc::new(fd));
-                name
-            })
-            .collect();
-        for fam in defs.families.values_mut() {
-            fam.extend(names.iter().cloned());
-        }
-        ctx.set_fonts(defs);
+        drop(st);
+        ctx.set_fonts(theme::font_definitions());
         ctx.request_repaint();
     }
+}
+
+/// Fonts loaded so far, for `theme::font_definitions` to append to every font family.
+pub fn loaded() -> Vec<(String, FontData)> {
+    STATE
+        .lock()
+        .loaded
+        .iter()
+        .enumerate()
+        .map(|(n, (_, index, bytes))| {
+            let mut fd = FontData::from_static(bytes);
+            fd.index = *index;
+            (format!("cjk{n}"), fd)
+        })
+        .collect()
 }
 
 fn covers(bytes: &[u8], index: u32, c: char) -> bool {
@@ -122,7 +121,7 @@ fn font_count(bytes: &[u8]) -> u32 {
 
 /// Maps the file for the rest of the run. The mapping is file-backed: only the glyphs actually
 /// drawn are read in, and the OS can drop them again under memory pressure.
-fn map(path: &PathBuf) -> Option<&'static [u8]> {
+pub(super) fn map(path: &PathBuf) -> Option<&'static [u8]> {
     let file = std::fs::File::open(path).ok()?;
     // SAFETY: system font files aren't modified while programs use them.
     let mmap = unsafe { memmap2::Mmap::map(&file) }.ok()?;

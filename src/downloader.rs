@@ -70,10 +70,103 @@ pub struct Downloader {
 }
 
 fn sanitize(s: &str) -> String {
+    let t = clean(s);
+    if t.is_empty() { "Untitled".into() } else { t }
+}
+
+/// Text that's safe inside a file or folder name on every OS (≤ 120 characters, may be empty).
+fn clean(s: &str) -> String {
     let t: String = s.chars().filter(|c| !"<>:\"/\\|?*".contains(*c) && !c.is_control()).collect();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    let t = t.trim_end_matches(['.', ' ']).chars().take(120).collect::<String>();
-    if t.is_empty() { "Untitled".into() } else { t }
+    t.trim_end_matches(['.', ' ']).chars().take(120).collect::<String>()
+}
+
+/// What a downloaded song's file name is built from.
+pub struct NameParts<'a> {
+    pub artist: &'a str,
+    pub album: &'a str,
+    pub title: &'a str,
+    pub track: Option<u32>,
+    pub year: Option<u32>,
+    /// the playlist / album name, or "Singles" / "Discovered"
+    pub folder: &'a str,
+}
+
+pub const NAME_TOKENS: [&str; 6] = ["{artist}", "{album}", "{title}", "{track}", "{year}", "{folder}"];
+
+/// File path (relative to the download folder, without extension) from a pattern such as
+/// `{artist}/{album}/{track} {title}`: "/" makes folders, empty folders are skipped, and every
+/// part is made safe for Windows (no reserved characters or names, no trailing dots).
+pub fn render_name(pattern: &str, p: &NameParts) -> PathBuf {
+    let pattern = if pattern.trim().is_empty() { store::DEFAULT_PATTERN } else { pattern };
+    let vals = [
+        clean(p.artist).or_if_empty("Unknown"),
+        clean(p.album),
+        clean(p.title).or_if_empty("Untitled"),
+        p.track.map(|n| format!("{n:02}")).unwrap_or_default(),
+        p.year.map(|y| y.to_string()).unwrap_or_default(),
+        clean(p.folder).or_if_empty("Untitled"),
+    ];
+    let segs: Vec<&str> = pattern.split(['/', '\\']).collect();
+    let mut out = PathBuf::new();
+    for (i, seg) in segs.iter().enumerate() {
+        let mut s = String::new();
+        let mut rest = *seg;
+        while !rest.is_empty() {
+            match NAME_TOKENS.iter().enumerate().find(|(_, t)| rest.starts_with(**t)) {
+                Some((k, t)) => {
+                    s.push_str(&vals[k]);
+                    rest = &rest[t.len()..];
+                }
+                None => {
+                    let c = rest.chars().next().unwrap();
+                    if !"<>:\"|?*".contains(c) && !c.is_control() {
+                        s.push(c);
+                    }
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+        }
+        let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut s: String = s.trim_matches(['-', ' ']).trim_end_matches('.').trim_end().chars().take(200).collect();
+        let last = i + 1 == segs.len();
+        if s.is_empty() || s.chars().all(|c| c == '.') {
+            if !last {
+                continue;
+            }
+            s = "Untitled".into();
+        }
+        let base = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+        if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (base.len() == 4 && (base.starts_with("COM") || base.starts_with("LPT")) && base.as_bytes()[3].is_ascii_digit()) {
+            s.insert(0, '_');
+        }
+        out.push(s);
+    }
+    out
+}
+
+trait OrDefault {
+    fn or_if_empty(self, d: &str) -> String;
+}
+impl OrDefault for String {
+    fn or_if_empty(self, d: &str) -> String {
+        if self.is_empty() { d.to_string() } else { self }
+    }
+}
+
+/// `{folder}`: the playlist or album name; single songs go to "Singles", radio finds to "Discovered".
+fn folder_name(kind: &str, name: &str) -> String {
+    match kind { "track" => "Singles".into(), "radio" => "Discovered".into(), _ => name.into() }
+}
+
+/// Import matching strictness ->(minimum score to try a result, score to accept the best one
+/// anyway, score below which a match is marked "check this").
+pub fn thresholds(strictness: &str) -> (i32, i32, i32) {
+    match strictness {
+        "relaxed" => (10, 25, 35),
+        "strict" => (35, 50, 60),
+        _ => (20, 35, 45),
+    }
 }
 
 fn fmt_args(fmt: &str) -> (&'static str, Vec<&'static str>) {
@@ -138,9 +231,9 @@ impl Downloader {
         let job_id = format!("{}-{}", col.kind, col.id);
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
-        let (dir, fmt) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone()) };
-        let sub = match col.kind.as_str() { "track" => "Singles".to_string(), "radio" => "Discovered".to_string(), _ => col.name.clone() };
-        let folder = PathBuf::from(dir).join(sanitize(&sub));
+        let (dir, fmt, pattern) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone(), s.name_pattern.clone()) };
+        // the folder "open folder" shows (songs may go into subfolders of it, per the name pattern)
+        let folder = if pattern.trim().is_empty() || pattern.starts_with("{folder}") { PathBuf::from(dir).join(sanitize(&folder_name(&col.kind, &col.name))) } else { PathBuf::from(dir) };
         if col.kind == "playlist" || col.kind == "album" {
             let pid = format!("sp-{job_id}");
             let prev = self.lib.data.read().playlists.iter().find(|p| p.id == pid).cloned();
@@ -271,19 +364,23 @@ impl Downloader {
     }
 
     fn process(&self, job_id: &str, idx: usize) -> Result<(), String> {
-        let (t, folder, fmt, kind, job_cover, job_name, cancel, forced) = {
+        let (t, fmt, kind, job_cover, job_name, cancel, forced) = {
             let jobs = self.jobs.lock();
             let j = jobs.iter().find(|j| j.id == job_id).ok_or("job gone")?;
             let jt = j.tracks.get(idx).ok_or("track gone")?;
             if jt.status != TStatus::Queued || j.cancel.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            (jt.t.clone(), j.folder.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone())
+            (jt.t.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone())
         };
         let (ext, args) = fmt_args(&fmt);
-        let _ = std::fs::create_dir_all(&folder);
+        let (dir, pattern, strictness) = { let s = self.settings.lock(); (s.download_dir.clone(), s.name_pattern.clone(), s.match_strictness.clone()) };
+        let (min_score, accept_score, sure_score) = thresholds(&strictness);
         let first_artist = t.artists.first().cloned().unwrap_or_else(|| "Unknown".into());
-        let out_file = folder.join(format!("{} - {}.{ext}", sanitize(&first_artist), sanitize(&t.title)));
+        let album = if !t.album.is_empty() { t.album.clone() } else if kind == "playlist" || kind == "album" { job_name.clone() } else { t.title.clone() };
+        let rel = render_name(&pattern, &NameParts { artist: &first_artist, album: &album, title: &t.title, track: t.track_no, year: t.year, folder: &folder_name(&kind, &job_name) });
+        let out_file = PathBuf::from(dir).join(format!("{}.{ext}", rel.display()));
+        let _ = std::fs::create_dir_all(out_file.parent().unwrap_or(Path::new(".")));
 
         if out_file.exists() && forced.is_none() {
             let ids = self.lib.add_files(&[out_file.clone()], |lt| apply_keys(lt, &t, None));
@@ -307,8 +404,8 @@ impl Downloader {
         } else {
             let cands = sources::rank(search(&t, &cancel)?, &t);
             self.with_track(job_id, idx, |jt| jt.candidates = cands.iter().take(6).cloned().collect());
-            let mut o: Vec<Cand> = cands.iter().filter(|c| c.score >= 20 && (want.is_none() || c.duration.is_none() || (c.duration.unwrap() - want.unwrap()).abs() <= 20.0)).take(3).cloned().collect();
-            if o.is_empty() && cands.first().map(|c| c.score >= 35).unwrap_or(false) {
+            let mut o: Vec<Cand> = cands.iter().filter(|c| c.score >= min_score && (want.is_none() || c.duration.is_none() || (c.duration.unwrap() - want.unwrap()).abs() <= 20.0)).take(3).cloned().collect();
+            if o.is_empty() && cands.first().map(|c| c.score >= accept_score).unwrap_or(false) {
                 o.push(cands[0].clone());
             }
             if o.is_empty() {
@@ -326,7 +423,7 @@ impl Downloader {
                 self.with_track(job_id, idx, |jt| {
                     jt.status = TStatus::Downloading;
                     jt.progress = 0.0;
-                    jt.low_confidence = c.score < 45;
+                    jt.low_confidence = c.score < sure_score;
                     jt.matched = Some(c.clone());
                 });
                 let url = if c.source == "direct" { t.direct_url.clone().unwrap() } else { format!("https://music.youtube.com/watch?v={}", c.id) };
@@ -381,7 +478,6 @@ impl Downloader {
                     }
                 }
             }
-            let album = if !t.album.is_empty() { t.album.clone() } else if kind == "playlist" || kind == "album" { job_name.clone() } else { t.title.clone() };
             let comment = format!("DK.FM · {}{}", if pick.id.is_empty() { t.direct_url.clone().unwrap_or_default() } else { format!("youtube:{}", pick.id) }, t.spotify_id.as_ref().map(|s| format!(" · spotify:{s}")).unwrap_or_default());
             write_tags(&audio, &t, &album, &comment, cover)?;
             if std::fs::rename(&audio, &out_file).is_err() {
@@ -592,6 +688,34 @@ fn write_tags(path: &Path, t: &ITrack, album: &str, comment: &str, cover: Option
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_downloads_from_the_pattern() {
+        let p = NameParts { artist: "AC/DC", album: "Back in Black", title: "Hells Bells", track: Some(1), year: Some(1980), folder: "My: Mix" };
+        let r = |pat: &str| render_name(pat, &p).to_string_lossy().replace('\\', "/");
+        // default = how DK.FM always named files
+        assert_eq!(r(store::DEFAULT_PATTERN), format!("{}/{} - {}", sanitize("My: Mix"), sanitize("AC/DC"), sanitize("Hells Bells")));
+        assert_eq!(r(""), "My Mix/ACDC - Hells Bells");
+        assert_eq!(r("{artist}/{album}/{track} {title}"), "ACDC/Back in Black/01 Hells Bells");
+        assert_eq!(r("{year} - {album}\\{track}. {title}"), "1980 - Back in Black/01. Hells Bells");
+        // missing values: empty folders are skipped, dangling separators trimmed
+        let q = NameParts { artist: "", album: "", title: "", track: None, year: None, folder: "Singles" };
+        assert_eq!(render_name("{album}/{track} - {title}", &q).to_string_lossy(), "Untitled");
+        assert_eq!(render_name("{artist}/{year}/{title}", &q).to_string_lossy().replace('\\', "/"), "Unknown/Untitled");
+        // Windows: reserved characters and names, trailing dots, no escaping the folder
+        let w = NameParts { artist: "CON", album: "a?b*", title: "Wait...", track: None, year: None, folder: "x" };
+        assert_eq!(render_name("{artist}/{album}/{title}", &w).to_string_lossy().replace('\\', "/"), "_CON/ab/Wait");
+        assert_eq!(render_name("../../{title}:<x>", &w).to_string_lossy(), "Waitx");
+        assert_eq!(render_name("C:/Windows/{title}", &w).to_string_lossy().replace('\\', "/"), "C/Windows/Wait");
+    }
+
+    #[test]
+    fn strictness_thresholds_order() {
+        let (r, n, s) = (thresholds("relaxed"), thresholds("normal"), thresholds("strict"));
+        assert_eq!(n, (20, 35, 45));
+        assert!(r.0 < n.0 && n.0 < s.0 && r.1 < n.1 && n.1 < s.1);
+        assert_eq!(thresholds("???"), n);
+    }
 
     #[test]
     fn finished_song_goes_into_target_playlist() {

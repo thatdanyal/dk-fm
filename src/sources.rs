@@ -556,11 +556,12 @@ pub fn radio(title: &str, artist: &str, youtube_id: Option<&str>) -> Result<Coll
     Ok(col)
 }
 
-/// "Find new songs" search: YouTube Music songs (`source` = "songs") or regular YouTube videos.
-/// Results carry a direct video link, so downloading them needs no matching.
+/// "Find new songs" search: YouTube Music songs (`source` = "songs"), regular YouTube videos
+/// ("youtube") or SoundCloud ("soundcloud"). Results carry a direct link, so downloading them
+/// needs no matching.
 pub fn search(q: &str, source: &str, n: usize) -> Result<Vec<ITrack>, String> {
     let n = n.clamp(1, 50);
-    if source != "youtube" {
+    if source == "songs" {
         // YouTube Music's own search API has artist / album / length (yt-dlp's flat listing only has titles)
         match music_search(q, n) {
             Ok(v) if !v.is_empty() => return Ok(v),
@@ -568,8 +569,13 @@ pub fn search(q: &str, source: &str, n: usize) -> Result<Vec<ITrack>, String> {
         }
     }
     ytdlp::ensure()?;
-    let url = if source == "youtube" { format!("ytsearch{n}:{q}") } else { format!("https://music.youtube.com/search?q={}#songs", enc(q)) };
-    let raw = ytdlp::run_with(&["--flat-playlist".into(), "-J".into(), "--playlist-end".into(), n.to_string(), url], None, None)?;
+    let url = match source {
+        "youtube" => format!("ytsearch{n}:{q}"),
+        // a few extra: 30-second previews of paid tracks are dropped
+        "soundcloud" => format!("scsearch{}:{q}", n + 5),
+        _ => format!("https://music.youtube.com/search?q={}#songs", enc(q)),
+    };
+    let raw = ytdlp::run_with(&["--flat-playlist".into(), "-J".into(), "--playlist-end".into(), (n + 5).to_string(), url], None, None)?;
     let j: Value = serde_json::from_str(&raw).map_err(|e| format!("bad yt-dlp output: {e}"))?;
     let out: Vec<ITrack> = j["entries"]
         .as_array()
@@ -577,11 +583,20 @@ pub fn search(q: &str, source: &str, n: usize) -> Result<Vec<ITrack>, String> {
         .unwrap_or(&[])
         .iter()
         .filter_map(|e| {
-            let id = e["id"].as_str().filter(|i| i.len() == 11)?;
             let channel = e["channel"].as_str().or(e["uploader"].as_str()).unwrap_or("");
+            if source == "soundcloud" {
+                let id = e["id"].as_str().map(String::from).or(e["id"].as_u64().map(|i| i.to_string()))?;
+                let secs = e["duration"].as_f64().filter(|d| *d > 31.0)?;
+                let link = e["webpage_url"].as_str()?;
+                let cover = e["thumbnails"].as_array().and_then(|a| a.iter().find(|t| t["id"] == "t500x500")).and_then(|t| t["url"].as_str()).map(String::from);
+                let (artist, title) = split_title(e["title"].as_str().unwrap_or(""), channel);
+                return Some(ITrack { title, artists: vec![artist], duration_ms: Some((secs * 1000.0) as u64), cover, direct_url: Some(link.into()), source_key: format!("sc:{id}"), ..Default::default() });
+            }
+            let id = e["id"].as_str().filter(|i| i.len() == 11)?;
             let (artist, title) = split_title(e["title"].as_str().unwrap_or(""), channel);
             Some(yt_track(id, title, vec![artist], String::new(), e["duration"].as_f64(), None, source))
         })
+        .take(n)
         .collect();
     if out.is_empty() {
         return Err("No results".into());
@@ -624,7 +639,9 @@ fn music_search(q: &str, n: usize) -> Result<Vec<ITrack>, String> {
         let thumb = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"].as_array().and_then(|a| a.last()).and_then(|t| t["url"].as_str());
         // album art: ask for a 544px copy of the square thumbnail
         let cover = thumb.map(|u| Regex::new(r"=w\d+-h\d+").unwrap().replace(u, "=w544-h544").into_owned());
-        out.push(yt_track(id, title, if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs"));
+        let mut t = yt_track(id, title, if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs");
+        t.explicit = r["badges"].to_string().contains("MUSIC_EXPLICIT_BADGE");
+        out.push(t);
         if out.len() >= n {
             break;
         }
@@ -757,5 +774,12 @@ mod tests {
             assert!(r.iter().any(|t| t.title.to_lowercase().contains("one more time") && t.duration_ms.is_some()));
         }
         assert!(super::search("daft punk one more time", "songs", 3).unwrap().iter().any(|t| t.artists.iter().any(|a| a == "Daft Punk")));
+        // SoundCloud: direct links, no 30-second previews
+        let sc = super::search("daft punk one more time", "soundcloud", 5).unwrap();
+        for t in &sc {
+            eprintln!("soundcloud: {} | {} | {:?} | {:?}", t.title, t.artists.join(", "), t.duration_ms, t.direct_url);
+        }
+        assert!(!sc.is_empty() && sc.len() <= 5);
+        assert!(sc.iter().all(|t| t.source_key.starts_with("sc:") && t.direct_url.as_deref().unwrap_or("").contains("soundcloud.com") && t.duration_ms.unwrap_or(0) > 31_000));
     }
 }

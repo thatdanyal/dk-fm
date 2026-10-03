@@ -7,7 +7,9 @@ pub mod cjk;
 pub mod deck;
 pub mod dupes;
 pub mod eqpanel;
+pub mod fonts;
 pub mod import;
+pub mod keys;
 pub mod lyrics;
 pub mod palette;
 pub mod plpick;
@@ -24,7 +26,7 @@ use crate::player::Player;
 use crate::store::Settings;
 use crate::system::{self, Media, Tray, UpdState};
 use crate::watcher::FolderWatcher;
-use eframe::egui::{self, Align2, Color32, Id, Key, LayerId, Order, Rect, Sense, Vec2, ViewportCommand};
+use eframe::egui::{self, Align2, Color32, Id, LayerId, Order, Rect, Sense, Vec2, ViewportCommand};
 use egui_dock::{DockArea, DockState, NodeIndex};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -105,6 +107,8 @@ pub struct App {
     frames: u64,
     cjk_gen: u64,
     pub drop_hover: bool,
+    /// settings window state (theme editor draft, key capture, confirmations)
+    pub setui: settings::SetUi,
 }
 
 pub fn default_dock() -> DockState<Tab> {
@@ -120,12 +124,10 @@ pub fn default_dock() -> DockState<Tab> {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext, lib: Arc<Library>, player: Arc<Player>, dl: Arc<Downloader>, watcher: Arc<FolderWatcher>, settings: Arc<Mutex<Settings>>, settings_dirty: Arc<AtomicBool>, hidden: bool) -> Self {
-        theme::install_fonts(&cc.egui_ctx);
-        let (tkey, accent, dock_json) = {
+        let (tkey, pal, dock_json, start) = {
             let s = settings.lock();
-            (s.theme.clone(), s.accent.clone(), s.dock.clone())
+            (s.theme.clone(), theme::resolve(&s), s.dock.clone(), s.start_view.clone())
         };
-        let pal = theme::palette(&tkey, accent.as_deref());
         theme::apply(&cc.egui_ctx, &pal);
         *system::CTX.lock() = Some(cc.egui_ctx.clone());
 
@@ -184,7 +186,12 @@ impl App {
         }
         let mut covers = widgets::Covers::new();
         covers.ctx = Some(cc.egui_ctx.clone());
-        Self {
+        crate::backup::auto_loop(lib.clone(), settings.clone());
+        let mut browser = browser::BrowserState::default();
+        if let Some(v) = browser::view_for(&start) {
+            browser.set_view(v);
+        }
+        let mut app = Self {
             lib,
             player,
             dl,
@@ -198,7 +205,7 @@ impl App {
             mini: false,
             normal_size: None,
             covers,
-            browser: browser::BrowserState::default(),
+            browser,
             import: import::ImportState::default(),
             scope: scope::ScopeState::new(),
             lyrics: lyrics::LyricsState::default(),
@@ -216,7 +223,10 @@ impl App {
             frames: 0,
             cjk_gen: 0,
             drop_hover: false,
-        }
+            setui: Default::default(),
+        };
+        app.apply_look(&cc.egui_ctx);
+        app
     }
 
     /// Loads a system font when Japanese/Korean/Chinese text shows up (see cjk.rs).
@@ -259,12 +269,92 @@ impl App {
     }
 
     pub fn set_theme(&mut self, ctx: &egui::Context) {
-        let (k, a) = { let s = self.settings.lock(); (s.theme.clone(), s.accent.clone()) };
-        self.theme_key = k.clone();
-        self.pal = theme::palette(&k, a.as_deref());
+        let (k, pal) = { let s = self.settings.lock(); (s.theme.clone(), theme::resolve(&s)) };
+        self.theme_key = k;
+        self.pal = pal;
         theme::apply(ctx, &self.pal);
         self.scope.invalidate();
         self.settings_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Font, zoom and visualizer settings (each only does work when it actually changed).
+    pub fn apply_look(&mut self, ctx: &egui::Context) {
+        let (font, heads, zoom, vis, bars) = { let s = self.settings.lock(); (s.font.clone(), s.pixel_headings, s.zoom.clamp(0.9, 1.5), s.vis_colors.clone(), s.vis_bars) };
+        theme::set_font(ctx, &font, heads);
+        if (ctx.zoom_factor() - zoom).abs() > 0.001 {
+            ctx.set_zoom_factor(zoom);
+        }
+        let colors = vis.and_then(|c| Some([theme::parse_hex(&c[0])?, theme::parse_hex(&c[1])?, theme::parse_hex(&c[2])?]));
+        if colors != self.scope.colors || bars != self.scope.bars {
+            self.scope.colors = colors;
+            self.scope.bars = bars;
+            self.scope.invalidate();
+        }
+    }
+
+    /// After restoring a backup: reapply every setting and rescan the music folders.
+    pub fn reload_all(&mut self, ctx: &egui::Context) {
+        let s = self.settings.lock().clone();
+        self.set_theme(ctx);
+        self.apply_look(ctx);
+        self.dock = s.dock.clone().and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok()).filter(|d| d.iter_all_tabs().count() > 0).unwrap_or_else(default_dock);
+        let p = &self.player;
+        p.set_volume(s.player.volume);
+        p.set_crossfade(s.player.crossfade);
+        p.set_normalize(s.player.normalize);
+        p.set_match_volume(s.player.match_volume);
+        p.set_smart_shuffle(s.player.smart_shuffle);
+        p.set_visualizer(&s.player.visualizer, s.player.vis_fps);
+        p.set_eq(s.eq.clone());
+        self.scope.mode = s.player.visualizer.clone();
+        self.browser.set_view(browser::View::All);
+        self.settings_dirty.store(true, Ordering::Relaxed);
+        self.rescan();
+    }
+
+    // ------------------------------------------------------------ saved layouts
+    pub const PRESETS: [&'static str; 2] = ["Default", "Minimal"];
+
+    fn preset(name: &str) -> Option<DockState<Tab>> {
+        match name {
+            "Default" => Some(default_dock()),
+            "Minimal" => {
+                let mut d = DockState::new(vec![Tab::Library]);
+                let _ = d.main_surface_mut().split_left(NodeIndex::root(), 0.26, vec![Tab::Deck, Tab::Queue]);
+                Some(d)
+            }
+            _ => None,
+        }
+    }
+
+    /// Switch to a built-in or saved layout by name.
+    pub fn apply_layout(&mut self, name: &str) -> bool {
+        let saved = self.settings.lock().layouts.iter().find(|l| l.name == name).and_then(|l| serde_json::from_value::<DockState<Tab>>(l.dock.clone()).ok());
+        match saved.filter(|d| d.iter_all_tabs().count() > 0).or_else(|| Self::preset(name)) {
+            Some(d) => {
+                self.dock = d;
+                self.save_dock();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Save the current layout under a name (replacing one with the same name).
+    pub fn save_layout(&mut self, name: &str) {
+        let Ok(v) = serde_json::to_value(&self.dock) else { return };
+        self.edit_settings(|s| {
+            s.layouts.retain(|l| l.name != name);
+            s.layouts.push(crate::store::NamedLayout { name: name.to_string(), dock: v });
+        });
+    }
+
+    /// Built-in and saved layout names.
+    pub fn layout_names(&self) -> Vec<String> {
+        let saved: Vec<String> = self.settings.lock().layouts.iter().map(|l| l.name.clone()).collect();
+        let mut v: Vec<String> = Self::PRESETS.iter().map(|s| s.to_string()).filter(|p| !saved.contains(p)).collect();
+        v.extend(saved);
+        v
     }
 
     pub fn edit_settings(&self, f: impl FnOnce(&mut Settings)) {
@@ -386,15 +476,16 @@ impl App {
                     }
                     egui::popup::popup_below_widget(ui, tid, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
                         ui.set_min_width(180.0);
-                        for (k, name) in theme::THEMES {
-                            let sw = theme::palette(k, None).accent;
+                        let s = self.settings.lock().clone();
+                        for (k, name) in theme::all_themes(&s) {
+                            let sw = theme::theme_pal(&s, &k).accent;
                             let resp = ui.horizontal(|ui| {
                                 let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                                 fill(ui.painter(), r, sw);
-                                ui.button(format!("{} {name}", if self.theme_key == *k { "•" } else { " " }))
+                                ui.button(format!("{} {name}", if self.theme_key == k { "•" } else { " " }))
                             });
                             if resp.inner.clicked() {
-                                chosen = Some(k.to_string());
+                                chosen = Some(k);
                             }
                         }
                     });
@@ -403,7 +494,7 @@ impl App {
                         self.set_theme(ctx);
                     }
                     if tb_button(ui, &pal, "SETTINGS", false).clicked() {
-                        self.modal = Some(Modal::Settings(settings::SetTab::Appearance));
+                        self.modal = Some(Modal::Settings(settings::SetTab::Look));
                     }
                     // centre status
                     if self.lib.scanning.load(Ordering::Relaxed) {
@@ -473,44 +564,68 @@ impl App {
 
     // ------------------------------------------------------------ shortcuts
     fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.setui.capturing() {
+            return; // Settings > Shortcuts is recording a new key
+        }
+        let pressed: Vec<keys::Combo> = ctx.input(|i| i.events.iter().filter_map(|e| if let egui::Event::Key { key, pressed: true, modifiers, .. } = e { Some(keys::Combo::from_event(*key, *modifiers)) } else { None }).collect());
+        if pressed.is_empty() {
+            return;
+        }
         let typing = ctx.wants_keyboard_input();
-        let (pressed, cmd, shift) = ctx.input(|i| {
-            let keys: Vec<Key> = i.events.iter().filter_map(|e| if let egui::Event::Key { key, pressed: true, .. } = e { Some(*key) } else { None }).collect();
-            (keys, i.modifiers.command, i.modifiers.shift)
-        });
-        for k in pressed {
-            match (k, cmd) {
-                (Key::K, true) => self.palette = if self.palette.is_some() { None } else { Some(palette::PaletteState::default()) },
-                (Key::Comma, true) => self.modal = Some(Modal::Settings(settings::SetTab::Appearance)),
-                (Key::E, true) => self.layout_edit = !self.layout_edit,
-                (Key::M, true) => self.toggle_mini(ctx),
-                (Key::F, true) => {
-                    self.show_panel(Tab::Library);
-                    self.browser.focus_search = true;
+        let map = self.settings.lock().keys.clone();
+        for c in pressed {
+            for a in keys::matching(&map, c) {
+                // Ctrl shortcuts that don't edit text work everywhere; the rest not while typing,
+                // and plain keys not over the palette or a window either
+                let global = keys::GLOBAL.contains(&a) && (c.ctrl || c.alt);
+                if !global && (typing || (!c.ctrl && !c.alt && (self.palette.is_some() || self.modal.is_some()))) {
+                    continue;
                 }
-                (Key::I, true) => {
-                    self.show_panel(Tab::Library);
-                    self.browser.set_view(browser::View::Import);
-                }
-                (Key::ArrowRight, true) if !typing => self.player.next(true),
-                (Key::ArrowLeft, true) if !typing => self.player.prev(),
-                _ if typing || self.palette.is_some() || self.modal.is_some() => {}
-                (Key::Space, false) => self.player.toggle(),
-                (Key::ArrowRight, false) => self.player.seek(self.player.status().position + if shift { 30.0 } else { 5.0 }),
-                (Key::ArrowLeft, false) => self.player.seek(self.player.status().position - if shift { 30.0 } else { 5.0 }),
-                (Key::ArrowUp, false) => { let v = self.player.st.lock().opts.volume; self.player.set_volume(v + 0.05) }
-                (Key::ArrowDown, false) => { let v = self.player.st.lock().opts.volume; self.player.set_volume(v - 0.05) }
-                (Key::M, false) => self.player.toggle_mute(),
-                (Key::S, false) => self.player.toggle_shuffle(),
-                (Key::R, false) => self.player.cycle_repeat(),
-                (Key::L, false) => {
-                    if let Some(id) = self.player.current_id() {
-                        self.lib.toggle_like(&id);
-                    }
-                }
-                (Key::V, false) => self.scope.cycle(&self.player),
-                _ => {}
+                self.run_action(ctx, a);
             }
+        }
+    }
+
+    pub fn run_action(&mut self, ctx: &egui::Context, action: &str) {
+        let pos = || self.player.status().position;
+        match action {
+            "palette" => self.palette = if self.palette.is_some() { None } else { Some(palette::PaletteState::default()) },
+            "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Look)),
+            "layout" => self.layout_edit = !self.layout_edit,
+            "mini" => self.toggle_mini(ctx),
+            "search" => {
+                self.show_panel(Tab::Library);
+                self.browser.focus_search = true;
+            }
+            "import" => {
+                self.show_panel(Tab::Library);
+                self.browser.set_view(browser::View::Import);
+            }
+            "next" => self.player.next(true),
+            "prev" => self.player.prev(),
+            "play" => self.player.toggle(),
+            "fwd" => self.player.seek(pos() + 5.0),
+            "back" => self.player.seek(pos() - 5.0),
+            "fwd_long" => self.player.seek(pos() + 30.0),
+            "back_long" => self.player.seek(pos() - 30.0),
+            "vol_up" | "vol_down" => {
+                let v = self.player.st.lock().opts.volume;
+                self.player.set_volume(v + if action == "vol_up" { 0.05 } else { -0.05 })
+            }
+            "mute" => self.player.toggle_mute(),
+            "shuffle" => self.player.toggle_shuffle(),
+            "repeat" => self.player.cycle_repeat(),
+            "like" => {
+                if let Some(id) = self.player.current_id() {
+                    self.lib.toggle_like(&id);
+                }
+            }
+            "vis" => self.scope.cycle(&self.player),
+            "rescan" => {
+                self.rescan();
+                self.toast("Scanning library…");
+            }
+            _ => {}
         }
     }
 
@@ -599,7 +714,16 @@ impl App {
                     let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
                     if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
                 }
-                "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Appearance)),
+                "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Look)),
+                // settings-look, settings-search, settings-backup, ... (a tab by name)
+                v if v.starts_with("settings-") => self.modal = Some(Modal::Settings(settings::tab_named(&v[9..]))),
+                v if v.starts_with("layout-") => {
+                    self.apply_layout(&v[7..]);
+                }
+                "theme-editor" => {
+                    self.modal = Some(Modal::Settings(settings::SetTab::Look));
+                    self.setui.edit_theme(self.pal, "My Red Retro");
+                }
                 "palette" => self.palette = Some(palette::PaletteState { query: std::env::var("DKFM_QUERY").unwrap_or_default(), ..Default::default() }),
                 // Ctrl+K playlist picker for the first song matching DKFM_QUERY
                 "palette-pick" => {

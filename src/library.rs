@@ -132,6 +132,20 @@ impl Library {
         }
     }
 
+    /// Swap in restored data (from a backup). Songs whose cover art file is gone are re-read by
+    /// the next scan, which rebuilds it from the song file.
+    pub fn replace(&self, mut data: LibraryData, history: History) {
+        for t in data.tracks.values_mut() {
+            if t.cover.iter().chain(t.thumb.iter()).any(|c| !self.cover_dir.join(c).exists()) {
+                t.v = 0;
+            }
+        }
+        *self.data.write() = data;
+        *self.history.write() = history;
+        self.history_dirty.store(true, Ordering::Relaxed);
+        self.changed();
+    }
+
     // ------------------------------------------------------------ scanning
     pub fn scan(self: &Arc<Self>, folders: Vec<PathBuf>) {
         if self.scanning.swap(true, Ordering::SeqCst) {

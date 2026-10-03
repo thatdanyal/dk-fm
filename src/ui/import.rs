@@ -86,8 +86,9 @@ fn take_result(app: &mut App, ctx: &egui::Context) {
         match r {
             Ok(f) => {
                 let keys = library_keys(app);
+                let hide_explicit = app.settings.lock().hide_explicit;
                 app.import.selected = match &f {
-                    Fetched::Collection(c) => c.tracks.iter().enumerate().filter(|(_, t)| !owned(&keys, t)).map(|(i, _)| i).collect(),
+                    Fetched::Collection(c) => c.tracks.iter().enumerate().filter(|(_, t)| !owned(&keys, t) && !(hide_explicit && t.explicit)).map(|(i, _)| i).collect(),
                     Fetched::Profile { playlists, .. } => (0..playlists.len()).collect(),
                 };
                 if let Fetched::Collection(c) = &f {

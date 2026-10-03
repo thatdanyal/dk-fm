@@ -2,6 +2,7 @@
 //! DK.FM — native retro music player.
 mod analysis;
 mod audio;
+mod backup;
 mod downloader;
 #[cfg(windows)]
 mod install;

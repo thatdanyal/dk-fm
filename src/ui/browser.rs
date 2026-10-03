@@ -37,6 +37,99 @@ pub enum SortKey {
     Duration,
     Plays,
     Added,
+    Year,
+    Genre,
+    Bitrate,
+}
+
+pub const SORTS: [(SortKey, &str, &str); 10] = [
+    (SortKey::TrackNo, "num", "Track number"), (SortKey::Title, "title", "Title"), (SortKey::Artist, "artist", "Artist"), (SortKey::Album, "album", "Album"),
+    (SortKey::Duration, "time", "Length"), (SortKey::Plays, "plays", "Plays"), (SortKey::Added, "added", "Date added"), (SortKey::Year, "year", "Year"),
+    (SortKey::Genre, "genre", "Genre"), (SortKey::Bitrate, "bitrate", "Bitrate"),
+];
+
+/// "artist" = A-Z, "-plays" = most first, "" = the list's own order.
+pub fn parse_sort(s: &str) -> Option<(SortKey, bool)> {
+    let (name, asc) = match s.strip_prefix('-') { Some(n) => (n, false), None => (s, true) };
+    SORTS.iter().find(|x| x.1 == name).map(|x| (x.0, asc))
+}
+pub fn sort_text(s: Option<(SortKey, bool)>) -> String {
+    s.and_then(|(k, asc)| SORTS.iter().find(|x| x.0 == k).map(|x| format!("{}{}", if asc { "" } else { "-" }, x.1))).unwrap_or_default()
+}
+
+/// Screens with their own default sort: (key, name, built-in default).
+pub const SCREENS: [(&str, &str, &str); 7] = [("all", "All Tracks", "artist"), ("liked", "Liked", "-added"), ("top", "Most Played", "-plays"), ("recent", "Recently Added", "-added"), ("album", "An album", "num"), ("artist", "An artist", "album"), ("playlist", "A playlist", "")];
+
+fn default_sort(app: &App, screen: &str) -> Option<(SortKey, bool)> {
+    let s = app.settings.lock();
+    parse_sort(s.sorts.get(screen).map(|x| x.as_str()).unwrap_or_else(|| SCREENS.iter().find(|x| x.0 == screen).map(|x| x.2).unwrap_or("")))
+}
+
+/// Track list columns: (id, header, fixed width or 0 = shares the free space by `share`,
+/// right-aligned, sort, name in Settings).
+pub struct Col {
+    pub id: &'static str,
+    head: &'static str,
+    width: f32,
+    share: f32,
+    right: bool,
+    sort: Option<SortKey>,
+    pub name: &'static str,
+    /// still shown when the list is narrow
+    narrow: bool,
+}
+const fn col(id: &'static str, head: &'static str, width: f32, share: f32, right: bool, sort: Option<SortKey>, name: &'static str, narrow: bool) -> Col {
+    Col { id, head, width, share, right, sort, name, narrow }
+}
+pub const COLUMNS: [Col; 11] = [
+    col("num", "#", 44.0, 0.0, true, Some(SortKey::TrackNo), "# (position / track number)", true),
+    col("like", "", 24.0, 0.0, false, None, "♥ Like", true),
+    col("title", "TITLE", 0.0, 3.0, false, Some(SortKey::Title), "Title", true),
+    col("artist", "ARTIST", 0.0, 2.0, false, Some(SortKey::Artist), "Artist", true),
+    col("album", "ALBUM", 0.0, 2.0, false, Some(SortKey::Album), "Album", false),
+    col("genre", "GENRE", 0.0, 1.5, false, Some(SortKey::Genre), "Genre", false),
+    col("year", "YEAR", 44.0, 0.0, true, Some(SortKey::Year), "Year", false),
+    col("time", "TIME", 56.0, 0.0, true, Some(SortKey::Duration), "Length", true),
+    col("plays", "PLAYS", 44.0, 0.0, true, Some(SortKey::Plays), "Plays", false),
+    col("bitrate", "KBPS", 48.0, 0.0, true, Some(SortKey::Bitrate), "Bitrate", false),
+    col("added", "ADDED", 84.0, 0.0, true, Some(SortKey::Added), "Date added", false),
+];
+
+/// Sidebar entries above the playlists: (id, group, icon, label).
+pub const SIDEBAR: [(&str, &str, &str, &str); 10] = [
+    ("all", "LIBRARY", "♫", "All Tracks"), ("top", "LIBRARY", "★", "Most Played"), ("recent", "LIBRARY", "🕘", "Recently Added"),
+    ("albums", "LIBRARY", "💿", "Albums"), ("artists", "LIBRARY", "👤", "Artists"), ("stats", "LIBRARY", "📊", "Stats"), ("dupes", "LIBRARY", "📋", "Duplicates"),
+    ("import", "GET MUSIC", "📥", "Import Music"), ("downloads", "GET MUSIC", "⬇", "Downloads"), ("folder", "GET MUSIC", "+", "Add music folder"),
+];
+
+/// Sidebar entries in your order (unknown ids dropped, new ones appended).
+pub fn sidebar_order(order: &[String]) -> Vec<&'static str> {
+    let mut v: Vec<&'static str> = order.iter().filter_map(|o| SIDEBAR.iter().find(|s| s.0 == o).map(|s| s.0)).collect();
+    for s in SIDEBAR {
+        if !v.contains(&s.0) {
+            v.push(s.0);
+        }
+    }
+    v
+}
+
+/// Screens DK.FM can open to: (key, name).
+pub const START: [(&str, &str); 8] = [("all", "All Tracks"), ("liked", "Liked"), ("top", "Most Played"), ("recent", "Recently Added"), ("albums", "Albums"), ("artists", "Artists"), ("stats", "Stats"), ("import", "Import Music")];
+
+pub fn view_for(key: &str) -> Option<View> {
+    Some(match key {
+        "all" => View::All,
+        "liked" => View::Liked,
+        "top" => View::Top,
+        "recent" => View::Recent,
+        "albums" => View::Albums,
+        "artists" => View::Artists,
+        "stats" => View::Stats,
+        "dupes" => View::Duplicates,
+        "import" => View::Import,
+        "downloads" => View::Downloads,
+        _ => return None,
+    })
 }
 
 pub struct BrowserState {
@@ -153,20 +246,19 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         resp
     };
-    // fixed navigation
-    group(ui, "LIBRARY");
-    item(ui, app, Some(View::All), "♫", "All Tracks", Some(n_all));
-    item(ui, app, Some(View::Top), "★", "Most Played", None);
-    item(ui, app, Some(View::Recent), "🕘", "Recently Added", None);
-    item(ui, app, Some(View::Albums), "💿", "Albums", None);
-    item(ui, app, Some(View::Artists), "👤", "Artists", None);
-    item(ui, app, Some(View::Stats), "📊", "Stats", None);
-    item(ui, app, Some(View::Duplicates), "📋", "Duplicates", None);
-    group(ui, "GET MUSIC");
-    item(ui, app, Some(View::Import), "📥", "Import Music", None);
-    item(ui, app, Some(View::Downloads), "⬇", "Downloads", if active_dl > 0 { Some(active_dl) } else { None });
-    if item(ui, app, None, "+", "Add music folder", None).clicked() {
-        add_folder(app);
+    // fixed navigation, in your order (Settings > Sidebar)
+    let (order, hidden) = { let s = app.settings.lock(); (sidebar_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
+    for g in ["LIBRARY", "GET MUSIC"] {
+        let items: Vec<_> = order.iter().filter_map(|id| SIDEBAR.iter().find(|s| s.0 == *id)).filter(|s| s.1 == g && !hidden.iter().any(|h| h == s.0)).collect();
+        if !items.is_empty() {
+            group(ui, g);
+        }
+        for (id, _, ico, label) in items {
+            let cnt = match *id { "all" => Some(n_all), "downloads" if active_dl > 0 => Some(active_dl), _ => None };
+            if item(ui, app, view_for(id), ico, label, cnt).clicked() && *id == "folder" {
+                add_folder(app);
+            }
+        }
     }
     // playlists: their own scrolling list below a divider
     ui.add_space(8.0);
@@ -311,6 +403,9 @@ fn sort_ids(app: &App, ids: &mut Vec<String>, s: Option<(SortKey, bool)>) {
             SortKey::Duration => (String::new(), t.duration),
             SortKey::Plays => (String::new(), st.plays as f64),
             SortKey::Added => (String::new(), t.added_at),
+            SortKey::Year => (String::new(), t.year.unwrap_or(0) as f64),
+            SortKey::Genre => (t.genre.to_lowercase(), 0.0),
+            SortKey::Bitrate => (String::new(), t.bitrate.unwrap_or(0) as f64),
         }
     };
     let mut keyed: Vec<((String, f64), String)> = ids.drain(..).map(|id| (key(&id), id)).collect();
@@ -340,19 +435,19 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         let all = || d.tracks.values();
         let now = crate::store::now_ms();
         let (ids, cfg): (Vec<String>, ListCfg) = match &view {
-            View::All => (all().map(|t| t.id.clone()).collect(), ListCfg { title: "ALL TRACKS".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: Some((SortKey::Artist, true)), back: None }),
-            View::Liked => (all().filter(|t| d.stats.get(&t.id).map(|s| s.liked).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "LIKED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: Some((SortKey::Added, false)), back: None }),
-            View::Top => (all().filter(|t| d.stats.get(&t.id).map(|s| s.plays > 0).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "MOST PLAYED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: Some((SortKey::Plays, false)), back: None }),
-            View::Recent => (all().filter(|t| now - t.added_at < 60.0 * 86400.0 * 1000.0).map(|t| t.id.clone()).collect(), ListCfg { title: "RECENTLY ADDED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: Some((SortKey::Added, false)), back: None }),
+            View::All => (all().map(|t| t.id.clone()).collect(), ListCfg { title: "ALL TRACKS".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "all"), back: None }),
+            View::Liked => (all().filter(|t| d.stats.get(&t.id).map(|s| s.liked).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "LIKED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "liked"), back: None }),
+            View::Top => (all().filter(|t| d.stats.get(&t.id).map(|s| s.plays > 0).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "MOST PLAYED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "top"), back: None }),
+            View::Recent => (all().filter(|t| now - t.added_at < 60.0 * 86400.0 * 1000.0).map(|t| t.id.clone()).collect(), ListCfg { title: "RECENTLY ADDED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "recent"), back: None }),
             View::Album(k) => {
                 let ids: Vec<String> = all().filter(|t| album_key(t) == *k).map(|t| t.id.clone()).collect();
                 let first = ids.first().and_then(|i| d.tracks.get(i));
-                (ids.clone(), ListCfg { title: first.map(|t| t.album.clone()).unwrap_or_default(), sub: first.map(|t| if t.album_artist.is_empty() { t.artist.clone() } else { t.album_artist.clone() }).unwrap_or_default(), cover: first.and_then(|t| t.cover.clone()), remote_cover: None, playlist: None, default_sort: Some((SortKey::TrackNo, true)), back: Some(View::Albums) })
+                (ids.clone(), ListCfg { title: first.map(|t| t.album.clone()).unwrap_or_default(), sub: first.map(|t| if t.album_artist.is_empty() { t.artist.clone() } else { t.album_artist.clone() }).unwrap_or_default(), cover: first.and_then(|t| t.cover.clone()), remote_cover: None, playlist: None, default_sort: default_sort(app, "album"), back: Some(View::Albums) })
             }
             View::Artist(k) => {
                 let ids: Vec<String> = all().filter(|t| artist_key(t) == *k).map(|t| t.id.clone()).collect();
                 let name = ids.first().and_then(|i| d.tracks.get(i)).map(|t| main_artist(&t.artist)).unwrap_or_default();
-                (ids, ListCfg { title: name, sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: Some((SortKey::Album, true)), back: Some(View::Artists) })
+                (ids, ListCfg { title: name, sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "artist"), back: Some(View::Artists) })
             }
             View::Playlist(pid) => {
                 let Some(p) = d.playlists.iter().find(|p| p.id == *pid).cloned() else {
@@ -362,7 +457,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 };
                 let ids: Vec<String> = p.track_ids.iter().filter(|id| d.tracks.contains_key(*id)).cloned().collect();
                 let sub = if p.is_imported() { format!("{} · {}", p.source.clone().unwrap_or_else(|| "spotify".into()).to_uppercase(), if p.auto_sync == Some(false) { "SYNC OFF" } else { "AUTO-SYNC" }) } else { "PLAYLIST".into() };
-                (ids, ListCfg { title: p.name.clone(), sub, cover: None, remote_cover: p.cover.clone(), playlist: Some(p), default_sort: None, back: None })
+                (ids, ListCfg { title: p.name.clone(), sub, cover: None, remote_cover: p.cover.clone(), playlist: Some(p), default_sort: default_sort(app, "playlist"), back: None })
             }
             _ => (Vec::new(), ListCfg { title: String::new(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: None, back: None }),
         };
@@ -454,36 +549,30 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         return;
     }
 
-    // ---- columns
+    // ---- columns (Settings > Lists: which, in what order; flexible ones share the free space)
     let w = ui.available_width();
     let narrow = w < 640.0;
-    let fixed = 44.0 + 24.0 + 56.0 + if narrow { 0.0 } else { 44.0 } + 16.0;
-    let flex = (w - fixed - 8.0 * 6.0).max(120.0);
-    let (tw, aw, alw) = if narrow { (flex * 0.6, flex * 0.4, 0.0) } else { (flex * 3.0 / 7.0, flex * 2.0 / 7.0, flex * 2.0 / 7.0) };
-    let cols: Vec<(&str, Option<SortKey>, f32, bool)> = {
-        let mut c = vec![("#", Some(SortKey::TrackNo), 44.0, true), ("", None, 24.0, false), ("TITLE", Some(SortKey::Title), tw, false), ("ARTIST", Some(SortKey::Artist), aw, false)];
-        if !narrow {
-            c.push(("ALBUM", Some(SortKey::Album), alw, false));
-        }
-        c.push(("TIME", Some(SortKey::Duration), 56.0, true));
-        if !narrow {
-            c.push(("PLAYS", Some(SortKey::Plays), 44.0, true));
-        }
-        c
-    };
+    let (chosen, row_h) = { let s = app.settings.lock(); (s.columns.clone(), if s.density == "compact" { 22.0 } else { 28.0 }) };
+    let shown: Vec<&Col> = chosen.iter().filter_map(|c| COLUMNS.iter().find(|x| x.id == c)).filter(|c| !narrow || c.narrow).collect();
+    let shown: Vec<&Col> = if shown.iter().any(|c| c.share > 0.0) { shown } else { COLUMNS.iter().filter(|c| c.id == "title").chain(shown).collect() };
+    let fixed: f32 = shown.iter().map(|c| c.width).sum::<f32>() + 16.0;
+    let flex = (w - fixed - 8.0 * (shown.len().max(7) - 1) as f32).max(120.0);
+    let shares: f32 = shown.iter().map(|c| c.share).sum();
+    let cols: Vec<(&Col, f32)> = shown.into_iter().map(|c| (c, if c.share > 0.0 { flex * c.share / shares } else { c.width })).collect();
     let (hr, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
     ui.painter().hline(hr.x_range(), hr.bottom(), egui::Stroke::new(2.0_f32, pal.line));
     let mut x = hr.left() + 8.0;
-    for (label, key, cw, right) in &cols {
+    for (c, cw) in &cols {
+        let (label, key, right) = (c.head, c.sort, c.right);
         let cr = Rect::from_min_size(Pos2::new(x, hr.top()), Vec2::new(*cw, hr.height()));
-        let sorted = key.is_some() && active_sort.map(|s| Some(s.0) == *key).unwrap_or(false);
+        let sorted = key.is_some() && active_sort.map(|s| Some(s.0) == key).unwrap_or(false);
         let txt = format!("{label}{}", if sorted { if active_sort.unwrap().1 { " ▲" } else { " ▼" } } else { "" });
-        let resp = ui.interact(cr, ui.id().with(("th", *label)), Sense::click());
-        ui.painter().text(if *right { Pos2::new(cr.right(), cr.center().y) } else { Pos2::new(cr.left(), cr.center().y) }, if *right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER }, txt, px(6.0), if sorted { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
+        let resp = ui.interact(cr, ui.id().with(("th", c.id)), Sense::click());
+        ui.painter().text(if right { Pos2::new(cr.right(), cr.center().y) } else { Pos2::new(cr.left(), cr.center().y) }, if right { Align2::RIGHT_CENTER } else { Align2::LEFT_CENTER }, txt, px(6.0), if sorted { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
         if resp.clicked() {
             if let Some(k) = key {
-                let asc = !matches!(active_sort, Some((kk, true)) if kk == *k);
-                app.browser.sort = Some((*k, asc));
+                let asc = !matches!(active_sort, Some((kk, true)) if kk == k);
+                app.browser.sort = Some((k, asc));
             }
         }
         x += cw + 8.0;
@@ -495,13 +584,13 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     let num_mode = matches!(active_sort, Some((SortKey::TrackNo, _)));
     // drag rows to reorder: only in a playlist shown in its own order
     let reorder = cfg.playlist.is_some() && active_sort.is_none() && app.browser.search.is_empty();
-    egui::ScrollArea::vertical().id_salt(("tracks", format!("{view:?}"))).auto_shrink([false; 2]).show_rows(ui, 28.0, ids.len(), |ui, range| {
+    egui::ScrollArea::vertical().id_salt(("tracks", format!("{view:?}"))).auto_shrink([false; 2]).show_rows(ui, row_h, ids.len(), |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in range {
             let id = &ids[i];
             let Some(t) = app.lib.track(id) else { continue };
             let st = app.lib.stat(id);
-            let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::click_and_drag());
+            let (r, resp) = ui.allocate_exact_size(Vec2::new(w, row_h), Sense::click_and_drag());
             let sel = app.browser.selection.contains(id);
             if resp.drag_started() {
                 let songs: Vec<String> = if sel { ids.iter().filter(|x| app.browser.selection.contains(*x)).cloned().collect() } else { vec![id.clone()] };
@@ -529,20 +618,26 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             let is_cur = cur.as_deref() == Some(id.as_str());
             let mut x = r.left() + 8.0;
             let cy = r.center().y;
-            for (label, _, cw, right) in &cols {
+            for (c, cw) in &cols {
+                let right = c.right;
                 let cr = Rect::from_min_max(Pos2::new(x, r.top()), Pos2::new(x + cw, r.bottom()));
                 let clip = p.with_clip_rect(cr);
-                let (txt, color): (String, Color32) = match *label {
-                    "#" => (if is_cur { "▶".into() } else if num_mode && t.track.is_some() { t.track.unwrap().to_string() } else { (i + 1).to_string() }, if is_cur { pal.accent } else { pal.dim }),
-                    "" => ("♥".into(), if st.liked { pal.accent } else { pal.faint }),
-                    "TITLE" => (t.title.clone(), if is_cur { pal.accent } else { pal.text }),
-                    "ARTIST" => (t.artist.clone(), pal.dim),
-                    "ALBUM" => (t.album.clone(), pal.dim),
-                    "TIME" => (fmt_time(t.duration), pal.dim),
+                let (txt, color): (String, Color32) = match c.id {
+                    "num" => (if is_cur { "▶".into() } else if num_mode && t.track.is_some() { t.track.unwrap().to_string() } else { (i + 1).to_string() }, if is_cur { pal.accent } else { pal.dim }),
+                    "like" => ("♥".into(), if st.liked { pal.accent } else { pal.faint }),
+                    "title" => (t.title.clone(), if is_cur { pal.accent } else { pal.text }),
+                    "artist" => (t.artist.clone(), pal.dim),
+                    "album" => (t.album.clone(), pal.dim),
+                    "genre" => (t.genre.clone(), pal.dim),
+                    "year" => (t.year.map(|y| y.to_string()).unwrap_or_default(), pal.dim),
+                    "time" => (fmt_time(t.duration), pal.dim),
+                    "bitrate" => (t.bitrate.map(|b| b.to_string()).unwrap_or_default(), pal.dim),
+                    "added" => (if t.added_at > 0.0 { crate::store::local_stamp((t.added_at / 1000.0) as i64, false) } else { String::new() }, pal.dim),
                     _ => (if st.plays > 0 { st.plays.to_string() } else { String::new() }, pal.dim),
                 };
-                clip.text(if *right { Pos2::new(cr.right(), cy) } else if label.is_empty() { Pos2::new(cr.center().x, cy) } else { Pos2::new(cr.left(), cy) }, if *right { Align2::RIGHT_CENTER } else if label.is_empty() { Align2::CENTER_CENTER } else { Align2::LEFT_CENTER }, txt, vt(19.0), color);
-                if label.is_empty() && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
+                let like = c.id == "like";
+                clip.text(if right { Pos2::new(cr.right(), cy) } else if like { Pos2::new(cr.center().x, cy) } else { Pos2::new(cr.left(), cy) }, if right { Align2::RIGHT_CENTER } else if like { Align2::CENTER_CENTER } else { Align2::LEFT_CENTER }, txt, vt(19.0), color);
+                if like && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
                     act = Some(RowAct::Like(id.clone()));
                 }
                 x += cw + 8.0;

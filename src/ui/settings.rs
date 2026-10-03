@@ -1,36 +1,88 @@
 //! Settings window, text prompts, and the "Update available" popup.
-use super::theme::{self, px, vt};
-use super::widgets::{button, caption, dim, fill, frame_rect, switch};
+use super::browser::{self, COLUMNS, SCREENS, SIDEBAR, SORTS, START};
+use super::keys::{self, Combo};
+use super::theme::{self, px, vt, Pal};
+use super::widgets::{button, caption, dim, fill, frame_rect, switch, tb_button};
 use super::{App, Modal, PromptAction};
+use crate::backup;
 use crate::system::{self, UpdState};
 use eframe::egui::{self, Align2, Rect, Sense, Ui, Vec2};
+use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum SetTab {
-    Appearance,
+    Look,
+    Layouts,
+    Lists,
+    Sidebar,
+    Search,
     Library,
     Downloads,
     Spotify,
     Playback,
+    Keys,
+    Backup,
     System,
     Updates,
-    Keys,
     About,
 }
 
-const TABS: [(SetTab, &str); 9] = [
-    (SetTab::Appearance, "Appearance"),
+const TABS: [(SetTab, &str); 14] = [
+    (SetTab::Look, "Look"),
+    (SetTab::Layouts, "Layouts"),
+    (SetTab::Lists, "Lists"),
+    (SetTab::Sidebar, "Sidebar"),
+    (SetTab::Search, "Search"),
     (SetTab::Library, "Library"),
     (SetTab::Downloads, "Downloads"),
     (SetTab::Spotify, "Spotify"),
     (SetTab::Playback, "Playback"),
+    (SetTab::Keys, "Shortcuts"),
+    (SetTab::Backup, "Backup"),
     (SetTab::System, "System"),
     (SetTab::Updates, "Updates"),
-    (SetTab::Keys, "Shortcuts"),
     (SetTab::About, "About"),
 ];
 
-fn window(pal: theme::Pal, ctx: &egui::Context, title: &str, size: Vec2, body: impl FnOnce(&mut Ui)) -> bool {
+/// A tab by its (lowercase) name, e.g. "look", "shortcuts", "backup".
+pub fn tab_named(name: &str) -> SetTab {
+    TABS.iter().find(|t| t.1.eq_ignore_ascii_case(name)).map(|t| t.0).unwrap_or(SetTab::Look)
+}
+
+/// State of the settings window between frames.
+#[derive(Default)]
+pub struct SetUi {
+    /// shortcut being recorded
+    capture: Option<&'static str>,
+    /// theme editor: working copy (previewed live) and its name
+    draft: Option<Pal>,
+    draft_name: String,
+    /// inline rename: (what: "theme" | "layout", old name, new text)
+    rename: Option<(&'static str, String, String)>,
+    layout_name: String,
+    /// asking before restoring this backup / deleting all backups
+    confirm: Option<Confirm>,
+    /// backup list, re-read after changes or every few seconds
+    backups: Option<(std::time::Instant, Vec<backup::Entry>)>,
+}
+
+enum Confirm {
+    Restore(PathBuf),
+    DeleteAll,
+}
+
+impl SetUi {
+    /// Open the theme editor on a palette (dev hook for screenshots).
+    pub fn edit_theme(&mut self, p: Pal, name: &str) {
+        self.draft = Some(p);
+        self.draft_name = name.into();
+    }
+    pub fn capturing(&self) -> bool {
+        self.capture.is_some()
+    }
+}
+
+fn window(pal: theme::Pal, ctx: &egui::Context, title: &str, size: Vec2, esc_closes: bool, body: impl FnOnce(&mut Ui)) -> bool {
     // dim the app behind
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("modal-dim")));
     fill(&painter, ctx.screen_rect(), egui::Color32::from_black_alpha(150));
@@ -44,7 +96,7 @@ fn window(pal: theme::Pal, ctx: &egui::Context, title: &str, size: Vec2, body: i
         .open(&mut open)
         .frame(egui::Frame::window(&ctx.style()).fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(14)))
         .show(ctx, body);
-    let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let esc = esc_closes && ctx.input(|i| i.key_pressed(egui::Key::Escape));
     open && !esc
 }
 
@@ -53,18 +105,25 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
     let keep = match m {
         Modal::Settings(tab) => {
             let mut t = tab;
-            let open = window(app.pal, ctx, "SETTINGS", Vec2::new(780.0, 520.0), |ui| settings_body(app, ui, &mut t));
+            let esc = !app.setui.capturing();
+            let open = window(app.pal, ctx, "SETTINGS", Vec2::new(780.0, 520.0), esc, |ui| settings_body(app, ui, &mut t));
             if open && !CLOSE.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 app.modal.get_or_insert(Modal::Settings(t));
                 if let Some(Modal::Settings(x)) = app.modal.as_mut() {
                     *x = t;
                 }
+            } else {
+                // closed: drop an unsaved theme preview and any half-finished edits
+                if app.setui.draft.take().is_some() {
+                    app.set_theme(ctx);
+                }
+                app.setui = Default::default();
             }
             false
         }
         Modal::Prompt { title, mut text, action } => {
             let mut done: Option<bool> = None;
-            let open = window(app.pal, ctx, &title, Vec2::new(420.0, 90.0), |ui| {
+            let open = window(app.pal, ctx, &title, Vec2::new(420.0, 90.0), true, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(f32::INFINITY).font(vt(20.0)));
                 r.request_focus();
                 if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -96,7 +155,7 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
         Modal::Update => {
             let st = app.update.lock().clone();
             let mut close = false;
-            let open = window(app.pal, ctx, "UPDATE AVAILABLE", Vec2::new(440.0, 160.0), |ui| match &st {
+            let open = window(app.pal, ctx, "UPDATE AVAILABLE", Vec2::new(440.0, 160.0), true, |ui| match &st {
                 UpdState::Available(u) => {
                     ui.label(egui::RichText::new(format!("DK.FM v{}", u.version)).font(vt(24.0)).color(app.pal.text));
                     dim(ui, &app.pal, &format!("you have v{}", env!("CARGO_PKG_VERSION")));
@@ -192,6 +251,9 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
                 ui.painter().text(r.min + Vec2::new(12.0, 14.0), Align2::LEFT_CENTER, name, vt(20.0), if *tab == t { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
                 if resp.clicked() {
                     *tab = t;
+                    app.setui.capture = None;
+                    app.setui.rename = None;
+                    app.setui.confirm = None;
                 }
             }
         });
@@ -200,14 +262,19 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
             ui.vertical(|ui| {
             ui.set_width(580.0);
             match tab {
-                SetTab::Appearance => appearance(app, ui),
+                SetTab::Look => look(app, ui),
+                SetTab::Layouts => layouts(app, ui),
+                SetTab::Lists => lists(app, ui),
+                SetTab::Sidebar => sidebar(app, ui),
+                SetTab::Search => search(app, ui),
                 SetTab::Library => library(app, ui),
                 SetTab::Downloads => downloads(app, ui),
                 SetTab::Spotify => spotify(app, ui),
                 SetTab::Playback => playback(app, ui),
+                SetTab::Keys => keys(app, ui),
+                SetTab::Backup => backups(app, ui),
                 SetTab::System => system_tab(app, ui),
                 SetTab::Updates => updates(app, ui),
-                SetTab::Keys => keys(app, ui),
                 SetTab::About => about(app, ui),
             }
             });
@@ -215,14 +282,60 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
     });
 }
 
-fn appearance(app: &mut App, ui: &mut Ui) {
+/// A row of options, the current one highlighted; returns the clicked one.
+fn choice<T: PartialEq + Clone>(ui: &mut Ui, pal: &Pal, cur: &T, opts: &[(T, &str)]) -> Option<T> {
+    let mut out = None;
+    ui.horizontal(|ui| {
+        for (v, label) in opts {
+            if tb_button(ui, pal, label, v == cur).clicked() && v != cur {
+                out = Some(v.clone());
+            }
+        }
+    });
+    out
+}
+
+/// ▲ ▼ buttons; returns -1 / +1 when clicked.
+fn updown(ui: &mut Ui, pal: &Pal, first: bool, last: bool) -> i32 {
+    let mut d = 0;
+    ui.add_enabled_ui(!first, |ui| {
+        if tb_button(ui, pal, "▲", false).on_hover_text("Move up").clicked() {
+            d = -1;
+        }
+    });
+    ui.add_enabled_ui(!last, |ui| {
+        if tb_button(ui, pal, "▼", false).on_hover_text("Move down").clicked() {
+            d = 1;
+        }
+    });
+    d
+}
+
+/// A small checkbox square; returns true when clicked.
+fn tick(ui: &mut Ui, pal: &Pal, on: bool) -> bool {
+    let (r, resp) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+    let b = Rect::from_center_size(r.center(), Vec2::splat(14.0));
+    frame_rect(ui.painter(), b, 2.0, if on || resp.hovered() { pal.accent } else { pal.line_hi });
+    if on {
+        fill(ui.painter(), b.shrink(4.0), pal.accent);
+    }
+    resp.clicked()
+}
+
+fn spacer(ui: &mut Ui) {
+    ui.add_space(14.0);
+}
+
+// ------------------------------------------------------------------------------- look
+
+fn look(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
+    let s = app.settings.lock().clone();
     caption(ui, &pal, "THEME");
-    let cur = app.settings.lock().theme.clone();
     let mut chosen = None;
     ui.horizontal_wrapped(|ui| {
-        for (k, name) in theme::THEMES {
-            let tp = theme::palette(k, None);
+        for (k, name) in theme::all_themes(&s) {
+            let tp = theme::theme_pal(&s, &k);
             let (r, resp) = ui.allocate_exact_size(Vec2::new(128.0, 80.0), Sense::click());
             fill(ui.painter(), r.translate(Vec2::splat(3.0)), pal.shadow);
             fill(ui.painter(), r, tp.bg);
@@ -231,20 +344,21 @@ fn appearance(app: &mut App, ui: &mut Ui) {
                 fill(ui.painter(), Rect::from_min_size(egui::pos2(r.left() + 8.0 + i as f32 * 38.0, r.top() + 50.0 - h), Vec2::new(34.0, h)), *c);
             }
             fill(ui.painter(), Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 26.0), r.max), pal.panel);
-            ui.painter().text(egui::pos2(r.left() + 8.0, r.bottom() - 13.0), Align2::LEFT_CENTER, *name, vt(17.0), pal.text);
-            frame_rect(ui.painter(), r, 2.0, if cur == *k { pal.accent } else if resp.hovered() { pal.text } else { pal.line_hi });
+            ui.painter().with_clip_rect(r).text(egui::pos2(r.left() + 8.0, r.bottom() - 13.0), Align2::LEFT_CENTER, &name, vt(17.0), pal.text);
+            frame_rect(ui.painter(), r, 2.0, if s.theme == k { pal.accent } else if resp.hovered() { pal.text } else { pal.line_hi });
             if resp.clicked() {
-                chosen = Some(k.to_string());
+                chosen = Some(k);
             }
         }
     });
     if let Some(k) = chosen {
+        app.setui.draft = None;
         app.edit_settings(|s| s.theme = k);
         app.set_theme(ui.ctx());
     }
-    ui.add_space(14.0);
+    spacer(ui);
     caption(ui, &pal, "ACCENT COLOR");
-    let mut col = app.settings.lock().accent.as_deref().and_then(theme::parse_hex).unwrap_or(pal.accent);
+    let mut col = s.accent.as_deref().and_then(theme::parse_hex).unwrap_or(pal.accent);
     ui.horizontal(|ui| {
         if ui.color_edit_button_srgba(&mut col).changed() {
             let h = theme::to_hex(col);
@@ -256,21 +370,528 @@ fn appearance(app: &mut App, ui: &mut Ui) {
             app.set_theme(ui.ctx());
         }
     });
-    ui.add_space(14.0);
+    spacer(ui);
+    theme_editor(app, ui, &s);
+    spacer(ui);
+    caption(ui, &pal, "FONT");
+    let _ = super::fonts::list(ui.ctx()); // start reading font names (once, in the background)
+    let mut font = s.font.clone();
+    let font_name = |f: &str| match f { "pixel" => "Pixel (VT323 + Press Start 2P)".to_string(), "clean" => "Clean (sans-serif)".to_string(), f => super::fonts::name_of(f.trim_start_matches("sys:")) };
+    row(ui, &pal, "Text font", |ui| {
+        egui::ComboBox::from_id_salt("font").selected_text(font_name(&font)).width(300.0).height(300.0).show_ui(ui, |ui| {
+            ui.selectable_value(&mut font, "pixel".to_string(), font_name("pixel"));
+            ui.selectable_value(&mut font, "clean".to_string(), font_name("clean"));
+            ui.separator();
+            match super::fonts::list(ui.ctx()) {
+                None => {
+                    ui.label("Finding fonts on this computer…");
+                }
+                Some(list) => {
+                    for f in list {
+                        ui.selectable_value(&mut font, format!("sys:{}", f.path), &f.name);
+                    }
+                }
+            }
+        });
+    });
+    if font != s.font {
+        app.edit_settings(|s| s.font = font.clone());
+        app.apply_look(ui.ctx());
+    }
+    if font != "pixel" {
+        let mut ph = s.pixel_headings;
+        if switch(ui, &pal, &mut ph, "KEEP THE PIXEL FONT FOR HEADINGS & BUTTONS") {
+            app.edit_settings(|s| s.pixel_headings = ph);
+            app.apply_look(ui.ctx());
+        }
+        ui.add_space(4.0);
+    }
+    let zoom = (s.zoom * 100.0).round() as u32;
+    row(ui, &pal, "Text size / zoom", |ui| {
+        if let Some(z) = choice(ui, &pal, &zoom, &[(90, "90%"), (100, "100%"), (110, "110%"), (125, "125%"), (150, "150%")]) {
+            app.edit_settings(|s| s.zoom = z as f32 / 100.0);
+            app.apply_look(ui.ctx());
+        }
+    });
+    row(ui, &pal, "Song lists", |ui| {
+        if let Some(d) = choice(ui, &pal, &s.density, &[("compact".to_string(), "COMPACT"), ("comfortable".to_string(), "COMFORTABLE")]) {
+            app.edit_settings(|s| s.density = d);
+        }
+    });
+    spacer(ui);
     caption(ui, &pal, "CRT EFFECTS");
-    let (mut sc, mut gl) = { let s = app.settings.lock(); (s.scanlines, s.glow) };
+    let (mut sc, mut gl) = (s.scanlines, s.glow);
     if switch(ui, &pal, &mut sc, "SCANLINES") {
         app.edit_settings(|s| s.scanlines = sc);
     }
     if switch(ui, &pal, &mut gl, "PHOSPHOR GLOW") {
         app.edit_settings(|s| s.glow = gl);
     }
-    ui.add_space(14.0);
-    caption(ui, &pal, "LAYOUT");
-    if button(ui, &pal, "RESET PANEL LAYOUT", false, true).clicked() {
-        app.reset_layout();
-        app.toast("Layout reset");
+    spacer(ui);
+    caption(ui, &pal, "VISUALIZER");
+    let mode = app.player.st.lock().opts.visualizer.clone();
+    row(ui, &pal, "Style", |ui| {
+        let opts: Vec<(String, &str)> = super::scope::MODES.iter().map(|m| (m.0.to_string(), m.1)).collect();
+        if let Some(m) = choice(ui, &pal, &mode, &opts) {
+            let fps = app.player.st.lock().opts.vis_fps;
+            app.player.set_visualizer(&m, fps);
+            app.scope.mode = m;
+            app.scope.invalidate();
+        }
+    });
+    row(ui, &pal, "Bars", |ui| {
+        if let Some(b) = choice(ui, &pal, &s.vis_bars, &[(0, "FIT"), (16, "16"), (32, "32"), (48, "48"), (64, "64")]) {
+            app.edit_settings(|s| s.vis_bars = b);
+            app.apply_look(ui.ctx());
+        }
+    });
+    let mut follow = s.vis_colors.is_none();
+    if switch(ui, &pal, &mut follow, "COLOURS FOLLOW THE THEME") {
+        let v = if follow { None } else { Some([theme::to_hex(pal.accent), theme::to_hex(pal.accent2), theme::to_hex(pal.text)]) };
+        app.edit_settings(|s| s.vis_colors = v);
+        app.apply_look(ui.ctx());
     }
+    if let Some(cols) = &s.vis_colors {
+        row(ui, &pal, "Low · mid · peak", |ui| {
+            let mut c = cols.clone();
+            let mut changed = false;
+            for h in c.iter_mut() {
+                let mut col = theme::parse_hex(h).unwrap_or(pal.accent);
+                if ui.color_edit_button_srgba(&mut col).changed() {
+                    *h = theme::to_hex(col);
+                    changed = true;
+                }
+            }
+            if changed {
+                app.edit_settings(|s| s.vis_colors = Some(c));
+                app.apply_look(ui.ctx());
+            }
+        });
+    }
+}
+
+fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
+    let pal = app.pal;
+    caption(ui, &pal, "THEME EDITOR");
+    dim(ui, &pal, "Start from any theme, change any colour (you see it right away), then save it as your own theme.");
+    let themes = theme::all_themes(s);
+    let mut start = None;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Start from").color(pal.dim));
+        egui::ComboBox::from_id_salt("edit-from").selected_text(if app.setui.draft.is_some() { "(editing)" } else { "Pick a theme…" }).width(200.0).show_ui(ui, |ui| {
+            for (k, name) in &themes {
+                if ui.selectable_label(false, name).clicked() {
+                    start = Some((k.clone(), name.clone()));
+                }
+            }
+        });
+        if app.setui.draft.is_none() && button(ui, &pal, "EDIT CURRENT THEME", false, true).clicked() {
+            let name = themes.iter().find(|t| t.0 == s.theme).map(|t| t.1.clone()).unwrap_or_default();
+            start = Some((s.theme.clone(), name));
+        }
+    });
+    if let Some((k, name)) = start {
+        app.setui.draft = Some(if k == s.theme { app.pal } else { theme::theme_pal(s, &k) });
+        app.setui.draft_name = if k.starts_with(theme::CUSTOM) { name } else { format!("My {name}") };
+    }
+    if let Some(mut d) = app.setui.draft {
+        let mut changed = false;
+        egui::Grid::new("theme-grid").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
+            for (i, (f, label)) in theme::FIELDS.iter().enumerate() {
+                let c = d.field(f).unwrap();
+                changed |= ui.color_edit_button_srgba(c).changed();
+                ui.label(egui::RichText::new(*label).color(pal.text));
+                if i % 2 == 1 {
+                    ui.end_row();
+                }
+            }
+        });
+        let mut dark = d.dark;
+        if switch(ui, &pal, &mut dark, "DARK THEME (WIDGET SHADING)") {
+            d.dark = dark;
+            changed = true;
+        }
+        if changed {
+            app.setui.draft = Some(d);
+            app.pal = d;
+            theme::apply(ui.ctx(), &d);
+            app.scope.invalidate();
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Name").color(pal.dim));
+            ui.add(egui::TextEdit::singleline(&mut app.setui.draft_name).desired_width(200.0));
+            let name = app.setui.draft_name.trim().to_string();
+            if button(ui, &pal, "SAVE THEME", true, !name.is_empty()).clicked() {
+                let ct = d.to_custom(&name);
+                app.edit_settings(|s| {
+                    s.custom_themes.retain(|c| c.name != name);
+                    s.custom_themes.push(ct);
+                    s.theme = format!("{}{name}", theme::CUSTOM);
+                    s.accent = None;
+                });
+                app.setui.draft = None;
+                app.set_theme(ui.ctx());
+                app.toast(format!("Saved theme \"{name}\""));
+            }
+            if button(ui, &pal, "DISCARD", false, true).clicked() {
+                app.setui.draft = None;
+                app.set_theme(ui.ctx());
+            }
+        });
+    }
+    // your themes
+    if !s.custom_themes.is_empty() {
+        ui.add_space(8.0);
+        caption(ui, &pal, "YOUR THEMES");
+        let mut action: Option<(&str, String, String)> = None;
+        for c in &s.custom_themes {
+            ui.horizontal(|ui| {
+                if let Some((_, old, text)) = app.setui.rename.as_mut().filter(|r| r.0 == "theme" && r.1 == c.name) {
+                    ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
+                    if button(ui, &pal, "OK", true, !text.trim().is_empty()).clicked() {
+                        action = Some(("rename", old.clone(), text.trim().to_string()));
+                    }
+                    if button(ui, &pal, "CANCEL", false, true).clicked() {
+                        action = Some(("cancel", String::new(), String::new()));
+                    }
+                } else {
+                    cell(ui, 200.0, egui::RichText::new(&c.name).color(pal.text));
+                    if button(ui, &pal, "USE", false, true).clicked() {
+                        action = Some(("use", c.name.clone(), String::new()));
+                    }
+                    if button(ui, &pal, "RENAME", false, true).clicked() {
+                        action = Some(("start", c.name.clone(), String::new()));
+                    }
+                    if button(ui, &pal, "DELETE", false, true).clicked() {
+                        action = Some(("delete", c.name.clone(), String::new()));
+                    }
+                }
+            });
+        }
+        let key = |n: &str| format!("{}{n}", theme::CUSTOM);
+        match action {
+            Some(("use", n, _)) => {
+                app.edit_settings(|s| s.theme = key(&n));
+                app.set_theme(ui.ctx());
+            }
+            Some(("start", n, _)) => app.setui.rename = Some(("theme", n.clone(), n)),
+            Some(("cancel", _, _)) => app.setui.rename = None,
+            Some(("rename", old, new)) => {
+                app.edit_settings(|s| {
+                    if !s.custom_themes.iter().any(|c| c.name == new) {
+                        if let Some(c) = s.custom_themes.iter_mut().find(|c| c.name == old) {
+                            c.name = new.clone();
+                        }
+                        if s.theme == key(&old) {
+                            s.theme = key(&new);
+                        }
+                    }
+                });
+                app.setui.rename = None;
+                app.set_theme(ui.ctx());
+            }
+            Some(("delete", n, _)) => {
+                app.edit_settings(|s| {
+                    s.custom_themes.retain(|c| c.name != n);
+                    if s.theme == key(&n) {
+                        s.theme = "red-retro".into();
+                    }
+                });
+                app.set_theme(ui.ctx());
+                app.toast(format!("Deleted theme \"{n}\""));
+            }
+            _ => {}
+        }
+    }
+}
+
+// ------------------------------------------------------------------------------- layouts
+
+fn layouts(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    caption(ui, &pal, "PANEL LAYOUT");
+    dim(ui, &pal, "Arrange the panels (LAYOUT in the title bar, or Ctrl+E), then save the arrangement here. Switch any time — also from Ctrl+K: type \"layout\".");
+    ui.horizontal(|ui| {
+        if button(ui, &pal, "EDIT LAYOUT", false, true).clicked() {
+            app.layout_edit = true;
+            CLOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if button(ui, &pal, "RESET PANEL LAYOUT", false, true).clicked() {
+            app.reset_layout();
+            app.toast("Layout reset");
+        }
+    });
+    spacer(ui);
+    caption(ui, &pal, "SAVE THE CURRENT LAYOUT");
+    ui.horizontal(|ui| {
+        let te = ui.add(egui::TextEdit::singleline(&mut app.setui.layout_name).hint_text("Name, e.g. Focus").desired_width(220.0));
+        let name = app.setui.layout_name.trim().to_string();
+        let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (button(ui, &pal, "SAVE", true, !name.is_empty()).clicked() || enter && !name.is_empty()) && !App::PRESETS.contains(&name.as_str()) {
+            app.save_layout(&name);
+            app.setui.layout_name.clear();
+            app.toast(format!("Saved layout \"{name}\""));
+        }
+    });
+    spacer(ui);
+    caption(ui, &pal, "LAYOUTS");
+    let saved: Vec<String> = app.settings.lock().layouts.iter().map(|l| l.name.clone()).collect();
+    let mut action: Option<(&str, String, String)> = None;
+    for name in app.layout_names() {
+        let builtin = App::PRESETS.contains(&name.as_str()) && !saved.contains(&name);
+        ui.horizontal(|ui| {
+            if let Some((_, old, text)) = app.setui.rename.as_mut().filter(|r| r.0 == "layout" && r.1 == name) {
+                ui.add(egui::TextEdit::singleline(text).desired_width(200.0));
+                if button(ui, &pal, "OK", true, !text.trim().is_empty()).clicked() {
+                    action = Some(("rename", old.clone(), text.trim().to_string()));
+                }
+                if button(ui, &pal, "CANCEL", false, true).clicked() {
+                    action = Some(("cancel", String::new(), String::new()));
+                }
+                return;
+            }
+            cell(ui, 200.0, egui::RichText::new(if builtin { format!("{name} (built-in)") } else { name.clone() }).color(pal.text));
+            if button(ui, &pal, "USE", true, true).clicked() {
+                action = Some(("use", name.clone(), String::new()));
+            }
+            if !builtin {
+                if button(ui, &pal, "RENAME", false, true).clicked() {
+                    action = Some(("start", name.clone(), String::new()));
+                }
+                if button(ui, &pal, "DELETE", false, true).clicked() {
+                    action = Some(("delete", name.clone(), String::new()));
+                }
+            }
+        });
+    }
+    match action {
+        Some(("use", n, _)) => {
+            app.apply_layout(&n);
+            app.toast(format!("Layout: {n}"));
+        }
+        Some(("start", n, _)) => app.setui.rename = Some(("layout", n.clone(), n)),
+        Some(("cancel", _, _)) => app.setui.rename = None,
+        Some(("rename", old, new)) => {
+            app.edit_settings(|s| {
+                if !s.layouts.iter().any(|l| l.name == new) {
+                    if let Some(l) = s.layouts.iter_mut().find(|l| l.name == old) {
+                        l.name = new;
+                    }
+                }
+            });
+            app.setui.rename = None;
+        }
+        Some(("delete", n, _)) => app.edit_settings(|s| s.layouts.retain(|l| l.name != n)),
+        _ => {}
+    }
+}
+
+// ------------------------------------------------------------------------------- lists
+
+fn lists(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let s = app.settings.lock().clone();
+    caption(ui, &pal, "SONG LIST COLUMNS");
+    dim(ui, &pal, "Tick the columns to show and move them into the order you like. Narrow lists keep only #, title, artist and length.");
+    let mut cols = s.columns.clone();
+    let all: Vec<&str> = cols.iter().filter_map(|c| COLUMNS.iter().find(|x| x.id == c).map(|x| x.id)).chain(COLUMNS.iter().map(|c| c.id).filter(|c| !s.columns.iter().any(|x| x == c))).collect();
+    let mut changed = false;
+    let n_on = cols.len();
+    for id in &all {
+        let c = COLUMNS.iter().find(|x| x.id == *id).unwrap();
+        let pos = cols.iter().position(|x| x == id);
+        ui.horizontal(|ui| {
+            if tick(ui, &pal, pos.is_some()) && (pos.is_none() || *id != "title") {
+                match pos {
+                    Some(i) => {
+                        cols.remove(i);
+                    }
+                    None => cols.push(id.to_string()),
+                }
+                changed = true;
+            }
+            cell(ui, 240.0, egui::RichText::new(c.name).color(if pos.is_some() { pal.text } else { pal.dim }));
+            if let Some(i) = pos {
+                let d = updown(ui, &pal, i == 0, i + 1 == n_on);
+                if d != 0 {
+                    cols.swap(i, (i as i32 + d) as usize);
+                    changed = true;
+                }
+            }
+        });
+    }
+    if button(ui, &pal, "RESET COLUMNS", false, cols != crate::store::d_columns()).clicked() {
+        cols = crate::store::d_columns();
+        changed = true;
+    }
+    if changed {
+        app.edit_settings(|s| s.columns = cols);
+    }
+    spacer(ui);
+    caption(ui, &pal, "DEFAULT SORT");
+    dim(ui, &pal, "How each screen is sorted when you open it (click a column header to sort differently for now).");
+    for (screen, name, def) in SCREENS {
+        let cur = browser::parse_sort(s.sorts.get(screen).map(|x| x.as_str()).unwrap_or(def));
+        let mut next = cur;
+        row(ui, &pal, name, |ui| {
+            let label = |k: Option<(browser::SortKey, bool)>| k.and_then(|(k, _)| SORTS.iter().find(|x| x.0 == k)).map(|x| x.2).unwrap_or(if screen == "playlist" { "Playlist order" } else { "Unsorted" });
+            egui::ComboBox::from_id_salt(("sort", screen)).selected_text(label(cur)).width(160.0).show_ui(ui, |ui| {
+                if screen == "playlist" && ui.selectable_label(cur.is_none(), "Playlist order").clicked() {
+                    next = None;
+                }
+                for (k, _, n) in SORTS {
+                    if ui.selectable_label(cur.map(|c| c.0) == Some(k), n).clicked() {
+                        next = Some((k, cur.map(|c| c.1).unwrap_or(!matches!(k, browser::SortKey::Plays | browser::SortKey::Added))));
+                    }
+                }
+            });
+            if let Some((k, asc)) = cur {
+                if tb_button(ui, &pal, if asc { "▲ ASCENDING" } else { "▼ DESCENDING" }, false).clicked() {
+                    next = Some((k, !asc));
+                }
+            }
+        });
+        if next != cur {
+            let t = browser::sort_text(next);
+            app.edit_settings(|s| {
+                if t == def {
+                    s.sorts.remove(screen);
+                } else {
+                    s.sorts.insert(screen.to_string(), t);
+                }
+            });
+            app.browser.sort = None;
+        }
+    }
+    spacer(ui);
+    caption(ui, &pal, "WHEN DK.FM STARTS");
+    row(ui, &pal, "Open to", |ui| {
+        let mut v = s.start_view.clone();
+        egui::ComboBox::from_id_salt("start").selected_text(START.iter().find(|x| x.0 == v).map(|x| x.1).unwrap_or("All Tracks")).width(200.0).show_ui(ui, |ui| {
+            for (k, n) in START {
+                ui.selectable_value(&mut v, k.to_string(), n);
+            }
+        });
+        if v != s.start_view {
+            app.edit_settings(|s| s.start_view = v);
+        }
+    });
+}
+
+fn sidebar(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let (mut order, mut hidden) = { let s = app.settings.lock(); (browser::sidebar_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
+    caption(ui, &pal, "SIDEBAR");
+    dim(ui, &pal, "Choose which shortcuts the library sidebar shows, and their order. Your playlists are always listed below them.");
+    let mut changed = false;
+    for g in ["LIBRARY", "GET MUSIC"] {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(g).font(px(6.0)).color(pal.dim));
+        let ids: Vec<&str> = order.iter().copied().filter(|id| SIDEBAR.iter().any(|s| s.0 == *id && s.1 == g)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            let (_, _, ico, label) = SIDEBAR.iter().find(|s| s.0 == *id).unwrap();
+            let shown = !hidden.iter().any(|h| h == id);
+            ui.horizontal(|ui| {
+                if tick(ui, &pal, shown) {
+                    if shown { hidden.push(id.to_string()) } else { hidden.retain(|h| h != id) }
+                    changed = true;
+                }
+                cell(ui, 240.0, egui::RichText::new(format!("{ico}  {label}")).color(if shown { pal.text } else { pal.dim }));
+                let d = updown(ui, &pal, i == 0, i + 1 == ids.len());
+                if d != 0 {
+                    let other = ids[(i as i32 + d) as usize];
+                    let (a, b) = (order.iter().position(|x| x == id).unwrap(), order.iter().position(|x| *x == other).unwrap());
+                    order.swap(a, b);
+                    changed = true;
+                }
+            });
+        }
+    }
+    ui.add_space(8.0);
+    if button(ui, &pal, "RESET SIDEBAR", false, true).clicked() {
+        order = browser::sidebar_order(&[]);
+        hidden.clear();
+        changed = true;
+    }
+    if changed {
+        app.edit_settings(|s| {
+            s.sidebar_order = order.iter().map(|x| x.to_string()).collect();
+            s.sidebar_hidden = hidden;
+        });
+    }
+}
+
+// ------------------------------------------------------------------------------- search
+
+const SOURCE_NAMES: [(&str, &str); 4] = [("library", "Your library"), ("songs", "YouTube Music (SONGS)"), ("youtube", "YouTube"), ("soundcloud", "SoundCloud")];
+
+fn search(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let s = app.settings.lock().clone();
+    caption(ui, &pal, "ADD SONGS SEARCH");
+    dim(ui, &pal, "The ADD SONGS box in a playlist searches your library and finds new songs online.");
+    row(ui, &pal, "Results per search", |ui| {
+        if let Some(n) = choice(ui, &pal, &s.search_results, &[(5, "5"), (10, "10"), (25, "25"), (50, "50")]) {
+            app.edit_settings(|s| s.search_results = n);
+        }
+    });
+    row(ui, &pal, "Start on tab", |ui| {
+        let opts: Vec<(String, &str)> = super::addsongs::SOURCES.iter().filter(|x| s.search_sources.iter().any(|k| k == x.0)).map(|x| (x.0.to_string(), x.1)).collect();
+        if let Some(k) = choice(ui, &pal, &s.search_source, &opts) {
+            app.edit_settings(|s| s.search_source = k);
+        }
+    });
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Where to look, in order").color(pal.dim));
+    let mut order: Vec<String> = s.search_sources.iter().filter(|k| SOURCE_NAMES.iter().any(|x| x.0 == k.as_str())).cloned().collect();
+    let all: Vec<&str> = order.iter().map(|s| s.as_str()).chain(SOURCE_NAMES.iter().map(|x| x.0).filter(|k| !s.search_sources.iter().any(|x| x == k))).map(|k| SOURCE_NAMES.iter().find(|x| x.0 == k).unwrap().0).collect();
+    let mut changed = false;
+    let n_on = order.len();
+    for k in all {
+        let pos = order.iter().position(|x| x == k);
+        ui.horizontal(|ui| {
+            if tick(ui, &pal, pos.is_some()) {
+                match pos {
+                    Some(i) => {
+                        order.remove(i);
+                    }
+                    None => order.push(k.to_string()),
+                }
+                changed = true;
+            }
+            cell(ui, 240.0, egui::RichText::new(SOURCE_NAMES.iter().find(|x| x.0 == k).unwrap().1).color(if pos.is_some() { pal.text } else { pal.dim }));
+            if let Some(i) = pos {
+                let d = updown(ui, &pal, i == 0, i + 1 == n_on);
+                if d != 0 {
+                    order.swap(i, (i as i32 + d) as usize);
+                    changed = true;
+                }
+            }
+        });
+    }
+    if changed {
+        app.edit_settings(|s| s.search_sources = order);
+    }
+    ui.add_space(6.0);
+    let mut hx = s.hide_explicit;
+    if switch(ui, &pal, &mut hx, "HIDE EXPLICIT SONGS") {
+        app.edit_settings(|s| s.hide_explicit = hx);
+    }
+    dim(ui, &pal, "Where the source marks them: YouTube Music search results, and Spotify imports (explicit songs start unticked).");
+    spacer(ui);
+    caption(ui, &pal, "IMPORT MATCHING");
+    dim(ui, &pal, "When importing from Spotify, DK.FM finds each song on YouTube Music / YouTube. How sure must it be?");
+    row(ui, &pal, "Match strictness", |ui| {
+        if let Some(m) = choice(ui, &pal, &s.match_strictness, &[("relaxed".to_string(), "RELAXED"), ("normal".to_string(), "NORMAL"), ("strict".to_string(), "STRICT")]) {
+            app.edit_settings(|s| s.match_strictness = m);
+        }
+    });
+    dim(ui, &pal, match s.match_strictness.as_str() {
+        "relaxed" => "Relaxed: finds more songs, but sometimes a live or cover version.",
+        "strict" => "Strict: only clear matches; more songs may be skipped (pick them by hand in Downloads).",
+        _ => "Normal: a good balance (recommended).",
+    });
 }
 
 fn library(app: &mut App, ui: &mut Ui) {
@@ -341,6 +962,8 @@ fn downloads(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.download_concurrency = conc);
         }
     });
+    ui.add_space(14.0);
+    naming(app, ui);
     ui.add_space(14.0);
     caption(ui, &pal, "AUTO-SYNC");
     let mut h = app.settings.lock().sync_hours;
@@ -528,19 +1151,257 @@ fn updates(app: &mut App, ui: &mut Ui) {
     });
 }
 
+
+fn naming(app: &mut App, ui: &mut Ui) {
+    use crate::downloader::{render_name, NameParts, NAME_TOKENS};
+    let pal = app.pal;
+    caption(ui, &pal, "FILE NAMES");
+    dim(ui, &pal, "How downloaded songs are named inside the download folder. \"/\" makes a folder. {folder} is the playlist or album (single songs: Singles).");
+    let mut pat = app.settings.lock().name_pattern.clone();
+    let before = pat.clone();
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut pat).desired_width(380.0).font(vt(19.0)));
+        if button(ui, &pal, "RESET", false, pat != crate::store::DEFAULT_PATTERN).clicked() {
+            pat = crate::store::DEFAULT_PATTERN.into();
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Insert").color(pal.dim));
+        for t in NAME_TOKENS {
+            if tb_button(ui, &pal, t, false).clicked() {
+                if !pat.is_empty() && !pat.ends_with(['/', ' ']) {
+                    pat.push(' ');
+                }
+                pat.push_str(t);
+            }
+        }
+        if tb_button(ui, &pal, "/", false).on_hover_text("New folder level").clicked() {
+            pat.push('/');
+        }
+    });
+    if pat != before {
+        app.edit_settings(|s| s.name_pattern = pat.clone());
+    }
+    let ext = if app.settings.lock().download_format.starts_with("mp3") { "mp3" } else { "m4a" };
+    let ex = |folder: &str, album: &str, track: Option<u32>| render_name(&pat, &NameParts { artist: "Daft Punk", album, title: "One More Time", track, year: Some(2001), folder }).display().to_string();
+    ui.label(egui::RichText::new(format!("Example: {}.{ext}", ex("Party Mix", "Discovery", Some(1)))).color(pal.accent2));
+    dim(ui, &pal, &format!("A single song: {}.{ext}", ex("Singles", "", None)));
+}
+
+// ------------------------------------------------------------------------------- shortcuts
+
 fn keys(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    caption(ui, &pal, "KEYBOARD");
-    for (k, d) in [
-        ("Space", "Play / pause"), ("Left / Right", "Seek 5 s (Shift: 30 s)"), ("Ctrl Left / Right", "Previous / next song"), ("Up / Down", "Volume"),
-        ("M", "Mute"), ("S", "Shuffle"), ("R", "Repeat mode"), ("L", "Like current song"), ("V", "Cycle visualizer"),
-        ("Ctrl K", "Command palette: search & do anything"), ("Ctrl F", "Search library"), ("Ctrl E", "Edit layout"), ("Ctrl M", "Mini player"), ("Ctrl ,", "Settings"), ("Ctrl I", "Import music"),
-    ] {
-        row(ui, &pal, k, |ui| {
-            ui.label(egui::RichText::new(d).color(pal.text));
+    // recording a new key: the first key pressed (with Ctrl / Alt / Shift) becomes the shortcut
+    if let Some(action) = app.setui.capture {
+        let pressed = ui.input(|i| i.events.iter().find_map(|e| if let egui::Event::Key { key, pressed: true, modifiers, .. } = e { Some(Combo::from_event(*key, *modifiers)) } else { None }));
+        if let Some(c) = pressed {
+            let plain = !c.ctrl && !c.alt && !c.shift;
+            let new = match c.key {
+                egui::Key::Escape if plain => None,
+                egui::Key::Backspace | egui::Key::Delete if plain => Some(String::new()),
+                _ => Some(c.text()),
+            };
+            if let Some(b) = new {
+                app.edit_settings(|s| {
+                    if b == keys::default_of(action) {
+                        s.keys.remove(action);
+                    } else {
+                        s.keys.insert(action.to_string(), b);
+                    }
+                });
+            }
+            app.setui.capture = None;
+        }
+        ui.ctx().request_repaint();
+    }
+    let map = app.settings.lock().keys.clone();
+    let clashes = keys::conflicts(&map);
+    caption(ui, &pal, "KEYBOARD SHORTCUTS");
+    dim(ui, &pal, "Click a shortcut, then press the new keys (Esc cancels, Backspace turns it off).");
+    if !clashes.is_empty() {
+        ui.label(egui::RichText::new(format!("⚠ {} shortcut{} used twice — change one of each pair.", clashes.len(), if clashes.len() == 1 { " is" } else { "s are" })).color(pal.accent));
+    }
+    ui.add_space(4.0);
+    let name = |a: &str| keys::ACTIONS.iter().find(|x| x.0 == a).map(|x| x.1).unwrap_or("");
+    for (action, label, def) in keys::ACTIONS {
+        let cur = map.get(action).cloned().unwrap_or_else(|| def.to_string());
+        let clash: Vec<&str> = clashes.iter().filter_map(|(a, b)| if *a == action { Some(*b) } else if *b == action { Some(*a) } else { None }).collect();
+        ui.horizontal(|ui| {
+            cell(ui, 250.0, egui::RichText::new(label).color(pal.text));
+            let rec = app.setui.capture == Some(action);
+            let text = if rec { "PRESS KEYS…".to_string() } else if cur.is_empty() { "—".into() } else { cur.to_uppercase() };
+            let (r, resp) = ui.allocate_exact_size(Vec2::new(150.0, 24.0), Sense::click());
+            fill(ui.painter(), r, if rec { pal.accent } else { pal.bg });
+            frame_rect(ui.painter(), r, 2.0, if !clash.is_empty() { pal.accent } else if resp.hovered() { pal.text } else { pal.line_hi });
+            ui.painter().text(r.center(), Align2::CENTER_CENTER, text, px(7.0), if rec { pal.ink } else if cur.is_empty() { pal.dim } else { pal.accent2 });
+            if resp.clicked() {
+                app.setui.capture = if rec { None } else { Some(action) };
+                resp.surrender_focus(); // so Space / Enter are recorded, not "clicked"
+            }
+            if map.contains_key(action) && tb_button(ui, &pal, "RESET", false).on_hover_text(format!("Back to {}", if def.is_empty() { "none" } else { def })).clicked() {
+                app.edit_settings(|s| {
+                    s.keys.remove(action);
+                });
+            }
+            if !clash.is_empty() {
+                ui.label(egui::RichText::new(format!("also: {}", clash.iter().map(|a| name(a)).collect::<Vec<_>>().join(", "))).font(vt(16.0)).color(pal.accent));
+            }
         });
     }
-    dim(ui, &pal, "Keyboard media keys and the system media overlay work too.");
+    ui.add_space(8.0);
+    if button(ui, &pal, "RESET ALL SHORTCUTS", false, !map.is_empty()).clicked() {
+        app.edit_settings(|s| s.keys.clear());
+        app.setui.capture = None;
+    }
+    dim(ui, &pal, "Keyboard media keys and the system media overlay work too. In Ctrl+K: Enter plays, Tab adds to a playlist.");
+}
+
+// ------------------------------------------------------------------------------- backups
+
+fn fmt_size(b: u64) -> String {
+    if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1u64 << 20) as f64) } else { format!("{} KB", (b + 1023) / 1024) }
+}
+
+fn fmt_date(secs: i64) -> String {
+    // "2026-10-03_142501" -> "2026-10-03 · 14:25"
+    let s = crate::store::local_stamp(secs, true);
+    format!("{} · {}:{}", &s[..10], &s[11..13], &s[13..15])
+}
+
+fn backups(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let s = app.settings.lock().clone();
+    let stale = app.setui.backups.as_ref().map(|b| b.0.elapsed().as_secs() > 5).unwrap_or(true);
+    if stale {
+        app.setui.backups = Some((std::time::Instant::now(), backup::list()));
+    }
+    let list: Vec<(PathBuf, i64, u64, String)> = app.setui.backups.as_ref().map(|b| b.1.iter().map(|e| (e.path.clone(), e.created, e.size, e.kind.clone())).collect()).unwrap_or_default();
+    let refresh = |app: &mut App| app.setui.backups = None;
+    caption(ui, &pal, "AUTOMATIC BACKUPS");
+    dim(ui, &pal, "A small compressed copy of your library, playlists, play counts, listening history and settings. Song files and cover art aren't included (covers come back from the songs); your Spotify login isn't either.");
+    let mut on = s.auto_backup;
+    if switch(ui, &pal, &mut on, "BACK UP AUTOMATICALLY") {
+        app.edit_settings(|s| s.auto_backup = on);
+    }
+    ui.add_space(4.0);
+    row(ui, &pal, "How often", |ui| {
+        if let Some(v) = choice(ui, &pal, &s.backup_every, &[("daily".to_string(), "DAILY"), ("weekly".to_string(), "WEEKLY")]) {
+            app.edit_settings(|s| s.backup_every = v);
+        }
+    });
+    row(ui, &pal, "Keep the newest", |ui| {
+        if let Some(v) = choice(ui, &pal, &s.backup_keep, &[(1, "1"), (3, "3"), (5, "5"), (10, "10")]) {
+            app.edit_settings(|s| s.backup_keep = v);
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if button(ui, &pal, "BACK UP NOW", true, true).clicked() {
+            match backup::create(&app.lib, &s, "manual") {
+                Ok(_) => app.toast("Backup saved"),
+                Err(e) => app.toast_err(e),
+            }
+            refresh(app);
+        }
+        if button(ui, &pal, "EXPORT BACKUP…", false, true).clicked() {
+            let name = format!("DK.FM backup {}.{}", crate::store::local_stamp(crate::store::now_secs(), false), backup::EXT);
+            if let Some(p) = rfd::FileDialog::new().set_title("Export a DK.FM backup").set_file_name(&name).add_filter("DK.FM backup", &[backup::EXT]).save_file() {
+                let r = { let (d, h) = (app.lib.data.read(), app.lib.history.read()); backup::write(&p, &d, &h, &s) };
+                match r {
+                    Ok(n) => app.toast(format!("Exported backup ({})", fmt_size(n))),
+                    Err(e) => app.toast_err(e),
+                }
+            }
+        }
+        if button(ui, &pal, "IMPORT BACKUP…", false, true).clicked() {
+            if let Some(p) = rfd::FileDialog::new().set_title("Restore a DK.FM backup").add_filter("DK.FM backup", &[backup::EXT]).pick_file() {
+                match backup::read(&p) {
+                    Ok(_) => app.setui.confirm = Some(Confirm::Restore(p)),
+                    Err(e) => app.toast_err(e),
+                }
+            }
+        }
+    });
+    // asking first
+    match app.setui.confirm.take() {
+        Some(Confirm::Restore(p)) => {
+            let mut keep = true;
+            egui::Frame::new().fill(pal.bg2).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                ui.label(egui::RichText::new(format!("Restore the backup \"{}\"?", p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())).color(pal.text));
+                dim(ui, &pal, "Your library, playlists, play counts, history and settings go back to that point. What you have now is backed up first, so you can undo this.");
+                ui.horizontal(|ui| {
+                    if button(ui, &pal, "CANCEL", false, true).clicked() {
+                        keep = false;
+                    }
+                    if button(ui, &pal, "RESTORE", true, true).clicked() {
+                        keep = false;
+                        match backup::restore(&app.lib, &app.settings, &p) {
+                            Ok(()) => {
+                                app.reload_all(ui.ctx());
+                                app.toast("Backup restored — rescanning your music folders");
+                            }
+                            Err(e) => app.toast_err(format!("Couldn't restore: {e}")),
+                        }
+                        app.setui.backups = None;
+                    }
+                });
+            });
+            if keep {
+                app.setui.confirm = Some(Confirm::Restore(p));
+            }
+        }
+        Some(Confirm::DeleteAll) => {
+            let mut keep = true;
+            egui::Frame::new().fill(pal.bg2).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                ui.label(egui::RichText::new(format!("Move all {} backups to the Recycle Bin?", list.len())).color(pal.text));
+                ui.horizontal(|ui| {
+                    if button(ui, &pal, "CANCEL", false, true).clicked() {
+                        keep = false;
+                    }
+                    if button(ui, &pal, "DELETE ALL", true, true).clicked() {
+                        keep = false;
+                        match system::trash(&backup::dir()) {
+                            Ok(()) => app.toast("Backups moved to the Recycle Bin"),
+                            Err(e) => app.toast_err(e),
+                        }
+                        app.setui.backups = None;
+                    }
+                });
+            });
+            if keep {
+                app.setui.confirm = Some(Confirm::DeleteAll);
+            }
+        }
+        None => {}
+    }
+    spacer(ui);
+    caption(ui, &pal, "YOUR BACKUPS");
+    if list.is_empty() {
+        dim(ui, &pal, "No backups yet.");
+    }
+    for (path, created, size, kind) in &list {
+        ui.horizontal(|ui| {
+            cell(ui, 200.0, egui::RichText::new(fmt_date(*created)).color(pal.text));
+            let k = match kind.as_str() { "auto" => "automatic", "before-restore" => "before a restore", _ => "manual" };
+            cell(ui, 160.0, egui::RichText::new(k).color(pal.dim));
+            cell(ui, 70.0, egui::RichText::new(fmt_size(*size)).color(pal.dim));
+            if button(ui, &pal, "RESTORE", false, true).clicked() {
+                app.setui.confirm = Some(Confirm::Restore(path.clone()));
+            }
+        });
+    }
+    ui.add_space(6.0);
+    let total: u64 = list.iter().map(|b| b.2).sum();
+    dim(ui, &pal, &format!("{} on disk · {}", fmt_size(total), backup::dir().display()));
+    ui.horizontal(|ui| {
+        if button(ui, &pal, "OPEN FOLDER", false, !list.is_empty()).clicked() {
+            let _ = open::that(backup::dir());
+        }
+        if button(ui, &pal, "DELETE ALL BACKUPS", false, !list.is_empty()).clicked() {
+            app.setui.confirm = Some(Confirm::DeleteAll);
+        }
+    });
 }
 
 fn about(app: &mut App, ui: &mut Ui) {
@@ -550,4 +1411,12 @@ fn about(app: &mut App, ui: &mut Ui) {
     dim(ui, &pal, "Retro desktop music player. Plays your local library and imports Spotify / YouTube / SoundCloud playlists.");
     dim(ui, &pal, "Lyrics from LRCLIB · downloads powered by yt-dlp, FFmpeg and QuickJS · fonts VT323 & Press Start 2P (OFL).");
     dim(ui, &pal, "Only download music you have the rights to.");
+}
+
+/// Left-aligned text in a fixed-width cell (cut off with … when too long).
+fn cell(ui: &mut Ui, w: f32, text: egui::RichText) {
+    ui.allocate_ui_with_layout(Vec2::new(w, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+        ui.set_min_width(w);
+        ui.add(egui::Label::new(text).truncate());
+    });
 }

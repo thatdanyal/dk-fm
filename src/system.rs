@@ -103,6 +103,7 @@ pub struct Tray {
     tray: tray_icon::TrayIcon,
     now: tray_icon::menu::MenuItem,
     play: tray_icon::menu::MenuItem,
+    private: tray_icon::menu::CheckMenuItem,
 }
 
 #[cfg(target_os = "linux")]
@@ -110,8 +111,8 @@ pub struct Tray;
 
 impl Tray {
     #[cfg(not(target_os = "linux"))]
-    pub fn new(player: Arc<Player>) -> Option<Self> {
-        use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    pub fn new(player: Arc<Player>, lib: Arc<crate::library::Library>) -> Option<Self> {
+        use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
         use tray_icon::{TrayIconBuilder, TrayIconEvent};
         let img = image::load_from_memory(include_bytes!("../assets/icon.png")).ok()?.resize(32, 32, image::imageops::FilterType::Lanczos3).to_rgba8();
         let icon = tray_icon::Icon::from_rgba(img.to_vec(), img.width(), img.height()).ok()?;
@@ -119,12 +120,13 @@ impl Tray {
         let play = MenuItem::new("Play", true, None);
         let next = MenuItem::new("Next", true, None);
         let prev = MenuItem::new("Previous", true, None);
+        let private = CheckMenuItem::new("Private listening", true, lib.private.load(Ordering::Relaxed), None);
         let show = MenuItem::new("Show DK.FM", true, None);
         let quit = MenuItem::new("Quit DK.FM", true, None);
         let menu = Menu::new();
-        menu.append_items(&[&now, &PredefinedMenuItem::separator(), &play, &next, &prev, &PredefinedMenuItem::separator(), &show, &quit]).ok()?;
+        menu.append_items(&[&now, &PredefinedMenuItem::separator(), &play, &next, &prev, &PredefinedMenuItem::separator(), &private, &show, &quit]).ok()?;
         let tray = TrayIconBuilder::new().with_icon(icon).with_tooltip("DK.FM").with_menu(Box::new(menu)).build().ok()?;
-        let (pid, nid, vid, sid, qid) = (play.id().clone(), next.id().clone(), prev.id().clone(), show.id().clone(), quit.id().clone());
+        let (pid, nid, vid, sid, qid, rid) = (play.id().clone(), next.id().clone(), prev.id().clone(), show.id().clone(), quit.id().clone(), private.id().clone());
         let p = player.clone();
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
             if e.id == pid {
@@ -133,6 +135,11 @@ impl Tray {
                 p.next(true);
             } else if e.id == vid {
                 p.prev();
+            } else if e.id == rid {
+                lib.private.fetch_xor(true, Ordering::Relaxed);
+                if let Some(ctx) = CTX.lock().as_ref() {
+                    ctx.request_repaint();
+                }
             } else if e.id == sid {
                 show_window();
             } else if e.id == qid {
@@ -148,21 +155,24 @@ impl Tray {
                 show_window();
             }
         }));
-        Some(Self { tray, now, play })
+        Some(Self { tray, now, play, private })
     }
 
     #[cfg(target_os = "linux")]
-    pub fn new(_player: Arc<Player>) -> Option<Self> {
+    pub fn new(_player: Arc<Player>, _lib: Arc<crate::library::Library>) -> Option<Self> {
         None
     }
 
     #[allow(unused_variables)]
-    pub fn update(&self, label: &str, playing: bool) {
+    pub fn update(&self, label: &str, playing: bool, private: bool) {
         #[cfg(not(target_os = "linux"))]
         {
             let l: String = label.chars().take(60).collect();
             self.now.set_text(if l.is_empty() { "Nothing playing".to_string() } else { l.clone() });
             self.play.set_text(if playing { "Pause" } else { "Play" });
+            if self.private.is_checked() != private {
+                self.private.set_checked(private);
+            }
             let _ = self.tray.set_tooltip(Some(if l.is_empty() { "DK.FM".to_string() } else { format!("DK.FM · {l}") }));
         }
     }

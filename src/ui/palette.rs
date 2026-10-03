@@ -42,6 +42,9 @@ enum Act {
     Theme(String),
     ApplyLayout(String),
     PlaySong(Vec<String>, usize),
+    Private,
+    Undo,
+    PlayFolder(String),
 }
 
 struct Item {
@@ -83,6 +86,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
     v.extend([
         (format!("Shuffle: {}", if o.shuffle { "on > off" } else { "off > on" }), "toggle", "🔀", Act::ToggleShuffle),
         (format!("Repeat: {} > next mode", o.repeat), "loop toggle", "🔁", Act::CycleRepeat),
+        (format!("Private listening: {}", if app.lib.private.load(std::sync::atomic::Ordering::Relaxed) { "on > off" } else { "off > on" }), "incognito stats history record secret", "🔒", Act::Private),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
         ("Open a playlist file from a friend (.dkfm)…".into(), "share shared import friend code", "📂", Act::OpenShare),
@@ -97,6 +101,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         ("Cycle visualizer".into(), "scope bars vu waterfall", "📈", Act::Visualizer),
         ("Rescan library".into(), "refresh folders", "🔄", Act::Rescan),
         ("Settings".into(), "preferences options", "⚙", Act::Settings),
+        ("Undo last change".into(), "restore removed deleted songs playlist merge ctrl+z", "↩", Act::Undo),
     ]);
     let s = app.settings.lock().clone();
     for (k, name) in theme::all_themes(&s) {
@@ -150,6 +155,9 @@ fn search(app: &App, q: &str) -> Vec<Item> {
     }
     for p in d.playlists.iter().filter(|p| score(&p.name.to_lowercase(), &toks).is_some()).take(4) {
         out.push(Item { group: "PLAYLISTS", label: p.name.clone(), sub: format!("{} songs", p.track_ids.len()), icon: "☰".into(), cover: None, song: None, act: Act::View(View::Playlist(p.id.clone())) });
+    }
+    for f in d.folders.iter().filter(|f| score(&f.name.to_lowercase(), &toks).is_some()).take(2) {
+        out.push(Item { group: "PLAYLISTS", label: format!("Play folder \"{}\"", f.name), sub: "every playlist in it".into(), icon: "📁".into(), cover: None, song: None, act: Act::PlayFolder(f.id.clone()) });
     }
     out
 }
@@ -211,7 +219,10 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
             app.edit_settings(|s| s.theme = k);
             app.set_theme(ctx);
         }
-        Act::PlaySong(ids, i) => app.player.play_list(ids, i, Some(false)),
+        Act::PlaySong(ids, i) => app.player.play_pick(ids, i, Some(false)),
+        Act::Private => app.run_action(ctx, "private"),
+        Act::Undo => app.undo(),
+        Act::PlayFolder(id) => super::browser::play_folder(app, &id, false),
         Act::ApplyLayout(name) => {
             if app.apply_layout(&name) {
                 app.toast(format!("Layout: {name}"));

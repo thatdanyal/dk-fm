@@ -12,6 +12,7 @@ pub mod import;
 pub mod keys;
 pub mod lyrics;
 pub mod palette;
+pub mod plcover;
 pub mod plpick;
 pub mod queue;
 pub mod scope;
@@ -72,6 +73,11 @@ pub enum Modal {
 pub enum PromptAction {
     NewPlaylist(Vec<String>),
     RenamePlaylist(String),
+    /// playlist description (may be empty)
+    Describe(String),
+    /// new folder, optionally moving a playlist into it
+    NewFolder(Option<String>),
+    RenameFolder(String),
     PasteYoutube(String, usize),
 }
 
@@ -112,6 +118,9 @@ pub struct App {
     pub setui: settings::SetUi,
     /// a friend's code / file waiting in its preview
     pub incoming: Option<sharing::Incoming>,
+    pub plcovers: plcover::PlCovers,
+    /// "Removed 3 songs from Chill · UNDO" (the last undoable change, for a few seconds)
+    pub undo_toast: Option<(String, Instant)>,
 }
 
 pub fn default_dock() -> DockState<Tab> {
@@ -129,6 +138,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, lib: Arc<Library>, player: Arc<Player>, dl: Arc<Downloader>, watcher: Arc<FolderWatcher>, settings: Arc<Mutex<Settings>>, settings_dirty: Arc<AtomicBool>, hidden: bool) -> Self {
         let (tkey, pal, dock_json, start) = {
             let s = settings.lock();
+            lib.private.store(s.private_listening && s.keep_private, Ordering::Relaxed);
             (s.theme.clone(), theme::resolve(&s), s.dock.clone(), s.start_view.clone())
         };
         theme::apply(&cc.egui_ctx, &pal);
@@ -167,7 +177,7 @@ impl App {
         }));
 
         let dock = dock_json.and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok()).filter(|d| d.iter_all_tabs().count() > 0).unwrap_or_else(default_dock);
-        let tray = Tray::new(player.clone());
+        let tray = Tray::new(player.clone(), lib.clone());
         let media = Some(Media::new(player.clone()));
         let update = Arc::new(Mutex::new(UpdState::Idle));
         let auto = settings.lock().auto_update;
@@ -228,6 +238,8 @@ impl App {
             drop_hover: false,
             setui: Default::default(),
             incoming: None,
+            plcovers: Default::default(),
+            undo_toast: None,
         };
         app.apply_look(&cc.egui_ctx);
         app
@@ -270,6 +282,28 @@ impl App {
     }
     pub fn toast_err(&mut self, msg: impl Into<String>) {
         self.toasts.push((msg.into(), Instant::now(), true));
+    }
+
+    /// Keep a change undoable (Ctrl+Z or the toast's UNDO button).
+    pub fn undoable(&mut self, u: crate::library::Undo) {
+        self.undo_toast = Some((u.label.clone(), Instant::now()));
+        self.lib.push_undo(u);
+    }
+
+    pub fn undo(&mut self) {
+        self.undo_toast = None;
+        match self.lib.undo() {
+            Some(u) if u.trashed > 0 => self.toast(format!("Undone: {}. The {} removed file{} are in the Recycle Bin: restore them from there to play them again", u.label, u.trashed, if u.trashed == 1 { "" } else { "s" })),
+            Some(u) => self.toast(format!("Undone: {}", u.label)),
+            None => self.toast("Nothing to undo"),
+        }
+    }
+
+    /// Private listening: plays, skips and listening history aren't recorded while it's on.
+    pub fn set_private(&mut self, on: bool) {
+        self.lib.private.store(on, Ordering::Relaxed);
+        self.edit_settings(|s| s.private_listening = on);
+        self.toast(if on { "Private listening on: plays and history aren't recorded" } else { "Private listening off" });
     }
 
     pub fn set_theme(&mut self, ctx: &egui::Context) {
@@ -506,6 +540,15 @@ impl App {
                     if tb_button(ui, &pal, "SETTINGS", false).clicked() {
                         self.modal = Some(Modal::Settings(settings::SetTab::Look));
                     }
+                    if self.lib.private.load(Ordering::Relaxed) {
+                        ui.add_space(10.0);
+                        let (r, resp) = ui.allocate_exact_size(Vec2::new(86.0, 22.0), Sense::click());
+                        fill(ui.painter(), r, pal.accent2);
+                        ui.painter().text(r.center(), Align2::CENTER_CENTER, "PRIVATE", px(7.0), pal.ink);
+                        if resp.on_hover_text("Private listening: plays and history aren't recorded. Click to turn off.").clicked() {
+                            self.set_private(false);
+                        }
+                    }
                     // centre status
                     if self.lib.scanning.load(Ordering::Relaxed) {
                         let (d, t) = (self.lib.scan_done.load(Ordering::Relaxed), self.lib.scan_total.load(Ordering::Relaxed));
@@ -635,6 +678,11 @@ impl App {
                 self.rescan();
                 self.toast("Scanning library…");
             }
+            "undo" => self.undo(),
+            "private" => {
+                let on = !self.lib.private.load(Ordering::Relaxed);
+                self.set_private(on);
+            }
             _ => {}
         }
     }
@@ -658,6 +706,28 @@ impl App {
                 y -= size.y + 8.0;
             }
             ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        // undo: the last change with an UNDO button
+        if let Some((label, t)) = self.undo_toast.clone() {
+            if t.elapsed() > Duration::from_secs(8) {
+                self.undo_toast = None;
+            } else {
+                let mut undo = false;
+                let lift = if self.layout_edit { 60.0 } else { 16.0 };
+                egui::Area::new(Id::new("undo-toast")).anchor(Align2::CENTER_BOTTOM, [0.0, -lift]).order(Order::Tooltip).show(ctx, |ui| {
+                    egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(&label).font(vt(19.0)).color(pal.text));
+                            ui.add_space(8.0);
+                            undo = widgets::button(ui, &pal, "UNDO", true, true).on_hover_text("Ctrl+Z").clicked();
+                        });
+                    });
+                });
+                if undo {
+                    self.undo();
+                }
+                ctx.request_repaint_after(Duration::from_millis(500));
+            }
         }
         // CRT scanlines + vignette
         if self.settings.lock().scanlines {
@@ -728,6 +798,23 @@ impl App {
                 "playlist" => {
                     let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
                     if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
+                }
+                // playlist=<name>: that playlist
+                v if v.starts_with("playlist=") => {
+                    let p = self.lib.data.read().playlists.iter().find(|p| p.name == v[9..]).map(|p| p.id.clone());
+                    if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
+                }
+                // private listening on + an undo toast (3 songs removed from the first big playlist, then put back)
+                "private-undo" => {
+                    self.lib.private.store(true, Ordering::Relaxed);
+                    let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).cloned();
+                    if let Some(p) = p {
+                        let sel: Vec<String> = p.track_ids.iter().take(3).cloned().collect();
+                        let u = self.lib.snapshot(format!("Removed 3 songs from \"{}\"", p.name), &[p.id.clone()], &[]);
+                        self.lib.playlist_remove(&p.id, &sel);
+                        self.undoable(u);
+                        self.browser.set_view(browser::View::Playlist(p.id.clone()));
+                    }
                 }
                 "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Look)),
                 // settings-look, settings-search, settings-backup, ... (a tab by name)
@@ -980,8 +1067,12 @@ impl eframe::App for App {
         // tray + OS media overlay
         let st = self.player.status();
         let cur = self.current_track();
+        let private = self.lib.private.load(Ordering::Relaxed);
         if let Some(t) = &self.tray {
-            t.update(&cur.as_ref().map(|t| format!("{} — {}", t.title, t.artist)).unwrap_or_default(), st.playing);
+            t.update(&cur.as_ref().map(|t| format!("{} — {}", t.title, t.artist)).unwrap_or_default(), st.playing, private);
+        }
+        if self.settings.lock().private_listening != private {
+            self.edit_settings(|s| s.private_listening = private); // turned on/off from the tray
         }
         if let (Some(m), Some(t)) = (self.media.as_mut(), cur.as_ref()) {
             let cover = t.cover.as_ref().map(|c| self.lib.cover_path(c).to_string_lossy().into_owned());

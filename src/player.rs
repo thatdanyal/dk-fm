@@ -4,7 +4,7 @@
 use crate::analysis::Analyzer;
 use crate::audio::{Cmd, Engine, Event, Status};
 use crate::library::{main_artist, Library};
-use crate::store::{now_secs, Eq, PlayerOpts, Settings};
+use crate::store::{now_secs, Eq, LibraryData, PlayerOpts, Settings};
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -166,13 +166,7 @@ impl Player {
         if st.opts.repeat == "one" && st.index >= 0 {
             return Some(st.index);
         }
-        if st.index + 1 < st.queue.len() as isize {
-            Some(st.index + 1)
-        } else if st.opts.repeat == "all" && !st.queue.is_empty() {
-            Some(0)
-        } else {
-            None
-        }
+        first_unhidden(&self.lib.data.read(), &st.queue, st.index + 1, st.opts.repeat == "all")
     }
 
     fn preload_next(&self) {
@@ -186,8 +180,20 @@ impl Player {
         }
     }
 
+    /// Play a list from `start` (hidden songs are left out).
     pub fn play_list(&self, ids: Vec<String>, start: usize, shuffle: Option<bool>) {
+        self.start_list(ids, start, shuffle, false);
+    }
+
+    /// Play a list starting at the song you picked (it plays even if it's hidden).
+    pub fn play_pick(&self, ids: Vec<String>, start: usize, shuffle: Option<bool>) {
+        self.start_list(ids, start, shuffle, true);
+    }
+
+    fn start_list(&self, ids: Vec<String>, start: usize, shuffle: Option<bool>, picked: bool) {
+        let (ids, start) = playable(&self.lib.data.read(), ids, start, picked);
         if ids.is_empty() {
+            self.notices.lock().push("Nothing to play: those songs are hidden".into());
             return;
         }
         let mut st = self.st.lock();
@@ -258,7 +264,15 @@ impl Player {
                 return;
             }
         }
-        self.load(i, true, 0.0);
+        // songs hidden after they were queued are skipped
+        let next = { let st = self.st.lock(); first_unhidden(&self.lib.data.read(), &st.queue, i, repeat == "all" || manual) };
+        match next {
+            Some(i) => self.load(i, true, 0.0),
+            None => {
+                self.engine.send(Cmd::Pause);
+                self.notify();
+            }
+        }
     }
 
     /// Shuffle + repeat: deal a fresh order for the next lap without the last few songs repeating.
@@ -607,6 +621,32 @@ impl Player {
     }
 }
 
+/// Songs to queue: hidden ones ("Don't play this") are left out, except the one you picked to
+/// start with. Returns the list and where to start in it.
+pub fn playable(d: &LibraryData, ids: Vec<String>, start: usize, picked: bool) -> (Vec<String>, usize) {
+    let hidden = |id: &String| d.stats.get(id).map(|s| s.hidden).unwrap_or(false);
+    if !ids.iter().any(hidden) {
+        return (ids, start);
+    }
+    let first = ids.get(start).cloned();
+    let keep = first.clone().filter(|_| picked);
+    let out: Vec<String> = ids.into_iter().filter(|id| !hidden(id) || Some(id) == keep.as_ref()).collect();
+    // start at the picked song, or the first playable one after where you started
+    let at = first.and_then(|f| out.iter().position(|x| *x == f)).unwrap_or(0);
+    let at = if out.is_empty() { 0 } else { at.min(out.len() - 1) };
+    (out, at)
+}
+
+/// The first song in the queue from `from` on (wrapping round to the start if `wrap`) that
+/// isn't hidden.
+fn first_unhidden(d: &LibraryData, queue: &[String], from: isize, wrap: bool) -> Option<isize> {
+    let n = queue.len() as isize;
+    if n == 0 || from < 0 {
+        return None;
+    }
+    (from..from + n).take_while(|&i| wrap || i < n).map(|i| i % n).find(|&i| !d.stats.get(&queue[i as usize]).map(|s| s.hidden).unwrap_or(false))
+}
+
 static MATCH: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
 
 fn plural(n: usize, w: &str) -> String {
@@ -639,4 +679,32 @@ pub fn smart_shuffle(lib: &Library, mut ids: Vec<String>, smart: bool) -> Vec<St
     }
     placed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     placed.into_iter().map(|p| p.1).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Stat;
+
+    #[test]
+    fn hidden_songs_are_skipped() {
+        let mut d = LibraryData::default();
+        d.stats.insert("b".into(), Stat { hidden: true, ..Default::default() });
+        d.stats.insert("d".into(), Stat { hidden: true, ..Default::default() });
+        let ids = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // playing a list leaves hidden songs out and starts at the next playable one
+        assert_eq!(playable(&d, ids(&["a", "b", "c", "d"]), 0, false), (ids(&["a", "c"]), 0));
+        assert_eq!(playable(&d, ids(&["a", "b", "c", "d"]), 1, false), (ids(&["a", "c"]), 0));
+        assert_eq!(playable(&d, ids(&["a", "b", "c"]), 2, false), (ids(&["a", "c"]), 1));
+        // ...but a song you picked yourself plays
+        assert_eq!(playable(&d, ids(&["a", "b", "c", "d"]), 1, true), (ids(&["a", "b", "c"]), 1));
+        assert_eq!(playable(&d, ids(&["b", "d"]), 0, false).0.len(), 0);
+        // songs hidden after they were queued are skipped when moving on
+        let q = ids(&["a", "b", "c", "d"]);
+        assert_eq!(first_unhidden(&d, &q, 1, false), Some(2));
+        assert_eq!(first_unhidden(&d, &q, 3, false), None);
+        assert_eq!(first_unhidden(&d, &q, 3, true), Some(0));
+        assert_eq!(first_unhidden(&d, &q, 4, true), Some(0));
+        assert_eq!(first_unhidden(&d, &ids(&["b"]), 0, true), None);
+    }
 }

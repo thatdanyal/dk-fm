@@ -207,7 +207,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         });
     });
     if let Some(i) = play {
-        app.player.play_list(top_ids, i, Some(false));
+        app.player.play_pick(top_ids, i, Some(false));
     }
     let _ = Color32::WHITE;
 }

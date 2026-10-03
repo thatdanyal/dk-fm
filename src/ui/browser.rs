@@ -146,11 +146,13 @@ pub struct BrowserState {
     artists: Vec<(String, String, Option<String>, usize)>,
     pub dupes: super::dupes::DupeState,
     pub add: super::addsongs::AddBox,
+    side_key: Option<(u64, u64, String)>,
+    side_rows: Vec<SideRow>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default() }
+        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), side_key: None, side_rows: Vec::new() }
     }
 }
 
@@ -197,14 +199,69 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
 // ------------------------------------------------------------------------------- sidebar
 
+/// A playlist or folder being dragged in the sidebar (to reorder, pin, or file it).
+#[derive(Clone)]
+enum SideDrag {
+    Playlist(String),
+    Folder(String),
+}
+
+/// A row of the sidebar's playlist list (rebuilt only when the library changes).
+#[derive(Clone)]
+pub struct SideRow {
+    is_folder: bool,
+    id: String,
+    name: String,
+    icon: &'static str,
+    n: usize,
+    /// the folder a playlist row is listed in
+    folder: Option<String>,
+    pinned: bool,
+    cover: Option<String>,
+}
+
+/// Sidebar sort options: (key, name).
+pub const PL_SORTS: [(&str, &str); 4] = [("custom", "Custom order (drag)"), ("name", "Name"), ("added", "Recently added"), ("played", "Recently played")];
+
+/// Pinned playlists first, then folders (with their playlists unless collapsed), then the rest.
+fn side_rows(app: &mut App, sort: &str) -> Vec<SideRow> {
+    let d = app.lib.data.read();
+    let pls = crate::library::sorted_playlists(&d, sort);
+    let folder_of = |p: &crate::store::Playlist| p.folder.clone().filter(|f| d.folders.iter().any(|x| x.id == *f));
+    let covers = &mut app.plcovers;
+    let mut row = |p: &crate::store::Playlist, folder: Option<String>| SideRow { is_folder: false, id: p.id.clone(), name: p.name.clone(), icon: playlist_icon(p), n: p.track_ids.len(), folder, pinned: p.pinned, cover: covers.get(&app.lib, &d, p) };
+    let mut rows: Vec<SideRow> = pls.iter().filter(|p| p.pinned).map(|p| row(p, folder_of(p))).collect();
+    for f in crate::library::sorted_folders(&d, sort) {
+        let inside: Vec<&&crate::store::Playlist> = pls.iter().filter(|p| folder_of(p).as_deref() == Some(f.id.as_str())).collect();
+        rows.push(SideRow { is_folder: true, id: f.id.clone(), name: f.name.clone(), icon: if f.collapsed { "📁" } else { "📂" }, n: inside.len(), folder: None, pinned: false, cover: None });
+        if !f.collapsed {
+            rows.extend(inside.into_iter().filter(|p| !p.pinned).map(|p| row(p, Some(f.id.clone()))));
+        }
+    }
+    rows.extend(pls.iter().filter(|p| !p.pinned && folder_of(p).is_none()).map(|p| row(p, None)));
+    rows
+}
+
+/// Everything a sidebar drop can do.
+enum SideAct {
+    Place { pid: String, folder: Option<Option<String>>, pinned: bool, near: Option<(String, bool)> },
+    MoveFolder(String, Option<String>),
+}
+
 fn sidebar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    let (n_all, n_liked, mut playlists) = {
+    let (n_all, n_liked) = {
         let d = app.lib.data.read();
-        (d.tracks.len(), d.stats.values().filter(|s| s.liked).count(), d.playlists.clone())
+        (d.tracks.len(), d.stats.values().filter(|s| s.liked).count())
     };
-    // Spotify Liked Songs first, then imported, then your own (each in their saved order)
-    playlists.sort_by_key(|p| (p.url() != Some("spotify:liked"), !p.is_imported()));
+    let (sort, thumbs) = { let s = app.settings.lock(); (s.playlist_sort.clone(), s.sidebar_covers) };
+    let custom = sort == "custom";
+    let key = (app.lib.gen.load(std::sync::atomic::Ordering::Relaxed), app.plcovers.stamp(), sort.clone());
+    if app.browser.side_key.as_ref() != Some(&key) {
+        app.browser.side_rows = side_rows(app, &sort);
+        app.browser.side_key = Some(key);
+    }
+    let rows = app.browser.side_rows.clone();
     let active_dl = app.dl.active_count();
     ui.spacing_mut().item_spacing.y = 0.0;
     let group = |ui: &mut Ui, s: &str| {
@@ -214,29 +271,49 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
     };
     let mut go: Option<View> = None;
     let mut drops: Vec<(View, Vec<String>)> = Vec::new();
-    let mut item = |ui: &mut Ui, app: &App, v: Option<View>, ico: &str, label: &str, cnt: Option<usize>| -> egui::Response {
-        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+    // one sidebar row: `indent` px, a cover thumbnail instead of the icon, draggable, pinned mark
+    let mut item = |ui: &mut Ui, app: &mut App, v: Option<View>, ico: &str, label: &str, cnt: Option<usize>, indent: f32, cover: Option<&str>, drag: Option<SideDrag>, pin: bool| -> egui::Response {
+        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), if drag.is_some() { Sense::click_and_drag() } else { Sense::click() });
         let active = v.as_ref() == Some(&app.browser.view);
         let droppable = matches!(v, Some(View::Playlist(_)) | Some(View::Liked));
-        let p = ui.painter();
         if droppable && resp.dnd_hover_payload::<DragSongs>().is_some() {
-            fill(p, r, pal.sel);
-            frame_rect(p, r, 2.0, pal.accent);
+            fill(ui.painter(), r, pal.sel);
+            frame_rect(ui.painter(), r, 2.0, pal.accent);
         } else if active {
-            fill(p, r, pal.sel);
-            fill(p, Rect::from_min_size(r.min, Vec2::new(3.0, r.height())), pal.accent);
+            fill(ui.painter(), r, pal.sel);
+            fill(ui.painter(), Rect::from_min_size(r.min, Vec2::new(3.0, r.height())), pal.accent);
         } else if resp.hovered() {
-            fill(p, r, pal.panel_hi);
+            fill(ui.painter(), r, pal.panel_hi);
         }
-        p.text(r.min + Vec2::new(14.0, 12.0), Align2::CENTER_CENTER, ico, vt(18.0), pal.accent2);
-        let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 30.0, r.bottom())));
-        clip.text(r.min + Vec2::new(28.0, 12.0), Align2::LEFT_CENTER, label, vt(19.0), if active { pal.accent } else { pal.text });
+        let x = r.left() + indent;
+        let tex = cover.and_then(|c| app.covers.get(ui.ctx(), app.lib.cover_path(c), c, 48));
+        let p = ui.painter();
+        match tex {
+            Some(t) => {
+                p.image(t, Rect::from_center_size(Pos2::new(x + 14.0, r.center().y), Vec2::splat(18.0)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                p.text(Pos2::new(x + 14.0, r.top() + 12.0), Align2::CENTER_CENTER, ico, vt(18.0), pal.accent2);
+            }
+        }
+        let right = r.right() - if pin { 44.0 } else { 30.0 };
+        let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(right, r.bottom())));
+        clip.text(Pos2::new(x + 28.0, r.top() + 12.0), Align2::LEFT_CENTER, label, vt(19.0), if active { pal.accent } else { pal.text });
+        if pin {
+            p.text(Pos2::new(r.right() - 34.0, r.center().y), Align2::CENTER_CENTER, "📌", vt(14.0), pal.accent2);
+        }
         if let Some(c) = cnt {
             p.text(Pos2::new(r.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, c.to_string(), vt(16.0), pal.dim);
         }
-        if droppable {
+        // (a release check takes the payload even when it's another type, so check the type first)
+        if droppable && egui::DragAndDrop::has_payload_of_type::<DragSongs>(ui.ctx()) {
             if let Some(d) = resp.dnd_release_payload::<DragSongs>() {
                 drops.push((v.clone().unwrap(), d.0.clone()));
+            }
+        }
+        if let Some(d) = drag {
+            if resp.drag_started() {
+                resp.dnd_set_drag_payload(d);
             }
         }
         if resp.clicked() {
@@ -255,7 +332,7 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         for (id, _, ico, label) in items {
             let cnt = match *id { "all" => Some(n_all), "downloads" if active_dl > 0 => Some(active_dl), _ => None };
-            if item(ui, app, view_for(id), ico, label, cnt).clicked() && *id == "folder" {
+            if item(ui, app, view_for(id), ico, label, cnt, 0.0, None, None, false).clicked() && *id == "folder" {
                 add_folder(app);
             }
         }
@@ -270,26 +347,176 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
             if ui.add(egui::Label::new(egui::RichText::new("+ ").font(vt(20.0)).color(pal.dim)).sense(Sense::click())).on_hover_text("New playlist").clicked() {
                 app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
             }
+            let r = ui.add(egui::Label::new(egui::RichText::new("↕").font(vt(15.0)).color(if custom { pal.dim } else { pal.accent })).sense(Sense::click())).on_hover_text("Sort playlists · new folder");
+            let id = ui.make_persistent_id("pl-sort");
+            if r.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(id));
+            }
+            egui::popup::popup_below_widget(ui, id, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                ui.set_min_width(190.0);
+                ui.label(egui::RichText::new("SORT BY").font(px(6.0)).color(pal.dim));
+                for (k, name) in PL_SORTS {
+                    if ui.button(format!("{} {name}", if sort == k { "•" } else { "  " })).clicked() {
+                        app.edit_settings(|s| s.playlist_sort = k.to_string());
+                    }
+                }
+                ui.separator();
+                if ui.button("New folder…").clicked() {
+                    app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(None) });
+                }
+            });
         });
     });
     ui.add_space(3.0);
+    let mut acts: Vec<SideAct> = Vec::new();
+    let mut toggle: Option<String> = None;
+    let dragging = egui::DragAndDrop::payload::<SideDrag>(ui.ctx());
+    let take = |r: &egui::Response| if dragging.is_some() { r.dnd_release_payload::<SideDrag>() } else { None };
     egui::ScrollArea::vertical().id_salt("side").auto_shrink([false; 2]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        item(ui, app, Some(View::Liked), "♥", "Liked", Some(n_liked));
-        for p in &playlists {
-            let r = item(ui, app, Some(View::Playlist(p.id.clone())), playlist_icon(p), &p.name, Some(p.track_ids.len()));
-            let pl = p.clone();
-            r.context_menu(|ui| playlist_menu_ui(app, ui, &pl));
+        item(ui, app, Some(View::Liked), "♥", "Liked", Some(n_liked), 0.0, None, None, false);
+        for row in &rows {
+            if row.is_folder {
+                let resp = item(ui, app, None, row.icon, &row.name, Some(row.n), 0.0, None, Some(SideDrag::Folder(row.id.clone())), false);
+                let r = resp.rect;
+                if resp.clicked() {
+                    toggle = Some(row.id.clone());
+                }
+                match resp.dnd_hover_payload::<SideDrag>().as_deref() {
+                    Some(SideDrag::Playlist(_)) => frame_rect(ui.painter(), r, 2.0, pal.accent),
+                    Some(SideDrag::Folder(f)) if custom && *f != row.id => {
+                        ui.painter().hline(r.x_range(), r.top(), egui::Stroke::new(3.0_f32, pal.accent));
+                    }
+                    _ => {}
+                }
+                match take(&resp).as_deref() {
+                    Some(SideDrag::Playlist(pid)) => acts.push(SideAct::Place { pid: pid.clone(), folder: Some(Some(row.id.clone())), pinned: false, near: None }),
+                    Some(SideDrag::Folder(f)) if custom => acts.push(SideAct::MoveFolder(f.clone(), Some(row.id.clone()))),
+                    _ => {}
+                }
+                let (fid, name) = (row.id.clone(), row.name.clone());
+                resp.context_menu(|ui| folder_menu_ui(app, ui, &fid, &name));
+                continue;
+            }
+            let indent = if row.folder.is_some() && !row.pinned { 12.0 } else { 0.0 };
+            let resp = item(ui, app, Some(View::Playlist(row.id.clone())), row.icon, &row.name, Some(row.n), indent, if thumbs { row.cover.as_deref() } else { None }, Some(SideDrag::Playlist(row.id.clone())), row.pinned);
+            let r = resp.rect;
+            // dropping a playlist here: into this row's place (pinned / folder), and in custom
+            // order also just above or below it
+            let below = ui.ctx().pointer_hover_pos().map(|p| p.y > r.center().y).unwrap_or(false);
+            if let Some(SideDrag::Playlist(pid)) = resp.dnd_hover_payload::<SideDrag>().as_deref() {
+                if *pid != row.id {
+                    if custom {
+                        ui.painter().with_clip_rect(r.expand(2.0)).hline(r.x_range(), if below { r.bottom() } else { r.top() }, egui::Stroke::new(3.0_f32, pal.accent));
+                    } else {
+                        frame_rect(ui.painter(), r, 2.0, pal.accent);
+                    }
+                }
+            }
+            if let Some(SideDrag::Playlist(pid)) = take(&resp).as_deref() {
+                // a pinned row keeps the dragged playlist's own folder
+                let folder = if row.pinned { None } else { Some(row.folder.clone()) };
+                acts.push(SideAct::Place { pid: pid.clone(), folder, pinned: row.pinned, near: custom.then(|| (row.id.clone(), below)) });
+            }
+            let pid = row.id.clone();
+            resp.context_menu(|ui| {
+                let pl = app.lib.data.read().playlists.iter().find(|p| p.id == pid).cloned();
+                if let Some(pl) = pl {
+                    playlist_menu_ui(app, ui, &pl);
+                }
+            });
         }
-        if !playlists.iter().any(|p| !p.is_imported()) && item(ui, app, None, "+", "New playlist", None).clicked() {
+        let none_yours = app.lib.data.read().playlists.iter().all(|p| p.is_imported());
+        if none_yours && item(ui, app, None, "+", "New playlist", None, 0.0, None, None, false).clicked() {
             app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
         }
+        // the empty space below: drop here to take a playlist out of its folder / unpin it
+        let h = ui.available_height().max(28.0);
+        let (zr, zresp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+        if dragging.is_some() && zresp.dnd_hover_payload::<SideDrag>().is_some() {
+            ui.painter().hline(zr.x_range(), zr.top() + 1.0, egui::Stroke::new(3.0_f32, pal.accent));
+            ui.painter().text(Pos2::new(zr.left() + 28.0, zr.top() + 12.0), Align2::LEFT_CENTER, "move here (no folder)", vt(16.0), pal.dim);
+        }
+        match take(&zresp).as_deref() {
+            Some(SideDrag::Playlist(pid)) => acts.push(SideAct::Place { pid: pid.clone(), folder: Some(None), pinned: false, near: custom.then(|| (String::new(), true)) }),
+            Some(SideDrag::Folder(f)) if custom => acts.push(SideAct::MoveFolder(f.clone(), None)),
+            _ => {}
+        }
     });
+    // what's being dragged follows the pointer
+    if let (Some(d), Some(pos)) = (dragging, ui.ctx().pointer_hover_pos()) {
+        let name = match &*d {
+            SideDrag::Playlist(id) | SideDrag::Folder(id) => rows.iter().find(|r| r.id == *id).map(|r| format!("{} {}", r.icon, r.name)).unwrap_or_default(),
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-side")));
+        let g = p.layout_no_wrap(name, vt(19.0), pal.ink);
+        let r = Rect::from_min_size(pos + Vec2::new(14.0, 6.0), g.size() + Vec2::new(14.0, 6.0));
+        fill(&p, r, pal.accent);
+        p.galley(r.min + Vec2::new(7.0, 3.0), g, pal.ink);
+    }
+    if let Some(f) = toggle {
+        app.lib.edit_folder(&f, |f| f.collapsed = !f.collapsed);
+    }
+    for a in acts {
+        match a {
+            SideAct::Place { pid, folder, pinned, near } => {
+                let folder = folder.unwrap_or_else(|| app.lib.data.read().playlists.iter().find(|p| p.id == pid).and_then(|p| p.folder.clone()));
+                app.lib.place_playlist(&pid, folder, pinned, near.as_ref().map(|(o, after)| (o.as_str(), *after)));
+            }
+            SideAct::MoveFolder(f, before) => app.lib.move_folder(&f, before.as_deref()),
+        }
+    }
     if let Some(v) = go {
         app.browser.set_view(v);
     }
     for (v, ids) in drops {
         drop_songs(app, &v, &ids);
+    }
+}
+
+/// Every song in a folder's playlists (in sidebar order, each song once, hidden ones left out).
+pub fn play_folder(app: &mut App, fid: &str, shuffle: bool) {
+    let sort = app.settings.lock().playlist_sort.clone();
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let pls = app.lib.folder_playlists(fid, &sort);
+    {
+        let d = app.lib.data.read();
+        for p in pls {
+            ids.extend(p.track_ids.iter().filter(|t| d.tracks.contains_key(*t) && seen.insert((*t).clone())).cloned());
+        }
+    }
+    if ids.is_empty() {
+        app.toast("That folder has no songs yet");
+        return;
+    }
+    let start = if shuffle { fastrand::usize(..ids.len()) } else { 0 };
+    app.player.play_list(ids, start, Some(shuffle));
+}
+
+fn folder_menu_ui(app: &mut App, ui: &mut Ui, fid: &str, name: &str) {
+    if ui.button("Play folder").clicked() {
+        play_folder(app, fid, false);
+        ui.close_menu();
+    }
+    if ui.button("Shuffle play").clicked() {
+        play_folder(app, fid, true);
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Rename folder…").clicked() {
+        app.modal = Some(Modal::Prompt { title: "RENAME FOLDER".into(), text: name.into(), action: PromptAction::RenameFolder(fid.into()) });
+        ui.close_menu();
+    }
+    if ui.button("New folder…").clicked() {
+        app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(None) });
+        ui.close_menu();
+    }
+    if ui.button("Delete folder").on_hover_text("Its playlists stay").clicked() {
+        app.lib.delete_folder(fid);
+        app.toast(format!("Deleted folder \"{name}\" (its playlists are kept)"));
+        ui.close_menu();
     }
 }
 
@@ -337,10 +564,12 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
     let ids: Vec<String> = p.track_ids.iter().filter(|id| app.lib.track(id).is_some()).cloned().collect();
     if ui.button("Play").clicked() {
         app.player.play_list(ids.clone(), 0, Some(false));
+        app.lib.touch_playlist(&p.id);
         ui.close_menu();
     }
     if ui.button("Shuffle play").clicked() {
-        app.player.play_list(ids.clone(), 0, Some(true));
+        app.player.play_list(ids.clone(), fastrand::usize(..ids.len().max(1)), Some(true));
+        app.lib.touch_playlist(&p.id);
         ui.close_menu();
     }
     if ui.button("Add to queue").clicked() {
@@ -352,6 +581,36 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
         app.modal = Some(Modal::Prompt { title: "RENAME PLAYLIST".into(), text: p.name.clone(), action: PromptAction::RenamePlaylist(p.id.clone()) });
         ui.close_menu();
     }
+    if ui.button(if p.description.is_empty() { "Add description…" } else { "Edit description…" }).clicked() {
+        app.modal = Some(Modal::Prompt { title: "DESCRIPTION".into(), text: p.description.clone(), action: PromptAction::Describe(p.id.clone()) });
+        ui.close_menu();
+    }
+    super::plcover::menu(app, ui, p);
+    if ui.button(if p.pinned { "Unpin" } else { "Pin to top" }).clicked() {
+        app.lib.place_playlist(&p.id, p.folder.clone(), !p.pinned, None);
+        ui.close_menu();
+    }
+    let folders = app.lib.data.read().folders.clone();
+    ui.menu_button("Move to folder", |ui| {
+        for f in &folders {
+            let here = p.folder.as_deref() == Some(f.id.as_str());
+            if ui.button(format!("{} {}", if here { "•" } else { "  " }, f.name)).clicked() {
+                app.lib.place_playlist(&p.id, Some(f.id.clone()), p.pinned, None);
+                ui.close_menu();
+            }
+        }
+        if p.folder.is_some() && ui.button("  No folder").clicked() {
+            app.lib.place_playlist(&p.id, None, p.pinned, None);
+            ui.close_menu();
+        }
+        if !folders.is_empty() {
+            ui.separator();
+        }
+        if ui.button("New folder…").clicked() {
+            app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(Some(p.id.clone())) });
+            ui.close_menu();
+        }
+    });
     if p.is_imported() {
         if ui.button("Sync now").clicked() {
             let (dl, pl) = (app.dl.clone(), p.clone());
@@ -394,7 +653,9 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
     }
     ui.separator();
     if ui.button("Delete playlist").clicked() {
+        let u = app.lib.snapshot(format!("Deleted playlist \"{}\"", p.name), &[p.id.clone()], &[]);
         app.lib.delete_playlist(&p.id);
+        app.undoable(u);
         if app.browser.view == View::Playlist(p.id.clone()) {
             app.browser.set_view(View::All);
         }
@@ -435,7 +696,6 @@ struct ListCfg {
     title: String,
     sub: String,
     cover: Option<String>,
-    remote_cover: Option<String>,
     playlist: Option<crate::store::Playlist>,
     default_sort: Option<(SortKey, bool)>,
     back: Option<View>,
@@ -450,19 +710,19 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         let all = || d.tracks.values();
         let now = crate::store::now_ms();
         let (ids, cfg): (Vec<String>, ListCfg) = match &view {
-            View::All => (all().map(|t| t.id.clone()).collect(), ListCfg { title: "ALL TRACKS".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "all"), back: None }),
-            View::Liked => (all().filter(|t| d.stats.get(&t.id).map(|s| s.liked).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "LIKED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "liked"), back: None }),
-            View::Top => (all().filter(|t| d.stats.get(&t.id).map(|s| s.plays > 0).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "MOST PLAYED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "top"), back: None }),
-            View::Recent => (all().filter(|t| now - t.added_at < 60.0 * 86400.0 * 1000.0).map(|t| t.id.clone()).collect(), ListCfg { title: "RECENTLY ADDED".into(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "recent"), back: None }),
+            View::All => (all().map(|t| t.id.clone()).collect(), ListCfg { title: "ALL TRACKS".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "all"), back: None }),
+            View::Liked => (all().filter(|t| d.stats.get(&t.id).map(|s| s.liked).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "LIKED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "liked"), back: None }),
+            View::Top => (all().filter(|t| d.stats.get(&t.id).map(|s| s.plays > 0).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "MOST PLAYED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "top"), back: None }),
+            View::Recent => (all().filter(|t| now - t.added_at < 60.0 * 86400.0 * 1000.0).map(|t| t.id.clone()).collect(), ListCfg { title: "RECENTLY ADDED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "recent"), back: None }),
             View::Album(k) => {
                 let ids: Vec<String> = all().filter(|t| album_key(t) == *k).map(|t| t.id.clone()).collect();
                 let first = ids.first().and_then(|i| d.tracks.get(i));
-                (ids.clone(), ListCfg { title: first.map(|t| t.album.clone()).unwrap_or_default(), sub: first.map(|t| if t.album_artist.is_empty() { t.artist.clone() } else { t.album_artist.clone() }).unwrap_or_default(), cover: first.and_then(|t| t.cover.clone()), remote_cover: None, playlist: None, default_sort: default_sort(app, "album"), back: Some(View::Albums) })
+                (ids.clone(), ListCfg { title: first.map(|t| t.album.clone()).unwrap_or_default(), sub: first.map(|t| if t.album_artist.is_empty() { t.artist.clone() } else { t.album_artist.clone() }).unwrap_or_default(), cover: first.and_then(|t| t.cover.clone()), playlist: None, default_sort: default_sort(app, "album"), back: Some(View::Albums) })
             }
             View::Artist(k) => {
                 let ids: Vec<String> = all().filter(|t| artist_key(t) == *k).map(|t| t.id.clone()).collect();
                 let name = ids.first().and_then(|i| d.tracks.get(i)).map(|t| main_artist(&t.artist)).unwrap_or_default();
-                (ids, ListCfg { title: name, sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: default_sort(app, "artist"), back: Some(View::Artists) })
+                (ids, ListCfg { title: name, sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "artist"), back: Some(View::Artists) })
             }
             View::Playlist(pid) => {
                 let Some(p) = d.playlists.iter().find(|p| p.id == *pid).cloned() else {
@@ -472,9 +732,9 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 };
                 let ids: Vec<String> = p.track_ids.iter().filter(|id| d.tracks.contains_key(*id)).cloned().collect();
                 let sub = if p.is_imported() { format!("{} · {}", p.source.clone().unwrap_or_else(|| "spotify".into()).to_uppercase(), if p.auto_sync == Some(false) { "SYNC OFF" } else { "AUTO-SYNC" }) } else { "PLAYLIST".into() };
-                (ids, ListCfg { title: p.name.clone(), sub, cover: None, remote_cover: p.cover.clone(), playlist: Some(p), default_sort: default_sort(app, "playlist"), back: None })
+                (ids, ListCfg { title: p.name.clone(), sub, cover: None, playlist: Some(p), default_sort: default_sort(app, "playlist"), back: None })
             }
-            _ => (Vec::new(), ListCfg { title: String::new(), sub: String::new(), cover: None, remote_cover: None, playlist: None, default_sort: None, back: None }),
+            _ => (Vec::new(), ListCfg { title: String::new(), sub: String::new(), cover: None, playlist: None, default_sort: None, back: None }),
         };
         let key = (view.clone(), app.browser.search.clone(), app.browser.sort.or(cfg.default_sort), gen);
         if app.browser.list_key.as_ref() != Some(&key) {
@@ -509,6 +769,19 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     app.browser.set_view(b);
                 }
             }
+            if let Some(p) = &cfg.playlist {
+                let (r, resp) = ui.allocate_exact_size(Vec2::splat(96.0), Sense::click());
+                super::plcover::draw(app, ui, r, p, 192);
+                if resp.hovered() {
+                    fill(ui.painter(), r.shrink(2.0), with_alpha(pal.bg, 170));
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, "CHANGE", px(7.0), pal.text);
+                }
+                let resp = resp.on_hover_text("Change cover (right-click to reset)");
+                if resp.clicked() {
+                    super::plcover::change(app, &p.id);
+                }
+                resp.context_menu(|ui| super::plcover::menu(app, ui, p));
+            }
             if let Some(c) = &cfg.cover {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(64.0), Sense::hover());
                 if let Some(tex) = app.covers.get(ui.ctx(), app.lib.cover_path(c), c, 128) {
@@ -518,6 +791,9 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(&cfg.title).font(px(12.0)).color(pal.text));
+                if let Some(d) = cfg.playlist.as_ref().map(|p| p.description.as_str()).filter(|d| !d.is_empty()) {
+                    ui.label(egui::RichText::new(d).font(vt(18.0)).color(pal.text));
+                }
                 let sub = [cfg.sub.clone(), format!("{} TRACKS", ids.len()), fmt_long(secs)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
                 ui.label(egui::RichText::new(sub).color(pal.dim));
             });
@@ -526,9 +802,11 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         ui.horizontal(|ui| {
             if button(ui, &pal, "▶ PLAY", true, !ids.is_empty()).clicked() {
                 app.player.play_list(ids.clone(), 0, Some(false));
+                if let Some(p) = &cfg.playlist { app.lib.touch_playlist(&p.id); }
             }
             if button(ui, &pal, "SHUFFLE", false, !ids.is_empty()).clicked() {
                 app.player.play_list(ids.clone(), fastrand::usize(..ids.len().max(1)), Some(true));
+                if let Some(p) = &cfg.playlist { app.lib.touch_playlist(&p.id); }
             }
             if let Some(p) = cfg.playlist.clone() {
                 let r = button(ui, &pal, "…", false, true);
@@ -631,6 +909,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 fill(p, r, with_alpha(pal.text, 2));
             }
             let is_cur = cur.as_deref() == Some(id.as_str());
+            let dim = |c: Color32| if st.hidden { pal.faint } else { c };
             let mut x = r.left() + 8.0;
             let cy = r.center().y;
             for (c, cw) in &cols {
@@ -640,7 +919,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 let (txt, color): (String, Color32) = match c.id {
                     "num" => (if is_cur { "▶".into() } else if num_mode && t.track.is_some() { t.track.unwrap().to_string() } else { (i + 1).to_string() }, if is_cur { pal.accent } else { pal.dim }),
                     "like" => ("♥".into(), if st.liked { pal.accent } else { pal.faint }),
-                    "title" => (t.title.clone(), if is_cur { pal.accent } else { pal.text }),
+                    "title" => (if st.hidden { format!("🚫 {}", t.title) } else { t.title.clone() }, if is_cur { pal.accent } else { dim(pal.text) }),
                     "artist" => (t.artist.clone(), pal.dim),
                     "album" => (t.album.clone(), pal.dim),
                     "genre" => (t.genre.clone(), pal.dim),
@@ -651,6 +930,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     _ => (if st.plays > 0 { st.plays.to_string() } else { String::new() }, pal.dim),
                 };
                 let like = c.id == "like";
+                let color = if c.id == "title" || like { color } else { dim(color) };
                 clip.text(if right { Pos2::new(cr.right(), cy) } else if like { Pos2::new(cr.center().x, cy) } else { Pos2::new(cr.left(), cy) }, if right { Align2::RIGHT_CENTER } else if like { Align2::CENTER_CENTER } else { Align2::LEFT_CENTER }, txt, vt(19.0), color);
                 if like && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
                     act = Some(RowAct::Like(id.clone()));
@@ -687,11 +967,18 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     match act {
         Some(RowAct::Move(songs, before)) => {
             if let Some(p) = &cfg.playlist {
+                let u = app.lib.snapshot(format!("Moved {} in \"{}\"", plural(songs.len()), p.name), &[p.id.clone()], &[]);
                 app.lib.playlist_move(&p.id, &songs, before.as_deref());
+                app.undoable(u);
             }
         }
         Some(RowAct::Like(id)) => app.lib.toggle_like(&id),
-        Some(RowAct::Play(i)) => app.player.play_list(ids.clone(), i, None),
+        Some(RowAct::Play(i)) => {
+            app.player.play_pick(ids.clone(), i, None);
+            if let Some(p) = &cfg.playlist {
+                app.lib.touch_playlist(&p.id);
+            }
+        }
         Some(RowAct::Select(i, shift, cmd)) => {
             let id = ids[i].clone();
             if shift && app.browser.anchor.is_some() {
@@ -722,14 +1009,15 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         }
         if enter {
             if let Some(i) = ids.iter().position(|x| app.browser.selection.contains(x)) {
-                app.player.play_list(ids.clone(), i, None);
+                app.player.play_pick(ids.clone(), i, None);
             }
         }
         if del {
             if let Some(p) = &cfg.playlist {
-                let sel: Vec<String> = app.browser.selection.iter().cloned().collect();
-                app.lib.playlist_remove(&p.id, &sel);
-                app.browser.selection.clear();
+                let sel: Vec<String> = ids.iter().filter(|x| app.browser.selection.contains(*x)).cloned().collect();
+                if !sel.is_empty() {
+                    remove_from_playlist(app, p, &sel);
+                }
             }
         }
     }
@@ -747,7 +1035,7 @@ fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, playlist: Op
     let sel = if sel.is_empty() { vec![ids[i].clone()] } else { sel };
     let one = if sel.len() == 1 { app.lib.track(&sel[0]) } else { None };
     if ui.button("▶ Play").clicked() {
-        app.player.play_list(ids.to_vec(), i, None);
+        app.player.play_pick(ids.to_vec(), i, None);
         ui.close_menu();
     }
     if ui.button("Play next").clicked() {
@@ -777,6 +1065,12 @@ fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, playlist: Op
         }
         ui.close_menu();
     }
+    let hidden = sel.iter().all(|id| app.lib.is_hidden(id));
+    if ui.button(if hidden { "Unhide song" } else { "Hide song (don't play this)" }).on_hover_text("Hidden songs stay listed (dimmed) but shuffle, playlists and radio skip them").clicked() {
+        app.lib.set_hidden(&sel, !hidden);
+        app.toast(if hidden { format!("Unhid {}", plural(sel.len())) } else { format!("Hid {}: they won't play unless you pick them", plural(sel.len())) });
+        ui.close_menu();
+    }
     if ui.add_enabled(one.as_ref().map(|t| !t.album.is_empty()).unwrap_or(false), egui::Button::new("Go to album")).clicked() {
         if let Some(t) = &one {
             app.browser.set_view(View::Album(album_key(t)));
@@ -798,18 +1092,30 @@ fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, playlist: Op
     ui.separator();
     if let Some(p) = playlist {
         if ui.button(format!("Remove from \"{}\"", p.name)).clicked() {
-            app.lib.playlist_remove(&p.id, &sel);
-            app.browser.selection.clear();
+            remove_from_playlist(app, p, &sel);
             ui.close_menu();
         }
     }
     if ui.button(format!("Remove from library{}", if sel.len() > 1 { format!(" ({})", sel.len()) } else { String::new() })).clicked() {
+        let u = app.lib.snapshot(format!("Removed {} from your library", plural(sel.len())), &[], &sel);
         for id in &sel {
             app.lib.remove_track(id);
         }
+        app.undoable(u);
         app.browser.selection.clear();
         ui.close_menu();
     }
+}
+
+fn plural(n: usize) -> String {
+    if n == 1 { "1 song".into() } else { format!("{n} songs") }
+}
+
+fn remove_from_playlist(app: &mut App, p: &crate::store::Playlist, sel: &[String]) {
+    let u = app.lib.snapshot(format!("Removed {} from \"{}\"", plural(sel.len()), p.name), &[p.id.clone()], &[]);
+    app.lib.playlist_remove(&p.id, sel);
+    app.undoable(u);
+    app.browser.selection.clear();
 }
 
 fn empty_state(app: &mut App, ui: &mut Ui) {

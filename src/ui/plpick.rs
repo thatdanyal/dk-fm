@@ -41,8 +41,9 @@ fn rows(app: &App, songs: &[String], filter: &str, last_first: bool) -> Vec<Row>
 fn rows_in(d: &crate::store::LibraryData, songs: &[String], filter: &str, last: &str) -> Vec<Row> {
     let toks: Vec<String> = filter.to_lowercase().split_whitespace().map(String::from).collect();
     let mut v = vec![Row { id: LIKED.into(), name: "Liked".into(), icon: "♥", have: songs.iter().filter(|s| d.stats.get(*s).map(|x| x.liked).unwrap_or(false)).count() }];
-    let mut pls: Vec<&crate::store::Playlist> = d.playlists.iter().collect();
-    pls.sort_by_key(|p| (p.id != last, p.url() != Some("spotify:liked"), !p.is_imported()));
+    // the last used one, then pinned ones, then in your sidebar order
+    let mut pls = crate::library::sorted_playlists(d, "custom");
+    pls.sort_by_key(|p| (p.id != last, !p.pinned));
     v.extend(pls.into_iter().map(|p| Row { id: p.id.clone(), name: p.name.clone(), icon: super::browser::playlist_icon(p), have: songs.iter().filter(|s| p.track_ids.contains(*s)).count() }));
     if !last.is_empty() && v.get(1).map(|r| r.id == last).unwrap_or(false) {
         v.swap(0, 1);

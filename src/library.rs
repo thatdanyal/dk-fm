@@ -1,5 +1,5 @@
 //! Local library: folder scanning (parallel), tag/cover reading, playlists, play stats, history.
-use crate::store::{self, data_dir, History, LibraryData, Playlist, Stat, Track};
+use crate::store::{self, data_dir, Folder, History, LibraryData, Playlist, Stat, Track};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::*;
 use lofty::tag::ItemKey;
@@ -68,9 +68,80 @@ pub struct Library {
     pub scanning: AtomicBool,
     pub scan_done: AtomicUsize,
     pub scan_total: AtomicUsize,
+    /// private listening: plays, skips and history aren't recorded
+    pub private: AtomicBool,
     dirty: AtomicBool,
     history_dirty: AtomicBool,
     cover_dir: PathBuf,
+    /// recent undoable changes (memory only)
+    undo: parking_lot::Mutex<Vec<Undo>>,
+}
+
+/// One undoable change: the playlists and songs it touched, as they were before it.
+pub struct Undo {
+    pub label: String,
+    playlists: Vec<(usize, Playlist)>,
+    tracks: Vec<Track>,
+    stats: Vec<(String, Option<Stat>)>,
+    /// files it sent to the Recycle Bin (only their library entries come back)
+    pub trashed: usize,
+}
+const UNDO_MAX: usize = 20;
+
+/// Playlists in sidebar order. `sort`: "custom" (your order; until you drag one, Liked Songs,
+/// then imported, then your own), "name", "added" (newest first) or "played" (most recent first).
+/// Outside your own order Spotify Liked Songs stays first.
+pub fn sorted_playlists<'a>(d: &'a LibraryData, sort: &str) -> Vec<&'a Playlist> {
+    let mut v: Vec<&Playlist> = d.playlists.iter().collect();
+    let liked = |p: &Playlist| p.url() != Some("spotify:liked");
+    match sort {
+        "name" => v.sort_by_cached_key(|p| (liked(p), p.name.to_lowercase())),
+        "added" => v.sort_by(|a, b| liked(a).cmp(&liked(b)).then(b.created_at.total_cmp(&a.created_at))),
+        "played" => v.sort_by(|a, b| liked(a).cmp(&liked(b)).then(b.last_played.total_cmp(&a.last_played))),
+        _ if !d.custom_order => v.sort_by_key(|p| (liked(p), !p.is_imported())),
+        _ => {}
+    }
+    v
+}
+
+/// Folders in sidebar order (by name unless you sort playlists your own way).
+pub fn sorted_folders<'a>(d: &'a LibraryData, sort: &str) -> Vec<&'a Folder> {
+    let mut v: Vec<&Folder> = d.folders.iter().collect();
+    if sort != "custom" {
+        v.sort_by_cached_key(|f| f.name.to_lowercase());
+    }
+    v
+}
+
+/// The first 4 different album covers in a playlist (small cover files).
+pub fn first_covers(d: &LibraryData, p: &Playlist) -> Vec<String> {
+    let mut v: Vec<String> = Vec::with_capacity(4);
+    for t in p.track_ids.iter().filter_map(|id| d.tracks.get(id)) {
+        if let Some(c) = t.thumb.as_ref().or(t.cover.as_ref()) {
+            if !v.contains(c) {
+                v.push(c.clone());
+                if v.len() == 4 {
+                    break;
+                }
+            }
+        }
+    }
+    v
+}
+
+fn short_hash(s: &[u8]) -> String {
+    let mut h = Sha1::new();
+    h.update(s);
+    h.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// File names of a playlist's generated covers: a 2×2 mosaic of 4 album covers, a downloaded
+/// source (Spotify) cover.
+pub fn mosaic_name(covers: &[String]) -> String {
+    format!("mz_{}.jpg", short_hash(covers.join("|").as_bytes()))
+}
+pub fn remote_cover_name(url: &str) -> String {
+    format!("pc_{}.jpg", short_hash(url.as_bytes()))
 }
 
 impl Library {
@@ -86,9 +157,11 @@ impl Library {
             scanning: AtomicBool::new(false),
             scan_done: AtomicUsize::new(0),
             scan_total: AtomicUsize::new(0),
+            private: AtomicBool::new(false),
             dirty: AtomicBool::new(false),
             history_dirty: AtomicBool::new(false),
             cover_dir,
+            undo: Default::default(),
         });
         // save changes every few seconds even while the window is hidden or minimized (no frames
         // are drawn then), so downloads and auto-sync survive a crash, shutdown or forced close
@@ -312,13 +385,42 @@ impl Library {
         (Some(name), Some(tname))
     }
 
-    /// Delete cover art / waveform files no track uses (older than 10 minutes).
+    /// A playlist cover from image bytes (your picture, or the source's): square-cropped to
+    /// 300 px. `name` = the file name to use (None = named by its content). Returns the name.
+    pub fn save_playlist_cover(&self, data: &[u8], name: Option<String>) -> Option<String> {
+        let img = image::load_from_memory(data).ok()?;
+        let side = img.width().min(img.height());
+        let sq = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side).resize_exact(300, 300, image::imageops::FilterType::Triangle);
+        let name = name.unwrap_or_else(|| format!("pl_{}.jpg", short_hash(data)));
+        save_jpeg(&sq, &self.cover_dir.join(&name)).then_some(name)
+    }
+
+    /// Builds the 2x2 mosaic cover from 4 cover files.
+    pub fn make_mosaic(&self, covers: &[String]) -> Option<String> {
+        let name = mosaic_name(covers);
+        let mut out = image::RgbImage::new(300, 300);
+        for (i, c) in covers.iter().take(4).enumerate() {
+            let im = image::open(self.cover_dir.join(c)).ok()?.resize_to_fill(150, 150, image::imageops::FilterType::Triangle).to_rgb8();
+            image::imageops::replace(&mut out, &im, (i as i64 % 2) * 150, (i as i64 / 2) * 150);
+        }
+        save_jpeg(&image::DynamicImage::ImageRgb8(out), &self.cover_dir.join(&name)).then_some(name)
+    }
+
+    /// Delete cover art / waveform files no track or playlist uses (older than 10 minutes).
     pub fn cleanup_files(&self) {
         let d = self.data.read();
         let mut used: HashSet<String> = HashSet::new();
         for t in d.tracks.values() {
             used.extend(t.cover.clone());
             used.extend(t.thumb.clone());
+        }
+        for p in &d.playlists {
+            used.extend(p.custom_cover.clone());
+            used.extend(p.cover.as_deref().filter(|c| c.starts_with("http")).map(remote_cover_name));
+            let c = first_covers(&d, p);
+            if c.len() == 4 {
+                used.insert(mosaic_name(&c));
+            }
         }
         let ids: HashSet<&String> = d.tracks.keys().collect();
         let old = |p: &Path| p.metadata().and_then(|m| m.modified()).map(|t| t.elapsed().map(|e| e.as_secs() > 600).unwrap_or(false)).unwrap_or(false);
@@ -354,6 +456,9 @@ impl Library {
     }
 
     pub fn bump_play(&self, id: &str) {
+        if self.private.load(Ordering::Relaxed) {
+            return;
+        }
         let mut d = self.data.write();
         let s = d.stats.entry(id.to_string()).or_default();
         s.plays += 1;
@@ -364,6 +469,9 @@ impl Library {
     }
 
     pub fn bump_skip(&self, id: &str) {
+        if self.private.load(Ordering::Relaxed) {
+            return;
+        }
         self.data.write().stats.entry(id.to_string()).or_default().skips += 1;
         self.quiet_changed();
     }
@@ -376,6 +484,9 @@ impl Library {
     }
 
     pub fn add_history(&self, row: (String, i64, i64, u8)) {
+        if self.private.load(Ordering::Relaxed) {
+            return;
+        }
         let mut h = self.history.write();
         h.events.push(row);
         let n = h.events.len();
@@ -575,6 +686,152 @@ impl Library {
         self.changed();
     }
 
+    // ------------------------------------------------------------ hidden songs
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.data.read().stats.get(id).map(|s| s.hidden).unwrap_or(false)
+    }
+
+    pub fn set_hidden(&self, ids: &[String], hidden: bool) {
+        let mut d = self.data.write();
+        for id in ids {
+            d.stats.entry(id.clone()).or_default().hidden = hidden;
+        }
+        drop(d);
+        self.changed();
+    }
+
+    // ------------------------------------------------------------ sidebar: folders, pins, order
+    pub fn new_folder(&self, name: &str) -> String {
+        let id = format!("f{:015x}", fastrand::u64(..) >> 4);
+        self.data.write().folders.push(Folder { id: id.clone(), name: name.into(), collapsed: false });
+        self.changed();
+        id
+    }
+
+    pub fn edit_folder(&self, id: &str, f: impl FnOnce(&mut Folder)) {
+        if let Some(x) = self.data.write().folders.iter_mut().find(|x| x.id == id) {
+            f(x);
+        }
+        self.changed();
+    }
+
+    /// Removes a folder; its playlists stay (outside any folder).
+    pub fn delete_folder(&self, id: &str) {
+        let mut d = self.data.write();
+        d.folders.retain(|f| f.id != id);
+        for p in d.playlists.iter_mut().filter(|p| p.folder.as_deref() == Some(id)) {
+            p.folder = None;
+        }
+        drop(d);
+        self.changed();
+    }
+
+    /// The playlists in a folder, in sidebar order.
+    pub fn folder_playlists(&self, id: &str, sort: &str) -> Vec<Playlist> {
+        let d = self.data.read();
+        sorted_playlists(&d, sort).into_iter().filter(|p| p.folder.as_deref() == Some(id)).cloned().collect()
+    }
+
+    /// Puts a playlist into `folder` (None = no folder), pinned or not; with `near` = (another
+    /// playlist, after it?) it also moves there in your own order.
+    pub fn place_playlist(&self, pid: &str, folder: Option<String>, pinned: bool, near: Option<(&str, bool)>) {
+        let mut d = self.data.write();
+        let folder = folder.filter(|f| d.folders.iter().any(|x| x.id == *f));
+        if let Some((other, after)) = near.filter(|n| n.0 != pid) {
+            if !d.custom_order {
+                // keep what you see: the default order becomes your own order
+                let order: Vec<String> = sorted_playlists(&d, "custom").iter().map(|p| p.id.clone()).collect();
+                d.playlists.sort_by_key(|p| order.iter().position(|o| *o == p.id));
+                d.custom_order = true;
+            }
+            if let Some(i) = d.playlists.iter().position(|p| p.id == pid) {
+                let p = d.playlists.remove(i);
+                let at = d.playlists.iter().position(|p| p.id == other).map(|j| j + after as usize).unwrap_or(d.playlists.len());
+                d.playlists.insert(at, p);
+            }
+        }
+        if let Some(p) = d.playlists.iter_mut().find(|p| p.id == pid) {
+            p.folder = folder;
+            p.pinned = pinned;
+        }
+        drop(d);
+        self.changed();
+    }
+
+    /// Moves a folder to just before `before` (None = the end).
+    pub fn move_folder(&self, id: &str, before: Option<&str>) {
+        let mut d = self.data.write();
+        if before == Some(id) {
+            return;
+        }
+        let Some(i) = d.folders.iter().position(|f| f.id == id) else { return };
+        let f = d.folders.remove(i);
+        let at = before.and_then(|b| d.folders.iter().position(|f| f.id == b)).unwrap_or(d.folders.len());
+        d.folders.insert(at, f);
+        drop(d);
+        self.changed();
+    }
+
+    /// You played this playlist (for "recently played"; not while listening privately).
+    pub fn touch_playlist(&self, pid: &str) {
+        if self.private.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(p) = self.data.write().playlists.iter_mut().find(|p| p.id == pid) {
+            p.last_played = store::now_ms();
+        }
+        self.changed();
+    }
+
+    // ------------------------------------------------------------ undo
+    /// The playlists `pids` (and any holding songs `tids`) and songs `tids` (with their stats)
+    /// as they are now, to put back if the change about to happen is undone.
+    pub fn snapshot(&self, label: impl Into<String>, pids: &[String], tids: &[String]) -> Undo {
+        let d = self.data.read();
+        Undo {
+            label: label.into(),
+            playlists: d.playlists.iter().enumerate().filter(|(_, p)| pids.contains(&p.id) || p.track_ids.iter().any(|t| tids.contains(t))).map(|(i, p)| (i, p.clone())).collect(),
+            tracks: tids.iter().filter_map(|t| d.tracks.get(t).cloned()).collect(),
+            stats: tids.iter().map(|t| (t.clone(), d.stats.get(t).cloned())).collect(),
+            trashed: 0,
+        }
+    }
+
+    pub fn push_undo(&self, u: Undo) {
+        let mut v = self.undo.lock();
+        v.push(u);
+        if v.len() > UNDO_MAX {
+            v.remove(0);
+        }
+    }
+
+    /// Puts back what the last undoable change touched; returns it (None = nothing to undo).
+    pub fn undo(&self) -> Option<Undo> {
+        let u = self.undo.lock().pop()?;
+        let mut d = self.data.write();
+        for (i, p) in &u.playlists {
+            match d.playlists.iter_mut().find(|x| x.id == p.id) {
+                Some(x) => *x = p.clone(),
+                None => {
+                    let at = (*i).min(d.playlists.len());
+                    d.playlists.insert(at, p.clone());
+                }
+            }
+        }
+        for t in &u.tracks {
+            d.tracks.insert(t.id.clone(), t.clone());
+        }
+        for (id, s) in &u.stats {
+            match s {
+                Some(s) => d.stats.insert(id.clone(), s.clone()),
+                None => d.stats.remove(id),
+            };
+        }
+        drop(d);
+        self.changed();
+        Some(u)
+    }
+
     /// sourceKey / Spotify / YouTube / artist+title -> track id
     pub fn key_index(&self) -> HashMap<String, String> {
         let d = self.data.read();
@@ -599,6 +856,11 @@ fn merge_track(map: &mut HashMap<String, Track>, mut t: Track) {
         t.source_key = t.source_key.take().or_else(|| prev.source_key.clone());
     }
     map.insert(t.id.clone(), t);
+}
+
+fn save_jpeg(im: &image::DynamicImage, path: &Path) -> bool {
+    let Ok(f) = std::fs::File::create(path) else { return false };
+    image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(f), 85).encode_image(&im.to_rgb8()).is_ok()
 }
 
 fn mtime_ms(p: &Path) -> f64 {
@@ -659,6 +921,122 @@ mod tests {
         assert!(!d.tracks.contains_key("a") && d.stats["b"].plays == 5 && d.stats["b"].liked);
         assert_eq!(d.playlists[0].track_ids, ["e", "b", "d"]);
         drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_pins_sort_undo_private() {
+        let dir = std::env::temp_dir().join(format!("dkfm-libtest2-{}", std::process::id()));
+        std::env::set_var("DKFM_USER_DATA", &dir);
+        let lib = Library::load();
+        let pl = |id: &str, name: &str, at: f64, url: Option<&str>| Playlist { id: id.into(), name: name.into(), created_at: at, spotify_url: url.map(String::from), ..Default::default() };
+        {
+            let mut d = lib.data.write();
+            for t in [track("a", "Sade", "Smooth Operator", 258.0, "AAC", 128), track("b", "Drake", "Hold On", 230.0, "AAC", 256)] {
+                d.tracks.insert(t.id.clone(), t);
+            }
+            d.playlists = vec![pl("mine", "Zed", 1.0, None), pl("imp", "Imported", 2.0, Some("https://open.spotify.com/playlist/x")), pl("liked", "Liked Songs", 3.0, Some("spotify:liked")), pl("new", "Alpha", 4.0, None)];
+            d.playlists[0].track_ids = vec!["a".into(), "b".into()];
+        }
+        let order = |sort: &str| sorted_playlists(&lib.data.read(), sort).iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        let find = |id: &str| lib.data.read().playlists.iter().find(|p| p.id == id).cloned().unwrap();
+        // default: Spotify Liked Songs, imported, then yours; the other sorts keep Liked Songs first
+        assert_eq!(order("custom"), ["liked", "imp", "mine", "new"]);
+        assert_eq!(order("name"), ["liked", "new", "imp", "mine"]);
+        assert_eq!(order("added"), ["liked", "new", "imp", "mine"]);
+        lib.touch_playlist("mine");
+        assert_eq!(order("played"), ["liked", "mine", "imp", "new"]);
+        // dragging "new" above "liked" makes the order your own
+        lib.place_playlist("new", None, false, Some(("liked", false)));
+        assert_eq!(order("custom"), ["new", "liked", "imp", "mine"]);
+        assert!(lib.data.read().custom_order);
+        lib.place_playlist("liked", None, false, Some(("", true))); // to the end
+        assert_eq!(order("custom"), ["new", "imp", "mine", "liked"]);
+        // folders and pins
+        let f = lib.new_folder("Moods");
+        let g = lib.new_folder("Gym");
+        lib.place_playlist("mine", Some(f.clone()), false, None);
+        lib.place_playlist("imp", Some(f.clone()), true, None);
+        lib.place_playlist("new", Some("gone".into()), false, None); // unknown folder: none
+        assert_eq!(lib.folder_playlists(&f, "custom").iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["imp", "mine"]);
+        assert_eq!(find("new").folder, None);
+        assert_eq!(sorted_folders(&lib.data.read(), "name").iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), ["Gym", "Moods"]);
+        lib.move_folder(&g, Some(&f));
+        assert_eq!(sorted_folders(&lib.data.read(), "custom")[0].id, g);
+        lib.edit_folder(&f, |x| x.collapsed = true);
+        lib.set_hidden(&["b".into()], true);
+        // everything survives a save + load
+        let json = serde_json::to_string(&*lib.data.read()).unwrap();
+        let back: LibraryData = serde_json::from_str(&json).unwrap();
+        assert!(back.custom_order && back.folders.len() == 2 && back.folders.iter().find(|x| x.id == f).unwrap().collapsed);
+        assert_eq!(back.playlists.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["new", "imp", "mine", "liked"]);
+        let imp = back.playlists.iter().find(|p| p.id == "imp").unwrap();
+        assert!(imp.pinned && imp.folder.as_deref() == Some(f.as_str()) && back.stats["b"].hidden);
+        assert!(back.playlists.iter().find(|p| p.id == "mine").unwrap().last_played > 0.0);
+        // deleting a folder keeps its playlists
+        lib.delete_folder(&f);
+        assert!(lib.data.read().playlists.iter().all(|p| p.folder.is_none()) && lib.data.read().playlists.len() == 4);
+        // old files without the new fields still load
+        let old: LibraryData = serde_json::from_str(r#"{"tracks":{},"playlists":[{"id":"x","name":"X"}],"stats":{"t":{"plays":2}}}"#).unwrap();
+        assert!(!old.custom_order && old.folders.is_empty() && !old.playlists[0].pinned && !old.stats["t"].hidden);
+
+        // undo: remove from playlist, delete a playlist, remove from library; newest first
+        let u = lib.snapshot("removed from Zed", &["mine".into()], &[]);
+        lib.playlist_remove("mine", &["a".into()]);
+        lib.push_undo(u);
+        let u = lib.snapshot("deleted Alpha", &["new".into()], &[]);
+        lib.delete_playlist("new");
+        lib.push_undo(u);
+        lib.data.write().stats.insert("a".into(), Stat { plays: 3, ..Default::default() });
+        let u = lib.snapshot("removed from library", &[], &["b".into()]);
+        lib.remove_track("b");
+        lib.push_undo(u);
+        assert!(lib.track("b").is_none() && find("mine").track_ids.is_empty());
+        assert_eq!(lib.undo().unwrap().label, "removed from library");
+        assert!(lib.track("b").is_some() && lib.stat("b").hidden);
+        assert_eq!(find("mine").track_ids, ["b"]);
+        assert_eq!(lib.undo().unwrap().label, "deleted Alpha");
+        assert_eq!(order("custom"), ["new", "imp", "mine", "liked"]); // back in its place
+        lib.undo();
+        assert_eq!(find("mine").track_ids, ["a", "b"]);
+        assert!(lib.undo().is_none());
+        // a merge comes back with the dropped copy's entry and stats
+        lib.data.write().tracks.insert("a2".into(), track("a2", "Sade", "Smooth Operator", 258.0, "AAC", 96));
+        lib.data.write().stats.insert("a2".into(), Stat { plays: 4, liked: true, ..Default::default() });
+        lib.edit_playlist("new", |p| p.track_ids = vec!["a2".into()]);
+        let mut u = lib.snapshot("merged", &[], &["a".into(), "a2".into()]);
+        lib.merge_duplicates("a", &["a".into(), "a2".into()]);
+        u.trashed = 1;
+        lib.push_undo(u);
+        assert!(lib.stat("a").plays == 7 && lib.track("a2").is_none());
+        assert_eq!(lib.undo().unwrap().trashed, 1);
+        assert!(lib.stat("a").plays == 3 && !lib.stat("a").liked && lib.stat("a2").plays == 4 && lib.track("a2").is_some());
+        assert_eq!(find("new").track_ids, ["a2"]);
+        // the stack keeps the last 20
+        for i in 0..25 {
+            lib.push_undo(lib.snapshot(format!("{i}"), &[], &[]));
+        }
+        assert_eq!(lib.undo().unwrap().label, "24");
+        let mut n = 1;
+        while lib.undo().is_some() {
+            n += 1;
+        }
+        assert_eq!(n, 20);
+
+        // private listening: nothing is recorded
+        let (plays, hist) = (lib.stat("b").plays, lib.history.read().events.len());
+        lib.private.store(true, Ordering::Relaxed);
+        lib.bump_play("b");
+        lib.bump_skip("b");
+        lib.add_history(("b".into(), 1, 200, 0));
+        let before = find("new").last_played;
+        lib.touch_playlist("new");
+        assert!(lib.stat("b").plays == plays && lib.stat("b").skips == 0 && lib.history.read().events.len() == hist);
+        assert_eq!(find("new").last_played, before);
+        lib.private.store(false, Ordering::Relaxed);
+        lib.bump_play("b");
+        lib.add_history(("b".into(), 1, 200, 0));
+        assert!(lib.stat("b").plays == plays + 1 && lib.history.read().events.len() == hist + 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -143,7 +143,7 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
                 });
             });
             match done {
-                Some(true) if !text.trim().is_empty() => {
+                Some(true) if !text.trim().is_empty() || matches!(action, PromptAction::Describe(_)) => {
                     run_prompt(app, action, text.trim().to_string());
                     false
                 }
@@ -222,6 +222,16 @@ fn run_prompt(app: &mut App, action: PromptAction, text: String) {
             app.toast(if n > 0 { format!("Saved \"{text}\" ({n} songs)") } else { format!("Created \"{text}\"") });
         }
         PromptAction::RenamePlaylist(id) => app.lib.edit_playlist(&id, |p| p.name = text),
+        PromptAction::Describe(id) => app.lib.edit_playlist(&id, |p| p.description = text),
+        PromptAction::NewFolder(pid) => {
+            let f = app.lib.new_folder(&text);
+            if let Some(pid) = pid {
+                let pinned = app.lib.data.read().playlists.iter().any(|p| p.id == pid && p.pinned);
+                app.lib.place_playlist(&pid, Some(f), pinned, None);
+            }
+            app.toast(format!("Created folder \"{text}\": drag playlists onto it"));
+        }
+        PromptAction::RenameFolder(id) => app.lib.edit_folder(&id, |f| f.name = text),
         PromptAction::PasteYoutube(job, idx) => {
             let re = regex::Regex::new(r"(?:v=|youtu\.be/|shorts/)([\w-]{11})").unwrap();
             let id = re.captures(&text).map(|c| c[1].to_string()).or(if text.len() == 11 { Some(text.clone()) } else { None });
@@ -807,6 +817,32 @@ fn lists(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.start_view = v);
         }
     });
+    spacer(ui);
+    hidden_songs(app, ui);
+}
+
+/// Songs you hid ("Don't play this"), to unhide.
+fn hidden_songs(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let mut hidden: Vec<crate::store::Track> = { let d = app.lib.data.read(); d.stats.iter().filter(|(_, s)| s.hidden).filter_map(|(id, _)| d.tracks.get(id).cloned()).collect() };
+    hidden.sort_by_cached_key(|t| (t.artist.to_lowercase(), t.title.to_lowercase()));
+    caption(ui, &pal, &format!("HIDDEN SONGS ({})", hidden.len()));
+    dim(ui, &pal, "Right-click a song > Hide song: it stays in your lists (dimmed, 🚫) but shuffle, playlists and radio skip it. It still plays when you pick it yourself.");
+    let mut unhide: Vec<String> = Vec::new();
+    for t in &hidden {
+        ui.horizontal(|ui| {
+            cell(ui, 440.0, egui::RichText::new(format!("{} — {}", t.title, t.artist)).color(pal.text));
+            if tb_button(ui, &pal, "UNHIDE", false).clicked() {
+                unhide.push(t.id.clone());
+            }
+        });
+    }
+    if hidden.len() > 1 && button(ui, &pal, "UNHIDE ALL", false, true).clicked() {
+        unhide = hidden.iter().map(|t| t.id.clone()).collect();
+    }
+    if !unhide.is_empty() {
+        app.lib.set_hidden(&unhide, false);
+    }
 }
 
 fn sidebar(app: &mut App, ui: &mut Ui) {
@@ -837,6 +873,19 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
                 }
             });
         }
+    }
+    spacer(ui);
+    caption(ui, &pal, "PLAYLISTS");
+    dim(ui, &pal, "Drag playlists to reorder them (custom order), onto a folder to file them, or right-click > Pin to top. Make folders with the ↕ button above the list.");
+    let (sort, mut covers) = { let s = app.settings.lock(); (s.playlist_sort.clone(), s.sidebar_covers) };
+    row(ui, &pal, "Sort playlists by", |ui| {
+        let opts: Vec<(String, &str)> = browser::PL_SORTS.iter().map(|(k, n)| (k.to_string(), *n)).collect();
+        if let Some(v) = choice(ui, &pal, &sort, &opts) {
+            app.edit_settings(|s| s.playlist_sort = v);
+        }
+    });
+    if switch(ui, &pal, &mut covers, "SHOW PLAYLIST COVERS IN THE SIDEBAR") {
+        app.edit_settings(|s| s.sidebar_covers = covers);
     }
     ui.add_space(8.0);
     if button(ui, &pal, "RESET SIDEBAR", false, true).clicked() {
@@ -1115,6 +1164,18 @@ fn playback(app: &mut App, ui: &mut Ui) {
     ui.add_space(4.0);
     if switch(ui, &pal, &mut o.normalize, "LEVELER: COMPRESS LOUD/QUIET PARTS") {
         app.player.set_normalize(o.normalize);
+    }
+    spacer(ui);
+    caption(ui, &pal, "PRIVATE LISTENING");
+    dim(ui, &pal, "While it's on, plays, skips and listening history aren't recorded (Stats, Most Played and Smart Shuffle ignore what you play). Also in the deck (PRV), the tray menu and Ctrl+K.");
+    let mut on = app.lib.private.load(std::sync::atomic::Ordering::Relaxed);
+    if switch(ui, &pal, &mut on, "PRIVATE LISTENING") {
+        app.set_private(on);
+    }
+    ui.add_space(4.0);
+    let mut keep = app.settings.lock().keep_private;
+    if switch(ui, &pal, &mut keep, "KEEP IT ON AFTER RESTARTING DK.FM") {
+        app.edit_settings(|s| s.keep_private = keep);
     }
     ui.add_space(8.0);
     row(ui, &pal, "Visualizer FPS", |ui| {

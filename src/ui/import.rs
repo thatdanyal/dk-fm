@@ -84,7 +84,19 @@ fn take_result(app: &mut App, ctx: &egui::Context) {
     if let Some((r, img)) = got {
         app.import.busy = false;
         match r {
-            Ok(f) => {
+            Ok(mut f) => {
+                // radio leaves out songs you hid
+                if let Fetched::Collection(c) = &mut f {
+                    if c.kind == "radio" {
+                        let hidden: HashSet<String> = {
+                            let d = app.lib.data.read();
+                            d.stats.iter().filter(|(_, s)| s.hidden).filter_map(|(id, _)| d.tracks.get(id)).flat_map(|t| crate::library::track_keys(t.source_key.as_deref(), t.spotify_id.as_deref(), t.youtube_id.as_deref(), &t.artist, &t.title)).collect()
+                        };
+                        if !hidden.is_empty() {
+                            c.tracks.retain(|t| !owned(&hidden, t));
+                        }
+                    }
+                }
                 let keys = library_keys(app);
                 let hide_explicit = app.settings.lock().hide_explicit;
                 app.import.selected = match &f {
@@ -458,7 +470,7 @@ pub fn downloads(app: &mut App, ui: &mut Ui) {
                                 ui.set_min_width(220.0);
                                 if ui.add_enabled(tt.track_id.is_some(), egui::Button::new("Play")).clicked() {
                                     let id = tt.track_id.clone().unwrap();
-                                    actions.push(Box::new(move |a: &mut App| a.player.play_list(vec![id], 0, Some(false))));
+                                    actions.push(Box::new(move |a: &mut App| a.player.play_pick(vec![id], 0, Some(false))));
                                     ui.close_menu();
                                 }
                                 if ui.add_enabled(!busy, egui::Button::new("Retry")).clicked() {

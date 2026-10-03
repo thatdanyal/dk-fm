@@ -17,6 +17,8 @@ pub struct DupeState {
 
 fn merge(app: &mut App, groups: Vec<(String, Vec<String>)>) {
     let playing = app.player.current_id();
+    let all: Vec<String> = groups.iter().flat_map(|g| g.1.iter().cloned()).collect();
+    let mut u = app.lib.snapshot(format!("Merged {} duplicate{}", groups.len(), if groups.len() == 1 { "" } else { "s" }), &[], &all);
     let mut files = Vec::new();
     let mut skipped = 0;
     for (keep, all) in groups {
@@ -34,6 +36,10 @@ fn merge(app: &mut App, groups: Vec<(String, Vec<String>)>) {
             dl.notices.lock().push(format!("{} file{} could not be moved to the Recycle Bin: {e}", failed.len(), if failed.len() == 1 { "" } else { "s" }));
         }
     });
+    u.trashed = n;
+    if n > 0 {
+        app.undoable(u);
+    }
     app.toast(format!("Merged: {n} extra cop{} moved to the Recycle Bin{}", if n == 1 { "y" } else { "ies" }, if skipped > 0 { format!(" ({skipped} skipped: playing now)") } else { String::new() }));
 }
 

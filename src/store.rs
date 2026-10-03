@@ -60,6 +60,7 @@ fn d_pixel() -> String { "pixel".into() }
 fn d_comfy() -> String { "comfortable".into() }
 fn d_all() -> String { "all".into() }
 fn d_daily() -> String { "daily".into() }
+fn d_custom() -> String { "custom".into() }
 pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "album", "time", "plays"].map(String::from).to_vec() }
 pub const DEFAULT_PATTERN: &str = "{folder}/{artist} - {title}";
 fn d_pattern() -> String { DEFAULT_PATTERN.into() }
@@ -179,6 +180,13 @@ pub struct Settings {
     #[serde(default = "d_five")] pub backup_keep: u32,
     /// "daily" | "weekly"
     #[serde(default = "d_daily")] pub backup_every: String,
+    // ---- playlists in the sidebar: "custom" (drag to reorder) | "name" | "added" | "played"
+    #[serde(default = "d_custom")] pub playlist_sort: String,
+    #[serde(default = "d_true")] pub sidebar_covers: bool,
+    // ---- private listening (plays, skips and history aren't recorded while on)
+    #[serde(default)] pub private_listening: bool,
+    /// keep it on after a restart (else it turns off)
+    #[serde(default)] pub keep_private: bool,
     /// keep any keys this version doesn't know about
     #[serde(flatten)] pub extra: Map<String, Value>,
 }
@@ -259,6 +267,24 @@ pub struct Playlist {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub edited: bool,
     /// songs you removed from it (song keys, so sync never brings them back)
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub removed: Vec<String>,
+    /// your own cover (a file in the covers folder): shown over the source's cover and the mosaic
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub custom_cover: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")] pub description: String,
+    /// the sidebar folder it's in
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub folder: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub pinned: bool,
+    /// when you last played it (unix ms)
+    #[serde(default, skip_serializing_if = "is_zero")] pub last_played: f64,
+}
+
+fn is_zero(v: &f64) -> bool { *v == 0.0 }
+
+/// A folder of playlists in the sidebar.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub collapsed: bool,
 }
 
 impl Playlist {
@@ -277,6 +303,8 @@ pub struct Stat {
     #[serde(default)] pub liked: bool,
     #[serde(default)] pub last_played: f64,
     #[serde(default)] pub skips: u32,
+    /// "Don't play this": skipped by shuffle, playlists and radio
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub hidden: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -284,6 +312,9 @@ pub struct LibraryData {
     #[serde(default)] pub tracks: HashMap<String, Track>,
     #[serde(default)] pub playlists: Vec<Playlist>,
     #[serde(default)] pub stats: HashMap<String, Stat>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub folders: Vec<Folder>,
+    /// playlists were dragged into your own order (before that: Liked Songs, imported, then yours)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub custom_order: bool,
 }
 
 /// History rows: [trackId, startedAt (unix s), listened (s), skipped (0/1)].

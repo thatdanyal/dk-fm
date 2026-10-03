@@ -236,20 +236,21 @@ impl Downloader {
         let folder = if pattern.trim().is_empty() || pattern.starts_with("{folder}") { PathBuf::from(dir).join(sanitize(&folder_name(&col.kind, &col.name))) } else { PathBuf::from(dir) };
         if col.kind == "playlist" || col.kind == "album" {
             let pid = format!("sp-{job_id}");
+            // a re-sync keeps your changes: songs, order, name, cover, folder, pin
             let prev = self.lib.data.read().playlists.iter().find(|p| p.id == pid).cloned();
+            let had = prev.is_some();
+            let prev = prev.unwrap_or_default();
             self.lib.upsert_playlist(Playlist {
                 id: pid,
-                name: col.name.clone(),
+                name: if had && !prev.name.is_empty() { prev.name.clone() } else { col.name.clone() },
                 source: Some(col.source.clone()),
                 source_url: Some(col.url.clone()),
                 spotify_url: if col.source == "spotify" { Some(col.url.clone()) } else { None },
-                cover: col.cover.clone(),
-                auto_sync: Some(prev.as_ref().and_then(|p| p.auto_sync).unwrap_or(true)),
+                cover: col.cover.clone().or(prev.cover.clone()),
+                auto_sync: Some(prev.auto_sync.unwrap_or(true)),
                 last_sync: Some(store::now_ms()),
-                edited: prev.as_ref().map(|p| p.edited).unwrap_or(false),
-                removed: prev.as_ref().map(|p| p.removed.clone()).unwrap_or_default(),
-                track_ids: prev.map(|p| p.track_ids).unwrap_or_default(),
-                created_at: store::now_ms(),
+                created_at: if had && prev.created_at > 0.0 { prev.created_at } else { store::now_ms() },
+                ..prev
             });
         }
         let tracks: Vec<JTrack> = col

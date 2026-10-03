@@ -54,7 +54,7 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
         Modal::Settings(tab) => {
             let mut t = tab;
             let open = window(app.pal, ctx, "SETTINGS", Vec2::new(780.0, 520.0), |ui| settings_body(app, ui, &mut t));
-            if open {
+            if open && !CLOSE.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 app.modal.get_or_insert(Modal::Settings(t));
                 if let Some(Modal::Settings(x)) = app.modal.as_mut() {
                     *x = t;
@@ -360,28 +360,84 @@ fn downloads(app: &mut App, ui: &mut Ui) {
     dim(ui, &pal, &if st.version.is_empty() { "Download tools are fetched the first time you import (yt-dlp, ffmpeg, QuickJS) and yt-dlp is updated daily.".into() } else { format!("yt-dlp {} · updated daily", st.version) });
 }
 
+/// Set from inside the settings body to close the window after this frame.
+static CLOSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Result of a background "Connect Spotify" login, picked up by the settings tab.
+static LOGIN: parking_lot::Mutex<Option<Result<crate::spotify_auth::Login, String>>> = parking_lot::Mutex::new(None);
+static LOGGING_IN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn spotify(app: &mut App, ui: &mut Ui) {
+    use std::sync::atomic::Ordering;
     let pal = app.pal;
-    caption(ui, &pal, "SPOTIFY API KEYS (OPTIONAL)");
-    dim(ui, &pal, "Without keys DK.FM reads Spotify's public page: no setup, but capped at 100 songs and no album names. Free developer keys give full playlists, albums, track numbers, HD covers and whole-profile import.");
-    let (mut id, mut sec) = { let s = app.settings.lock(); (s.spotify_client_id.clone(), s.spotify_client_secret.clone()) };
+    if let Some(r) = LOGIN.lock().take() {
+        match r {
+            Ok(l) => {
+                crate::sources::seed_user_token(&l.refresh, &l.access, l.expires);
+                app.edit_settings(|s| {
+                    s.spotify_refresh_token = l.refresh.clone();
+                    s.spotify_user = l.name.clone();
+                });
+                app.toast(format!("Connected to Spotify as {}", l.name));
+            }
+            Err(e) => app.toast_err(e),
+        }
+    }
+    let (mut id, mut sec, refresh, user) = { let s = app.settings.lock(); (s.spotify_client_id.clone(), s.spotify_client_secret.clone(), s.spotify_refresh_token.clone(), s.spotify_user.clone()) };
+    caption(ui, &pal, "YOUR SPOTIFY ACCOUNT");
+    dim(ui, &pal, "Connect once to bring over everything at once: Liked Songs, every playlist (private ones too) and saved albums. Imported lists keep syncing.");
+    ui.add_space(6.0);
+    let busy = LOGGING_IN.load(Ordering::Relaxed);
+    ui.horizontal(|ui| {
+        if !refresh.is_empty() {
+            ui.label(egui::RichText::new(format!("CONNECTED AS {}", user.to_uppercase())).font(px(8.0)).color(pal.accent2));
+            if button(ui, &pal, "IMPORT MY WHOLE LIBRARY", true, true).clicked() {
+                CLOSE.store(true, Ordering::Relaxed);
+                super::import::fetch_library(app);
+            }
+            if button(ui, &pal, "DISCONNECT", false, true).clicked() {
+                app.edit_settings(|s| {
+                    s.spotify_refresh_token.clear();
+                    s.spotify_user.clear();
+                });
+            }
+        } else if button(ui, &pal, if busy { "WAITING FOR BROWSER…" } else { "CONNECT SPOTIFY" }, true, !busy && !id.trim().is_empty()).clicked() {
+            LOGGING_IN.store(true, Ordering::Relaxed);
+            let (cid, ctx) = (id.trim().to_string(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let r = crate::spotify_auth::login(&cid);
+                *LOGIN.lock() = Some(r);
+                LOGGING_IN.store(false, Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+        }
+    });
+    if busy {
+        dim(ui, &pal, "Finish logging in on the Spotify page that opened in your browser.");
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+    } else if refresh.is_empty() && id.trim().is_empty() {
+        dim(ui, &pal, "Paste your Client ID below first (see HOW TO SET UP).");
+    }
+    ui.add_space(14.0);
+    caption(ui, &pal, "SPOTIFY APP");
     row(ui, &pal, "Client ID", |ui| {
         if ui.add(egui::TextEdit::singleline(&mut id).desired_width(300.0)).changed() {
             app.edit_settings(|s| s.spotify_client_id = id.trim().to_string());
         }
     });
-    row(ui, &pal, "Client Secret", |ui| {
+    row(ui, &pal, "Client Secret (optional)", |ui| {
         if ui.add(egui::TextEdit::singleline(&mut sec).password(true).desired_width(300.0)).changed() {
             app.edit_settings(|s| s.spotify_client_secret = sec.trim().to_string());
         }
     });
+    dim(ui, &pal, "The secret is only used for album and song links when you're not connected. Without any of this, DK.FM still reads public links (first 100 songs).");
     ui.add_space(14.0);
-    caption(ui, &pal, "HOW TO GET KEYS (2 MINUTES)");
+    caption(ui, &pal, "HOW TO SET UP (2 MINUTES, FREE)");
     if ui.link("1. Open developer.spotify.com/dashboard and log in.").clicked() {
         let _ = open::that("https://developer.spotify.com/dashboard");
     }
-    ui.label("2. Create app — any name; Redirect URI http://127.0.0.1:8888/callback; tick \"Web API\".");
-    ui.label("3. Open the app > Settings > copy the Client ID and Client Secret here.");
+    ui.label(format!("2. Create app: any name; Redirect URI {}; tick \"Web API\".", crate::spotify_auth::REDIRECT));
+    ui.label("3. Copy the Client ID into the box above, then click CONNECT SPOTIFY.");
+    dim(ui, &pal, "The API costs nothing, but Spotify requires the app's owner to have Premium, and allows up to 5 accounts per app (add others under User Management).");
 }
 
 fn playback(app: &mut App, ui: &mut Ui) {

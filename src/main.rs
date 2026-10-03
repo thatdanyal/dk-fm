@@ -10,6 +10,7 @@ mod net;
 mod player;
 mod single;
 mod sources;
+mod spotify_auth;
 mod store;
 mod system;
 mod ui;

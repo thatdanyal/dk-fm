@@ -113,7 +113,17 @@ impl Downloader {
 
     pub fn creds(&self) -> Creds {
         let s = self.settings.lock();
-        Creds { id: s.spotify_client_id.clone(), secret: s.spotify_client_secret.clone() }
+        let settings = self.settings.clone();
+        Creds {
+            id: s.spotify_client_id.clone(),
+            secret: s.spotify_client_secret.clone(),
+            refresh: s.spotify_refresh_token.clone(),
+            on_refresh: Some(Arc::new(move |r: String| {
+                let mut s = settings.lock();
+                s.spotify_refresh_token = r;
+                s.save();
+            })),
+        }
     }
 
     /// Queue a collection; `selected` = indices to download (None = all).

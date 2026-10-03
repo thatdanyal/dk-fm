@@ -46,6 +46,10 @@ pub struct ProfilePlaylist {
     pub total: u64,
     pub owner: String,
     pub url: String,
+    /// PLAYLIST | ALBUM | LIKED
+    pub kind: String,
+    /// shown dimmed next to the row (e.g. why only part of it can be read)
+    pub note: String,
 }
 
 #[derive(Clone, Debug)]
@@ -54,9 +58,19 @@ pub enum Fetched {
     Profile { name: String, cover: Option<String>, playlists: Vec<ProfilePlaylist> },
 }
 
+#[derive(Clone)]
 pub struct Creds {
     pub id: String,
     pub secret: String,
+    /// "Connect Spotify" refresh token (empty = not connected) and where to save a rotated one
+    pub refresh: String,
+    pub on_refresh: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+}
+
+impl Creds {
+    pub fn connected(&self) -> bool {
+        !self.id.is_empty() && !self.refresh.is_empty()
+    }
 }
 
 fn short_hash(s: &str) -> String {
@@ -66,10 +80,14 @@ fn short_hash(s: &str) -> String {
 }
 
 static RE_SP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:spotify:(playlist|album|track):([A-Za-z0-9]+))|open\.spotify\.com/(?:intl-[a-z-]+/)?(?:embed/)?(playlist|album|track)/([A-Za-z0-9]+)").unwrap());
+const LIKED_URL: &str = "spotify:liked";
+
 static RE_SP_USER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"open\.spotify\.com/(?:intl-[a-z-]+/)?user/([^/?#]+)").unwrap());
 
 pub fn detect(url: &str) -> Option<&'static str> {
-    if RE_SP_USER.is_match(url) {
+    if url == LIKED_URL {
+        Some("spotify-liked")
+    } else if RE_SP_USER.is_match(url) {
         Some("spotify-profile")
     } else if RE_SP.is_match(url) {
         Some("spotify")
@@ -85,6 +103,7 @@ pub fn detect(url: &str) -> Option<&'static str> {
 pub fn fetch_any(url: &str, creds: &Creds) -> Result<Fetched, String> {
     let url = url.trim();
     match detect(url) {
+        Some("spotify-liked") => liked(creds).map(Fetched::Collection),
         Some("spotify-profile") => spotify_profile(url, creds),
         Some("spotify") => spotify(url, creds).map(Fetched::Collection),
         Some(_) => generic(url, None, None, 500).map(Fetched::Collection),
@@ -109,24 +128,43 @@ fn sp_token(c: &Creds) -> Result<String, String> {
             return Ok(g.1.clone());
         }
     }
-    use std::io::Write as _;
-    let mut b64 = Vec::new();
-    {
-        // tiny base64 encoder (avoid another dependency)
-        const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let bytes = key.as_bytes();
-        for ch in bytes.chunks(3) {
-            let n = (ch[0] as u32) << 16 | (*ch.get(1).unwrap_or(&0) as u32) << 8 | *ch.get(2).unwrap_or(&0) as u32;
-            let _ = b64.write_all(&[T[(n >> 18) as usize & 63], T[(n >> 12) as usize & 63], if ch.len() > 1 { T[(n >> 6) as usize & 63] } else { b'=' }, if ch.len() > 2 { T[n as usize & 63] } else { b'=' }]);
-        }
-    }
-    let auth = format!("Basic {}", String::from_utf8_lossy(&b64));
+    let auth = format!("Basic {}", crate::spotify_auth::b64(key.as_bytes(), false));
     let j = net::post_form_json("https://accounts.spotify.com/api/token", &[("Authorization", &auth)], &[("grant_type", "client_credentials")])
         .map_err(|e| format!("Spotify auth failed ({e}). Check your Client ID / Secret in Settings."))?;
     let tok = j["access_token"].as_str().ok_or("Spotify auth failed")?.to_string();
     let exp = j["expires_in"].as_i64().unwrap_or(3600);
     *CACHE.lock().unwrap() = (key, tok.clone(), crate::store::now_secs() + exp);
     Ok(tok)
+}
+
+static USER_TOK: std::sync::Mutex<(String, String, i64)> = std::sync::Mutex::new((String::new(), String::new(), 0));
+
+/// Access token for the connected account (cached; refreshed and rotated as needed).
+fn user_token(c: &Creds) -> Result<String, String> {
+    {
+        let g = USER_TOK.lock().unwrap();
+        // g.0 holds "old|new" after a rotation, so a caller still holding the old token also hits
+        if g.0.split('|').any(|r| r == c.refresh) && crate::store::now_secs() < g.2 - 60 {
+            return Ok(g.1.clone());
+        }
+    }
+    let (tok, exp, rotated) = crate::spotify_auth::refresh(&c.id, &c.refresh)?;
+    let key = match &rotated {
+        Some(r) if *r != c.refresh => {
+            if let Some(f) = &c.on_refresh {
+                f(r.clone());
+            }
+            format!("{}|{r}", c.refresh)
+        }
+        _ => c.refresh.clone(),
+    };
+    *USER_TOK.lock().unwrap() = (key, tok.clone(), exp);
+    Ok(tok)
+}
+
+/// Prime the cache right after "Connect Spotify" so the first import needs no refresh.
+pub fn seed_user_token(refresh: &str, access: &str, expires: i64) {
+    *USER_TOK.lock().unwrap() = (refresh.to_string(), access.to_string(), expires);
 }
 
 fn sp_api(token: &str, url: &str) -> Result<Value, String> {
@@ -138,6 +176,12 @@ fn sp_api(token: &str, url: &str) -> Result<Value, String> {
             let wait = retry.and_then(|r| r.parse::<u64>().ok()).unwrap_or(2).min(30);
             std::thread::sleep(std::time::Duration::from_secs(wait));
             continue;
+        }
+        if code == 401 {
+            return Err("Spotify sign-in expired. Reconnect in Settings → Spotify.".into());
+        }
+        if code == 403 {
+            return Err("Spotify refused (403). Your Spotify app's owner needs Premium, and your account must be listed under User Management in the Spotify dashboard.".into());
         }
         if !(200..300).contains(&code) {
             return Err(format!("Spotify API error {code}"));
@@ -170,40 +214,67 @@ fn spotify(url: &str, creds: &Creds) -> Result<Collection, String> {
     let c = RE_SP.captures(url).ok_or("That does not look like a Spotify link.")?;
     let kind = c.get(1).or(c.get(3)).unwrap().as_str().to_string();
     let id = c.get(2).or(c.get(4)).unwrap().as_str().to_string();
-    if !creds.id.is_empty() && !creds.secret.is_empty() {
-        match spotify_api(&kind, &id, creds) {
+    // connected account first (the only way to read full playlists since Spotify's Feb 2026 API
+    // change), then app keys (albums/songs), then the public page (first 100 songs)
+    let mut first_err = None;
+    let mut tokens: Vec<Result<String, String>> = Vec::new();
+    if creds.connected() {
+        tokens.push(user_token(creds));
+    }
+    if !creds.id.is_empty() && !creds.secret.is_empty() && !(kind == "playlist" && creds.connected()) {
+        tokens.push(sp_token(creds));
+    }
+    for tok in tokens {
+        match tok.and_then(|t| spotify_api(&kind, &id, &t)) {
             Ok(mut col) => {
                 col.url = url.into();
                 return Ok(col);
             }
             Err(e) => {
-                if let Ok(mut col) = spotify_embed(&kind, &id) {
-                    col.url = url.into();
-                    col.warning = Some(e);
-                    return Ok(col);
-                }
-                return Err(e);
+                first_err.get_or_insert(e);
             }
         }
     }
-    let mut col = spotify_embed(&kind, &id)?;
-    col.url = url.into();
-    Ok(col)
+    match spotify_embed(&kind, &id) {
+        Ok(mut col) => {
+            col.url = url.into();
+            if !col.complete && kind == "playlist" {
+                col.warning = Some(if creds.connected() {
+                    "Spotify only shares the full song list of playlists you own or collaborate on, so this shows the first 100. Tip: in Spotify, copy the songs into a playlist of your own.".into()
+                } else {
+                    "Showing the first 100 songs. Connect your Spotify account (Settings → Spotify) to get every song of your playlists.".into()
+                });
+            } else if let Some(e) = first_err {
+                col.warning = Some(e);
+            }
+            Ok(col)
+        }
+        Err(e) => Err(first_err.unwrap_or(e)),
+    }
 }
 
-fn spotify_api(kind: &str, id: &str, creds: &Creds) -> Result<Collection, String> {
-    let tok = sp_token(creds)?;
+fn page_items(page: &Value, col: &mut Collection) {
+    for it in page["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
+        // playlist items are `item` since Feb 2026 (was `track`); saved tracks are `track`
+        let t = if it["item"].is_object() { &it["item"] } else { &it["track"] };
+        if t["type"].as_str().unwrap_or("track") == "track" && t["id"].is_string() && !it["is_local"].as_bool().unwrap_or(false) {
+            col.tracks.push(api_track(t, None));
+        }
+    }
+}
+
+fn spotify_api(kind: &str, id: &str, tok: &str) -> Result<Collection, String> {
     let mut col = Collection { kind: kind.into(), id: id.into(), complete: true, via: "api".into(), source: "spotify".into(), ..Default::default() };
     match kind {
         "track" => {
-            let t = sp_api(&tok, &format!("/tracks/{id}"))?;
+            let t = sp_api(tok, &format!("/tracks/{id}"))?;
             col.name = t["name"].as_str().unwrap_or("").into();
             col.owner = t["artists"][0]["name"].as_str().unwrap_or("").into();
             col.cover = best_image(t["album"].get("images"));
             col.tracks.push(api_track(&t, None));
         }
         "album" => {
-            let a = sp_api(&tok, &format!("/albums/{id}"))?;
+            let a = sp_api(tok, &format!("/albums/{id}"))?;
             col.name = a["name"].as_str().unwrap_or("").into();
             col.owner = a["artists"][0]["name"].as_str().unwrap_or("").into();
             col.cover = best_image(a.get("images"));
@@ -213,30 +284,106 @@ fn spotify_api(kind: &str, id: &str, creds: &Creds) -> Result<Collection, String
                     col.tracks.push(api_track(&t, Some(&a)));
                 }
                 match page["next"].as_str() {
-                    Some(n) => page = sp_api(&tok, n)?,
+                    Some(n) => page = sp_api(tok, n)?,
                     None => break,
                 }
             }
         }
         _ => {
-            let p = sp_api(&tok, &format!("/playlists/{id}?fields=name,owner(display_name),images"))?;
+            let p = sp_api(tok, &format!("/playlists/{id}?fields=name,owner(display_name),images"))?;
             col.name = p["name"].as_str().unwrap_or("").into();
             col.owner = p["owner"]["display_name"].as_str().unwrap_or("").into();
             col.cover = best_image(p.get("images"));
-            let mut next = Some(format!("/playlists/{id}/tracks?limit=100&additional_types=track"));
+            let mut next = Some(format!("/playlists/{id}/items?limit=50&additional_types=track"));
             while let Some(u) = next {
-                let page = sp_api(&tok, &u)?;
-                for it in page["items"].as_array().cloned().unwrap_or_default() {
-                    let t = &it["track"];
-                    if t["type"].as_str() == Some("track") && !it["is_local"].as_bool().unwrap_or(false) {
-                        col.tracks.push(api_track(t, None));
-                    }
+                let page = sp_api(tok, &u)?;
+                if page.get("items").is_none() {
+                    return Err("Spotify only shares the songs of playlists you own or collaborate on.".into());
                 }
+                page_items(&page, &mut col);
                 next = page["next"].as_str().map(String::from);
             }
         }
     }
     Ok(col)
+}
+
+fn need_connect(creds: &Creds) -> Result<String, String> {
+    if !creds.connected() {
+        return Err("Connect your Spotify account first (Settings → Spotify).".into());
+    }
+    user_token(creds)
+}
+
+/// The connected account's Liked Songs, as a playlist that keeps syncing.
+fn liked(creds: &Creds) -> Result<Collection, String> {
+    let tok = need_connect(creds)?;
+    let mut col = Collection { kind: "playlist".into(), id: "liked".into(), name: "Liked Songs".into(), owner: "Your Spotify".into(), complete: true, via: "api".into(), source: "spotify".into(), url: LIKED_URL.into(), ..Default::default() };
+    let mut next = Some("/me/tracks?limit=50".to_string());
+    while let Some(u) = next {
+        let page = sp_api(&tok, &u)?;
+        page_items(&page, &mut col);
+        next = page["next"].as_str().map(String::from);
+    }
+    col.cover = col.tracks.first().and_then(|t| t.cover.clone());
+    if col.tracks.is_empty() {
+        return Err("Your Liked Songs on Spotify is empty.".into());
+    }
+    Ok(col)
+}
+
+/// Everything in the connected account: Liked Songs, every playlist in the sidebar, saved albums.
+pub fn library(creds: &Creds) -> Result<Fetched, String> {
+    let tok = need_connect(creds)?;
+    let me = sp_api(&tok, "/me")?;
+    let my_id = me["id"].as_str().unwrap_or("").to_string();
+    let mut playlists = Vec::new();
+    let liked_total = sp_api(&tok, "/me/tracks?limit=1")?["total"].as_u64().unwrap_or(0);
+    if liked_total > 0 {
+        playlists.push(ProfilePlaylist { name: "Liked Songs".into(), cover: None, total: liked_total, owner: "you".into(), url: LIKED_URL.into(), kind: "LIKED".into(), note: String::new() });
+    }
+    let mut next = Some("/me/playlists?limit=50".to_string());
+    while let Some(u) = next {
+        let page = sp_api(&tok, &u)?;
+        for p in page["items"].as_array().cloned().unwrap_or_default() {
+            let Some(pid) = p["id"].as_str() else { continue };
+            let total = p["items"]["total"].as_u64().or(p["tracks"]["total"].as_u64()).unwrap_or(0);
+            let mine = p["owner"]["id"].as_str() == Some(my_id.as_str()) || p["collaborative"].as_bool().unwrap_or(false);
+            playlists.push(ProfilePlaylist {
+                name: p["name"].as_str().unwrap_or("").into(),
+                cover: best_image(p.get("images")),
+                total,
+                owner: if mine { "you".into() } else { p["owner"]["display_name"].as_str().unwrap_or("").into() },
+                url: p["external_urls"]["spotify"].as_str().map(String::from).unwrap_or_else(|| format!("https://open.spotify.com/playlist/{pid}")),
+                kind: "PLAYLIST".into(),
+                note: if !mine && total > 100 { "not yours: Spotify only shares the first 100".into() } else { String::new() },
+            });
+        }
+        next = page["next"].as_str().map(String::from);
+    }
+    let mut next = Some("/me/albums?limit=50".to_string());
+    while let Some(u) = next {
+        let page = sp_api(&tok, &u)?;
+        for it in page["items"].as_array().cloned().unwrap_or_default() {
+            let a = &it["album"];
+            let Some(aid) = a["id"].as_str() else { continue };
+            playlists.push(ProfilePlaylist {
+                name: a["name"].as_str().unwrap_or("").into(),
+                cover: best_image(a.get("images")),
+                total: a["total_tracks"].as_u64().unwrap_or(0),
+                owner: a["artists"][0]["name"].as_str().unwrap_or("").into(),
+                url: a["external_urls"]["spotify"].as_str().map(String::from).unwrap_or_else(|| format!("https://open.spotify.com/album/{aid}")),
+                kind: "ALBUM".into(),
+                note: String::new(),
+            });
+        }
+        next = page["next"].as_str().map(String::from);
+    }
+    if playlists.is_empty() {
+        return Err("Your Spotify library is empty.".into());
+    }
+    let name = me["display_name"].as_str().or(me["id"].as_str()).unwrap_or("Your").to_string();
+    Ok(Fetched::Profile { name: format!("{name} · Spotify library"), cover: best_image(me.get("images")), playlists })
 }
 
 fn spotify_embed(kind: &str, id: &str) -> Result<Collection, String> {
@@ -286,34 +433,15 @@ fn spotify_embed(kind: &str, id: &str) -> Result<Collection, String> {
 
 fn spotify_profile(url: &str, creds: &Creds) -> Result<Fetched, String> {
     let uid = RE_SP_USER.captures(url).map(|c| urlencoding::decode(&c[1]).map(|s| s.into_owned()).unwrap_or_default()).ok_or("That is not a Spotify profile link.")?;
-    if creds.id.is_empty() || creds.secret.is_empty() {
-        return Err("Importing a whole profile needs the free Spotify API keys (Settings → Spotify).".into());
-    }
-    let tok = sp_token(creds)?;
-    let user = sp_api(&tok, &format!("/users/{}", enc(&uid))).unwrap_or(Value::Null);
-    let mut playlists = Vec::new();
-    let mut next = Some(format!("/users/{}/playlists?limit=50", enc(&uid)));
-    while let Some(u) = next {
-        let page = sp_api(&tok, &u)?;
-        for p in page["items"].as_array().cloned().unwrap_or_default() {
-            if p.is_null() {
-                continue;
-            }
-            let pid = p["id"].as_str().unwrap_or("");
-            playlists.push(ProfilePlaylist {
-                name: p["name"].as_str().unwrap_or("").into(),
-                cover: best_image(p.get("images")),
-                total: p["tracks"]["total"].as_u64().unwrap_or(0),
-                owner: p["owner"]["display_name"].as_str().unwrap_or("").into(),
-                url: p["external_urls"]["spotify"].as_str().map(String::from).unwrap_or_else(|| format!("https://open.spotify.com/playlist/{pid}")),
-            });
+    // Spotify removed "list someone's playlists" for apps in Feb 2026; your own still works
+    if creds.connected() {
+        let tok = user_token(creds)?;
+        if sp_api(&tok, "/me")?["id"].as_str() == Some(uid.as_str()) {
+            return library(creds);
         }
-        next = page["next"].as_str().map(String::from);
+        return Err("Spotify no longer lets apps list other people's playlists. Paste the playlist links one by one instead.".into());
     }
-    if playlists.is_empty() {
-        return Err("No public playlists on that profile.".into());
-    }
-    Ok(Fetched::Profile { name: user["display_name"].as_str().unwrap_or(&uid).into(), cover: best_image(user.get("images")), playlists })
+    Err("Spotify no longer lets apps list a profile's playlists. To bring over your own, connect your account in Settings → Spotify, then IMPORT MY WHOLE LIBRARY.".into())
 }
 
 // ------------------------------------------------------------------------------- YouTube / SoundCloud

@@ -61,6 +61,15 @@ pub fn fetch_link(app: &mut App, ctx: &egui::Context, url: String) {
     spawn_fetch(app, ctx, move || sources::fetch_any(&url, &creds));
 }
 
+/// Connected account: list Liked Songs, every playlist and saved albums for a one-click import.
+pub fn fetch_library(app: &mut App) {
+    app.browser.set_view(View::Import);
+    app.import.input = String::new();
+    let creds = app.dl.creds();
+    let ctx = app.covers.ctx.clone().unwrap();
+    spawn_fetch(app, &ctx, move || sources::library(&creds));
+}
+
 /// "More like this": YouTube Music radio for a song, shown in the import view for picking.
 pub fn radio_for(app: &mut App, t: &crate::store::Track) {
     app.browser.set_view(View::Import);
@@ -121,9 +130,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             let u = app.import.input.trim().to_string();
             fetch_link(app, ui.ctx(), u);
         }
-        let has_keys = { let s = app.settings.lock(); !s.spotify_client_id.is_empty() && !s.spotify_client_secret.is_empty() };
-        ui.label(egui::RichText::new("Spotify playlists, albums, songs & profiles · YouTube / YouTube Music playlists, albums & videos · SoundCloud. Spotify songs are matched to the best studio version on YouTube Music. Imported playlists stay in sync automatically.").color(pal.dim));
-        if !has_keys && ui.add(egui::Label::new(egui::RichText::new("Add free Spotify API keys for playlists over 100 songs and whole-profile import >").color(pal.accent2)).sense(Sense::click())).clicked() {
+        let connected = !app.settings.lock().spotify_refresh_token.is_empty();
+        ui.label(egui::RichText::new("Spotify playlists, albums & songs · YouTube / YouTube Music playlists, albums & videos · SoundCloud. Spotify songs are matched to the best studio version on YouTube Music. Imported playlists stay in sync automatically.").color(pal.dim));
+        ui.add_space(8.0);
+        if connected {
+            if button(ui, &pal, "IMPORT MY WHOLE SPOTIFY LIBRARY", true, !app.import.busy).clicked() {
+                fetch_library(app);
+            }
+        } else if ui.add(egui::Label::new(egui::RichText::new("Bring over your whole Spotify library at once (Liked Songs, all playlists, albums): connect Spotify >").color(pal.accent2)).sense(Sense::click())).clicked() {
             app.modal = Some(Modal::Settings(super::settings::SetTab::Spotify));
         }
     });
@@ -169,7 +183,7 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
                 let kind = if c.kind == "radio" { "RADIO".to_string() } else { c.kind.to_uppercase() };
                 ui.label(egui::RichText::new([kind, c.owner.clone(), format!("{} TRACKS", c.tracks.len()), via.into()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).color(pal.dim));
                 if !c.complete {
-                    ui.label(egui::RichText::new("⚠ Spotify's public page only lists the first 100 tracks — add API keys in Settings to get them all.").color(pal.accent2));
+                    ui.label(egui::RichText::new("⚠ Spotify's public page only lists the first 100 tracks. Connect your Spotify account in Settings to get all of your own playlists.").color(pal.accent2));
                 }
             });
         });
@@ -238,7 +252,10 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
             header_cover(app, ui);
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(name).font(px(11.0)).color(pal.text));
-                ui.label(egui::RichText::new(format!("SPOTIFY PROFILE · {} PUBLIC PLAYLISTS", playlists.len())).color(pal.dim));
+                let count = |k: &str| playlists.iter().filter(|p| p.kind == k).count();
+                let songs: u64 = playlists.iter().map(|p| p.total).sum();
+                ui.label(egui::RichText::new(format!("{} PLAYLISTS · {} ALBUMS{} · {songs} SONGS", count("PLAYLIST"), count("ALBUM"), if count("LIKED") > 0 { " · LIKED SONGS" } else { "" })).color(pal.dim));
+                ui.label(egui::RichText::new("Songs you already have are skipped. Everything keeps syncing: new likes and playlist additions download by themselves.").color(pal.dim));
             });
         });
         ui.add_space(6.0);
@@ -250,10 +267,10 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                 app.import.selected.clear();
             }
             let n = app.import.selected.len();
-            if button(ui, &pal, &format!("IMPORT {n} PLAYLISTS"), true, n > 0).clicked() {
+            if button(ui, &pal, &format!("IMPORT {n} SELECTED"), true, n > 0).clicked() {
                 let urls: Vec<(String, String)> = app.import.selected.iter().map(|&i| (playlists[i].name.clone(), playlists[i].url.clone())).collect();
                 let (dl, lib) = (app.dl.clone(), app.lib.clone());
-                app.toast(format!("Importing {} playlists — they'll stay in sync automatically", urls.len()));
+                app.toast(format!("Importing {} lists — they'll stay in sync automatically", urls.len()));
                 app.browser.set_view(View::Downloads);
                 std::thread::spawn(move || {
                     for (name, url) in urls {
@@ -279,8 +296,12 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                 if ui.checkbox(&mut on, "").changed() {
                     if on { app.import.selected.insert(i); } else { app.import.selected.remove(&i); }
                 }
+                ui.label(egui::RichText::new(&p.kind).font(px(6.0)).color(if p.kind == "LIKED" { pal.accent } else { pal.dim }));
                 ui.label(egui::RichText::new(&p.name).color(pal.text));
                 ui.label(egui::RichText::new(format!("{} ♪ · {}", p.total, p.owner)).color(pal.dim));
+                if !p.note.is_empty() {
+                    ui.label(egui::RichText::new(format!("⚠ {}", p.note)).color(pal.accent2));
+                }
             });
         }
     });

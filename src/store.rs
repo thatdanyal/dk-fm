@@ -99,6 +99,9 @@ pub struct Settings {
     #[serde(default = "d_sync")] pub sync_hours: u32,
     #[serde(default)] pub spotify_client_id: String,
     #[serde(default)] pub spotify_client_secret: String,
+    /// "Connect Spotify" (PKCE) refresh token and the connected account's name
+    #[serde(default)] pub spotify_refresh_token: String,
+    #[serde(default)] pub spotify_user: String,
     #[serde(default = "d_true")] pub auto_update: bool,
     #[serde(default = "d_true")] pub close_to_tray: bool,
     #[serde(default)] pub start_at_login: bool,

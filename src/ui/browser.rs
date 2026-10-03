@@ -99,87 +99,93 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
 fn sidebar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    let (n_all, n_liked, playlists) = {
+    let (n_all, n_liked, mut playlists) = {
         let d = app.lib.data.read();
         (d.tracks.len(), d.stats.values().filter(|s| s.liked).count(), d.playlists.clone())
     };
+    // Spotify Liked Songs first, then imported, then your own (each in their saved order)
+    playlists.sort_by_key(|p| (p.url() != Some("spotify:liked"), !p.is_imported()));
     let active_dl = app.dl.active_count();
+    ui.spacing_mut().item_spacing.y = 0.0;
+    let group = |ui: &mut Ui, s: &str| {
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(format!("  {s}")).font(px(6.0)).color(pal.dim));
+        ui.add_space(3.0);
+    };
+    let mut go: Option<View> = None;
+    let mut item = |ui: &mut Ui, app: &App, v: Option<View>, ico: &str, label: &str, cnt: Option<usize>| -> egui::Response {
+        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
+        let active = v.as_ref() == Some(&app.browser.view);
+        let p = ui.painter();
+        if active {
+            fill(p, r, pal.sel);
+            fill(p, Rect::from_min_size(r.min, Vec2::new(3.0, r.height())), pal.accent);
+        } else if resp.hovered() {
+            fill(p, r, pal.panel_hi);
+        }
+        p.text(r.min + Vec2::new(14.0, 12.0), Align2::CENTER_CENTER, ico, vt(18.0), pal.accent2);
+        let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 30.0, r.bottom())));
+        clip.text(r.min + Vec2::new(28.0, 12.0), Align2::LEFT_CENTER, label, vt(19.0), if active { pal.accent } else { pal.text });
+        if let Some(c) = cnt {
+            p.text(Pos2::new(r.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, c.to_string(), vt(16.0), pal.dim);
+        }
+        if resp.clicked() {
+            if let Some(v) = v {
+                go = Some(v);
+            }
+        }
+        resp
+    };
+    // fixed navigation
+    group(ui, "LIBRARY");
+    item(ui, app, Some(View::All), "♫", "All Tracks", Some(n_all));
+    item(ui, app, Some(View::Top), "★", "Most Played", None);
+    item(ui, app, Some(View::Recent), "🕘", "Recently Added", None);
+    item(ui, app, Some(View::Albums), "💿", "Albums", None);
+    item(ui, app, Some(View::Artists), "👤", "Artists", None);
+    item(ui, app, Some(View::Stats), "📊", "Stats", None);
+    group(ui, "GET MUSIC");
+    item(ui, app, Some(View::Import), "📥", "Import Music", None);
+    item(ui, app, Some(View::Downloads), "⬇", "Downloads", if active_dl > 0 { Some(active_dl) } else { None });
+    if item(ui, app, None, "+", "Add music folder", None).clicked() {
+        add_folder(app);
+    }
+    // playlists: their own scrolling list below a divider
+    ui.add_space(8.0);
+    ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(2.0_f32, pal.line));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("  PLAYLISTS").font(px(6.0)).color(pal.dim));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(egui::Label::new(egui::RichText::new("+ ").font(vt(20.0)).color(pal.dim)).sense(Sense::click())).on_hover_text("New playlist").clicked() {
+                app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
+            }
+        });
+    });
+    ui.add_space(3.0);
     egui::ScrollArea::vertical().id_salt("side").auto_shrink([false; 2]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        let group = |ui: &mut Ui, s: &str| {
-            ui.add_space(10.0);
-            ui.label(egui::RichText::new(format!("  {s}")).font(px(6.0)).color(pal.dim));
-            ui.add_space(3.0);
-        };
-        let mut go: Option<View> = None;
-        let mut item = |ui: &mut Ui, app: &App, v: Option<View>, ico: &str, label: &str, cnt: Option<usize>| -> egui::Response {
-            let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::click());
-            let active = v.as_ref() == Some(&app.browser.view);
-            let p = ui.painter();
-            if active {
-                fill(p, r, pal.sel);
-                fill(p, Rect::from_min_size(r.min, Vec2::new(3.0, r.height())), pal.accent);
-            } else if resp.hovered() {
-                fill(p, r, pal.panel_hi);
-            }
-            p.text(r.min + Vec2::new(14.0, 12.0), Align2::CENTER_CENTER, ico, vt(18.0), pal.accent2);
-            let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 30.0, r.bottom())));
-            clip.text(r.min + Vec2::new(28.0, 12.0), Align2::LEFT_CENTER, label, vt(19.0), if active { pal.accent } else { pal.text });
-            if let Some(c) = cnt {
-                p.text(Pos2::new(r.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, c.to_string(), vt(16.0), pal.dim);
-            }
-            if resp.clicked() {
-                if let Some(v) = v {
-                    go = Some(v);
-                }
-            }
-            resp
-        };
-        group(ui, "LOCAL");
-        item(ui, app, Some(View::All), "♫", "All Tracks", Some(n_all));
         item(ui, app, Some(View::Liked), "♥", "Liked", Some(n_liked));
-        item(ui, app, Some(View::Top), "★", "Most Played", None);
-        item(ui, app, Some(View::Recent), "🕘", "Recently Added", None);
-        item(ui, app, Some(View::Albums), "💿", "Albums", None);
-        item(ui, app, Some(View::Artists), "👤", "Artists", None);
-        item(ui, app, Some(View::Stats), "📊", "Stats", None);
-        if item(ui, app, None, "+", "Add music folder", None).clicked() {
-            add_folder(app);
-        }
-        group(ui, "IMPORTED");
-        item(ui, app, Some(View::Import), "📥", "Import Music", None);
-        item(ui, app, Some(View::Downloads), "⬇", "Downloads", if active_dl > 0 { Some(active_dl) } else { None });
-        for p in playlists.iter().filter(|p| p.is_imported()) {
-            let ico = match p.source.as_deref() { Some("youtube") => "▶", Some("soundcloud") => "☁", _ => "♪" };
+        for p in &playlists {
+            let ico = match (p.url(), p.source.as_deref()) {
+                (Some("spotify:liked"), _) => "♥",
+                (_, Some("youtube")) => "▶",
+                (_, Some("soundcloud")) => "☁",
+                _ if p.is_imported() => "♪",
+                _ => "☰",
+            };
             let r = item(ui, app, Some(View::Playlist(p.id.clone())), ico, &p.name, Some(p.track_ids.len()));
             let pl = p.clone();
             r.context_menu(|ui| playlist_menu_ui(app, ui, &pl));
         }
-        ui.add_space(10.0);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("  PLAYLISTS").font(px(6.0)).color(pal.dim));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Label::new(egui::RichText::new("+ ").font(vt(20.0)).color(pal.dim)).sense(Sense::click())).clicked() {
-                    app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
-                }
-            });
-        });
-        ui.add_space(3.0);
-        let user: Vec<_> = playlists.iter().filter(|p| !p.is_imported()).cloned().collect();
-        for p in &user {
-            let r = item(ui, app, Some(View::Playlist(p.id.clone())), "☰", &p.name, Some(p.track_ids.len()));
-            let pl = p.clone();
-            r.context_menu(|ui| playlist_menu_ui(app, ui, &pl));
-        }
-        if user.is_empty() && item(ui, app, None, "+", "New playlist", None).clicked() {
+        if !playlists.iter().any(|p| !p.is_imported()) && item(ui, app, None, "+", "New playlist", None).clicked() {
             app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
         }
-        if let Some(v) = go {
-            app.browser.set_view(v);
-        }
     });
+    if let Some(v) = go {
+        app.browser.set_view(v);
+    }
 }
-
 
 pub fn add_folder(app: &mut App) {
     if let Some(f) = rfd::FileDialog::new().set_title("Add a music folder").pick_folder() {

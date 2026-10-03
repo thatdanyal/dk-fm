@@ -551,6 +551,20 @@ impl Library {
         self.changed();
     }
 
+    /// Puts a song into a playlist right after `after` (or first when that isn't in it); does
+    /// nothing if the song is already there.
+    pub fn playlist_insert(&self, pid: &str, id: &str, after: Option<&str>) {
+        let mut d = self.data.write();
+        let Some(p) = d.playlists.iter_mut().find(|p| p.id == pid) else { return };
+        if p.track_ids.iter().any(|x| x == id) {
+            return;
+        }
+        let at = after.and_then(|a| p.track_ids.iter().position(|x| x == a)).map(|i| i + 1).unwrap_or(0);
+        p.track_ids.insert(at, id.to_string());
+        drop(d);
+        self.changed();
+    }
+
     pub fn new_playlist(&self, name: &str, ids: Vec<String>) -> String {
         let id = format!("{:016x}", fastrand::u64(..));
         self.upsert_playlist(Playlist { id: id.clone(), name: name.into(), track_ids: ids, source: Some("user".into()), created_at: store::now_ms(), ..Default::default() })
@@ -620,6 +634,14 @@ mod tests {
         // reorder: move e before a
         lib.playlist_move("p", &["e".into()], Some("a"));
         assert_eq!(lib.data.read().playlists[0].track_ids, ["e", "a", "d"]);
+        // a shared playlist's downloads land in their place
+        lib.data.write().playlists.push(Playlist { id: "s".into(), name: "S".into(), track_ids: vec!["d".into()], ..Default::default() });
+        lib.playlist_insert("s", "a", None);
+        lib.playlist_insert("s", "c", Some("a"));
+        lib.playlist_insert("s", "e", Some("d"));
+        lib.playlist_insert("s", "c", Some("d"));
+        assert_eq!(lib.data.read().playlists[1].track_ids, ["a", "c", "d", "e"]);
+        lib.data.write().playlists.retain(|p| p.id != "s");
         // remove marks a synced playlist edited and remembers the song's keys
         lib.playlist_remove("p", &["d".into()]);
         let p = lib.data.read().playlists[0].clone();

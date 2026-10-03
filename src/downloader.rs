@@ -389,7 +389,7 @@ impl Downloader {
                 jt.note = Some("Already downloaded".into());
                 jt.track_id = ids.first().cloned();
             });
-            self.deliver(job_id, &ids);
+            self.deliver(job_id, idx, &ids);
             self.mirror_job(job_id);
             return Ok(());
         }
@@ -489,7 +489,7 @@ impl Downloader {
                 jt.status = TStatus::Done;
                 jt.track_id = ids.first().cloned();
             });
-            self.deliver(job_id, &ids);
+            self.deliver(job_id, idx, &ids);
             Ok(())
         })();
         let _ = std::fs::remove_dir_all(&tmp);
@@ -498,12 +498,22 @@ impl Downloader {
         Ok(())
     }
 
-    /// A finished song goes into the job's target playlist, if it has one.
-    fn deliver(&self, job_id: &str, ids: &[String]) {
-        let target = self.jobs.lock().iter().find(|j| j.id == job_id).and_then(|j| j.target_playlist.clone());
-        if let (Some(pid), false) = (target, ids.is_empty()) {
+    /// A finished song goes into the job's target playlist, if it has one. For a list of songs
+    /// (a shared playlist) it goes in its place: after the nearest earlier song already there.
+    fn deliver(&self, job_id: &str, idx: usize, ids: &[String]) {
+        let Some(id) = ids.first() else { return };
+        let Some((pid, ordered)) = self.jobs.lock().iter().find(|j| j.id == job_id).and_then(|j| Some((j.target_playlist.clone()?, j.tracks.len() > 1))) else { return };
+        if !ordered {
             self.lib.playlist_add(&pid, &ids[..1]);
+            return;
         }
+        let kidx = self.lib.key_index();
+        let inpl: std::collections::HashSet<String> = self.lib.data.read().playlists.iter().find(|p| p.id == pid).map(|p| p.track_ids.iter().cloned().collect()).unwrap_or_default();
+        let after = {
+            let jobs = self.jobs.lock();
+            jobs.iter().find(|j| j.id == job_id).and_then(|j| j.tracks[..idx.min(j.tracks.len())].iter().rev().find_map(|jt| lookup(&kidx, &jt.t).filter(|i| inpl.contains(*i)).cloned()))
+        };
+        self.lib.playlist_insert(&pid, id, after.as_deref());
     }
 
     fn mirror_job(&self, job_id: &str) {
@@ -526,8 +536,7 @@ impl Downloader {
         let mut ordered: Vec<String> = Vec::new();
         let mut keys: Vec<Vec<String>> = Vec::new();
         for t in &col.tracks {
-            let id = idx.get(&t.source_key).or_else(|| t.spotify_id.as_ref().and_then(|s| idx.get(&format!("sp:{s}")))).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)));
-            if let Some(id) = id {
+            if let Some(id) = lookup(&idx, t) {
                 if !ordered.contains(id) {
                     ordered.push(id.clone());
                     keys.push(itrack_keys(t));
@@ -606,6 +615,11 @@ impl Downloader {
         }
         Ok(n)
     }
+}
+
+/// The library song an import track is (source key, Spotify id, artist + title).
+fn lookup<'a>(idx: &'a std::collections::HashMap<String, String>, t: &ITrack) -> Option<&'a String> {
+    idx.get(&t.source_key).or_else(|| t.spotify_id.as_ref().and_then(|s| idx.get(&format!("sp:{s}")))).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)))
 }
 
 fn itrack_keys(t: &ITrack) -> Vec<String> {

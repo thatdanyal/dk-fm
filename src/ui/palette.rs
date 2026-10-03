@@ -33,6 +33,7 @@ enum Act {
     View(View),
     Import(String),
     SyncAll,
+    OpenShare,
     Mini,
     Layout,
     Visualizer,
@@ -84,6 +85,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         (format!("Repeat: {} > next mode", o.repeat), "loop toggle", "🔁", Act::CycleRepeat),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
+        ("Open a playlist file from a friend (.dkfm)…".into(), "share shared import friend code", "📂", Act::OpenShare),
         ("Downloads".into(), "progress", "⬇", Act::View(View::Downloads)),
         ("Stats".into(), "wrapped top songs artists minutes history", "📊", Act::View(View::Stats)),
         ("Liked songs".into(), "favorites", "♥", Act::View(View::Liked)),
@@ -155,6 +157,7 @@ fn search(app: &App, q: &str) -> Vec<Item> {
 fn run(app: &mut App, ctx: &egui::Context, act: Act) {
     match act {
         Act::Toggle => app.player.toggle(),
+        Act::OpenShare => super::sharing::pick_file(app),
         Act::Next => app.player.next(true),
         Act::Prev => app.player.prev(),
         Act::ShuffleAll => {
@@ -219,6 +222,10 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(mut st) = app.palette.take() else { return };
+    if st.query.contains(crate::share::PREFIX) {
+        super::sharing::receive(app, &st.query); // a friend's code: its preview replaces the palette
+        return;
+    }
     if st.pick.is_some() {
         if !show_pick(app, ctx, &mut st) {
             app.palette = Some(st);

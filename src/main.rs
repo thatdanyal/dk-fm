@@ -9,6 +9,7 @@ mod install;
 mod library;
 mod net;
 mod player;
+mod share;
 mod single;
 mod sources;
 mod spotify_auth;

@@ -119,7 +119,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         ui.add_space(6.0);
         let mut go = false;
         ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut app.import.input).hint_text("Paste a Spotify, YouTube, YouTube Music or SoundCloud link…").desired_width(ui.available_width() - 110.0).font(vt(19.0)));
+            let r = ui.add(egui::TextEdit::singleline(&mut app.import.input).hint_text("Paste a Spotify, YouTube, YouTube Music or SoundCloud link, or a friend's DK.FM code…").desired_width(ui.available_width() - 110.0).font(vt(19.0)));
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 go = true;
             }
@@ -127,6 +127,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 go = true;
             }
         });
+        if app.import.input.contains(crate::share::PREFIX) {
+            let t = std::mem::take(&mut app.import.input);
+            super::sharing::receive(app, &t);
+        }
         if go && !app.import.input.trim().is_empty() && !app.import.busy {
             let u = app.import.input.trim().to_string();
             fetch_link(app, ui.ctx(), u);
@@ -140,6 +144,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
         } else if ui.add(egui::Label::new(egui::RichText::new("Bring over your whole Spotify library at once (Liked Songs, all playlists, albums): connect Spotify >").color(pal.accent2)).sense(Sense::click())).clicked() {
             app.modal = Some(Modal::Settings(super::settings::SetTab::Spotify));
+        }
+        ui.add_space(4.0);
+        if ui.add(egui::Label::new(egui::RichText::new("Got a playlist file from a friend? Open .dkfm file >").color(pal.accent2)).sense(Sense::click())).clicked() {
+            super::sharing::pick_file(app);
         }
     });
     ui.painter().hline(ui.max_rect().x_range(), ui.cursor().top(), egui::Stroke::new(2.0_f32, pal.line));
@@ -398,8 +406,8 @@ pub fn downloads(app: &mut App, ui: &mut Ui) {
                             if tb_button(ui, &pal, "FOLDER", false).clicked() {
                                 let _ = open::that(&j.folder);
                             }
-                            if (j.kind == "playlist" || j.kind == "album") && done > 0 && tb_button(ui, &pal, "▶ OPEN", false).clicked() {
-                                let pid = format!("sp-{}-{}", j.kind, j.col_id);
+                            if (j.kind == "playlist" || j.kind == "album" || j.kind == "shared") && done > 0 && tb_button(ui, &pal, "▶ OPEN", false).clicked() {
+                                let pid = if j.kind == "shared" { j.col_id.clone() } else { format!("sp-{}-{}", j.kind, j.col_id) };
                                 actions.push(Box::new(move |a: &mut App| a.browser.set_view(View::Playlist(pid))));
                             }
                         });

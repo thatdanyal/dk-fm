@@ -16,6 +16,7 @@ pub mod plpick;
 pub mod queue;
 pub mod scope;
 pub mod settings;
+pub mod sharing;
 pub mod stats;
 pub mod theme;
 pub mod widgets;
@@ -109,6 +110,8 @@ pub struct App {
     pub drop_hover: bool,
     /// settings window state (theme editor draft, key capture, confirmations)
     pub setui: settings::SetUi,
+    /// a friend's code / file waiting in its preview
+    pub incoming: Option<sharing::Incoming>,
 }
 
 pub fn default_dock() -> DockState<Tab> {
@@ -224,6 +227,7 @@ impl App {
             cjk_gen: 0,
             drop_hover: false,
             setui: Default::default(),
+            incoming: None,
         };
         app.apply_look(&cc.egui_ctx);
         app
@@ -298,8 +302,16 @@ impl App {
         self.set_theme(ctx);
         self.apply_look(ctx);
         self.dock = s.dock.clone().and_then(|v| serde_json::from_value::<DockState<Tab>>(v).ok()).filter(|d| d.iter_all_tabs().count() > 0).unwrap_or_else(default_dock);
+        self.player.set_volume(s.player.volume);
+        self.apply_player(&s);
+        self.browser.set_view(browser::View::All);
+        self.settings_dirty.store(true, Ordering::Relaxed);
+        self.rescan();
+    }
+
+    /// Playback, visualizer and EQ settings from `s` into the player.
+    pub fn apply_player(&mut self, s: &Settings) {
         let p = &self.player;
-        p.set_volume(s.player.volume);
         p.set_crossfade(s.player.crossfade);
         p.set_normalize(s.player.normalize);
         p.set_match_volume(s.player.match_volume);
@@ -307,15 +319,13 @@ impl App {
         p.set_visualizer(&s.player.visualizer, s.player.vis_fps);
         p.set_eq(s.eq.clone());
         self.scope.mode = s.player.visualizer.clone();
-        self.browser.set_view(browser::View::All);
-        self.settings_dirty.store(true, Ordering::Relaxed);
-        self.rescan();
+        self.scope.invalidate();
     }
 
     // ------------------------------------------------------------ saved layouts
     pub const PRESETS: [&'static str; 2] = ["Default", "Minimal"];
 
-    fn preset(name: &str) -> Option<DockState<Tab>> {
+    pub fn preset(name: &str) -> Option<DockState<Tab>> {
         match name {
             "Default" => Some(default_dock()),
             "Minimal" => {
@@ -578,7 +588,7 @@ impl App {
                 // Ctrl shortcuts that don't edit text work everywhere; the rest not while typing,
                 // and plain keys not over the palette or a window either
                 let global = keys::GLOBAL.contains(&a) && (c.ctrl || c.alt);
-                if !global && (typing || (!c.ctrl && !c.alt && (self.palette.is_some() || self.modal.is_some()))) {
+                if !global && (typing || (!c.ctrl && !c.alt && (self.palette.is_some() || self.modal.is_some() || self.incoming.is_some()))) {
                     continue;
                 }
                 self.run_action(ctx, a);
@@ -664,7 +674,7 @@ impl App {
             let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("drop")));
             let s = ctx.screen_rect();
             fill(&painter, s, Color32::from_black_alpha(170));
-            painter.text(s.center(), Align2::CENTER_CENTER, "DROP AUDIO FILES TO ADD", px(14.0), pal.accent);
+            painter.text(s.center(), Align2::CENTER_CENTER, "DROP AUDIO FILES TO ADD · OR A .DKFM SHARE", px(14.0), pal.accent);
         }
     }
 
@@ -676,7 +686,9 @@ impl App {
         }
         let mut files = Vec::new();
         for p in dropped {
-            if p.is_dir() {
+            if p.extension().map(|e| e.eq_ignore_ascii_case(crate::share::EXT)).unwrap_or(false) {
+                sharing::open_file(self, &p);
+            } else if p.is_dir() {
                 for e in walkdir::WalkDir::new(&p).into_iter().flatten() {
                     if crate::library::is_audio(e.path()) {
                         files.push(e.into_path());
@@ -685,6 +697,9 @@ impl App {
             } else {
                 files.push(p);
             }
+        }
+        if files.is_empty() {
+            return; // only share files
         }
         let ids = self.lib.add_files(&files, |_| {});
         if ids.is_empty() {
@@ -744,6 +759,21 @@ impl App {
                     self.browser.add.open = true;
                     self.browser.add.query = std::env::var("DKFM_QUERY").unwrap_or_default();
                 }
+                // share previews: a code made from this profile's own data, as if pasted
+                v if v.starts_with("share-") => {
+                    let s = match &v[6..] {
+                        "theme" => Some(sharing::theme_share(self, "synthwave")),
+                        "layout" => sharing::layout_share(self, Some("Default")),
+                        "settings" => Some(sharing::settings_share(self)),
+                        _ => {
+                            let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).cloned();
+                            p.map(|p| sharing::playlist_share(self, &p))
+                        }
+                    };
+                    if let Some(s) = s {
+                        sharing::receive(self, &format!("check this out {}", crate::share::encode(&s)));
+                    }
+                }
                 "mini" => self.toggle_mini(ctx),
                 "layout" => self.layout_edit = true,
                 "eq" => self.show_panel(Tab::Eq),
@@ -752,6 +782,12 @@ impl App {
                     if let Some(t) = t { import::radio_for(self, &t); }
                 }
                 _ => {}
+            }
+            // DKFM_SHARE=<code or .dkfm file>: open its preview
+            if let Ok(v) = std::env::var("DKFM_SHARE") {
+                if !sharing::receive(self, &v) {
+                    sharing::open_file(self, std::path::Path::new(&v));
+                }
             }
         }
         let Ok(path) = std::env::var("DKFM_SCREENSHOT") else { return };
@@ -855,6 +891,13 @@ impl eframe::App for App {
             }
         }
         self.shortcuts(ctx);
+        // Ctrl+V of a friend's code anywhere outside a text box (text boxes check their own)
+        if !ctx.wants_keyboard_input() {
+            let pasted = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None }));
+            if let Some(t) = pasted {
+                sharing::receive(self, &t);
+            }
+        }
         self.handle_drops(ctx);
         self.titlebar(ctx);
 
@@ -925,6 +968,7 @@ impl eframe::App for App {
             palette::show(self, ctx);
         }
         settings::show_modal(self, ctx);
+        sharing::show(self, ctx);
         if let UpdState::Available(u) = self.update.lock().clone() {
             if self.update_dismissed.as_deref() != Some(&u.version) && self.modal.is_none() {
                 self.modal = Some(Modal::Update);

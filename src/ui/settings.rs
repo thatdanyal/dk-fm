@@ -82,7 +82,7 @@ impl SetUi {
     }
 }
 
-fn window(pal: theme::Pal, ctx: &egui::Context, title: &str, size: Vec2, esc_closes: bool, body: impl FnOnce(&mut Ui)) -> bool {
+pub(super) fn window(pal: theme::Pal, ctx: &egui::Context, title: &str, size: Vec2, esc_closes: bool, body: impl FnOnce(&mut Ui)) -> bool {
     // dim the app behind
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("modal-dim")));
     fill(&painter, ctx.screen_rect(), egui::Color32::from_black_alpha(150));
@@ -101,6 +101,9 @@ fn window(pal: theme::Pal, ctx: &egui::Context, title: &str, size: Vec2, esc_clo
 }
 
 pub fn show_modal(app: &mut App, ctx: &egui::Context) {
+    if app.incoming.is_some() {
+        return; // a friend's share preview is on top; this comes back after
+    }
     let Some(m) = app.modal.take() else { return };
     let keep = match m {
         Modal::Settings(tab) => {
@@ -356,6 +359,12 @@ fn look(app: &mut App, ui: &mut Ui) {
         app.edit_settings(|s| s.theme = k);
         app.set_theme(ui.ctx());
     }
+    ui.add_space(4.0);
+    if button(ui, &pal, "SHARE CURRENT THEME…", false, true).on_hover_text("Copy a code for this theme (with your accent colour) to send to a friend").clicked() {
+        let name = theme::all_themes(&s).into_iter().find(|t| t.0 == s.theme).map(|t| t.1).unwrap_or_default();
+        let sh = super::sharing::theme_share(app, &s.theme);
+        super::sharing::copy(app, ui.ctx(), &sh, &format!("theme \"{name}\""));
+    }
     spacer(ui);
     caption(ui, &pal, "ACCENT COLOR");
     let mut col = s.accent.as_deref().and_then(theme::parse_hex).unwrap_or(pal.accent);
@@ -563,6 +572,9 @@ fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
                     if button(ui, &pal, "RENAME", false, true).clicked() {
                         action = Some(("start", c.name.clone(), String::new()));
                     }
+                    if button(ui, &pal, "SHARE…", false, true).on_hover_text("Copy a code to send to a friend").clicked() {
+                        action = Some(("share", c.name.clone(), String::new()));
+                    }
                     if button(ui, &pal, "DELETE", false, true).clicked() {
                         action = Some(("delete", c.name.clone(), String::new()));
                     }
@@ -570,6 +582,11 @@ fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
             });
         }
         let key = |n: &str| format!("{}{n}", theme::CUSTOM);
+        if let Some(("share", n, _)) = &action {
+            if let Some(c) = s.custom_themes.iter().find(|c| c.name == *n) {
+                super::sharing::copy(app, ui.ctx(), &crate::share::Share::Theme(c.clone()), &format!("theme \"{n}\""));
+            }
+        }
         match action {
             Some(("use", n, _)) => {
                 app.edit_settings(|s| s.theme = key(&n));
@@ -633,6 +650,11 @@ fn layouts(app: &mut App, ui: &mut Ui) {
             app.setui.layout_name.clear();
             app.toast(format!("Saved layout \"{name}\""));
         }
+        if button(ui, &pal, "SHARE CURRENT…", false, true).on_hover_text("Copy a code for the current arrangement to send to a friend").clicked() {
+            if let Some(sh) = super::sharing::layout_share(app, None) {
+                super::sharing::copy(app, ui.ctx(), &sh, "your layout");
+            }
+        }
     });
     spacer(ui);
     caption(ui, &pal, "LAYOUTS");
@@ -655,6 +677,9 @@ fn layouts(app: &mut App, ui: &mut Ui) {
             if button(ui, &pal, "USE", true, true).clicked() {
                 action = Some(("use", name.clone(), String::new()));
             }
+            if button(ui, &pal, "SHARE…", false, true).on_hover_text("Copy a code to send to a friend").clicked() {
+                action = Some(("share", name.clone(), String::new()));
+            }
             if !builtin {
                 if button(ui, &pal, "RENAME", false, true).clicked() {
                     action = Some(("start", name.clone(), String::new()));
@@ -669,6 +694,11 @@ fn layouts(app: &mut App, ui: &mut Ui) {
         Some(("use", n, _)) => {
             app.apply_layout(&n);
             app.toast(format!("Layout: {n}"));
+        }
+        Some(("share", n, _)) => {
+            if let Some(sh) = super::sharing::layout_share(app, Some(&n)) {
+                super::sharing::copy(app, ui.ctx(), &sh, &format!("layout \"{n}\""));
+            }
         }
         Some(("start", n, _)) => app.setui.rename = Some(("layout", n.clone(), n)),
         Some(("cancel", _, _)) => app.setui.rename = None,
@@ -1402,6 +1432,14 @@ fn backups(app: &mut App, ui: &mut Ui) {
             app.setui.confirm = Some(Confirm::DeleteAll);
         }
     });
+    spacer(ui);
+    caption(ui, &pal, "SHARE YOUR SETUP WITH A FRIEND");
+    dim(ui, &pal, "A short code with your look & behaviour: theme, font, text size, lists, sidebar, shortcuts, visualizer, EQ and search. Never your Spotify login, folders, library, play counts or backups.");
+    if button(ui, &pal, "COPY SETTINGS CODE", true, true).clicked() {
+        let sh = super::sharing::settings_share(app);
+        super::sharing::copy(app, ui.ctx(), &sh, "your settings");
+    }
+    dim(ui, &pal, "Got a code (theme, layout, settings or playlist)? Press Ctrl+V anywhere in DK.FM, or paste it into Ctrl+K. You see what it does before anything changes.");
 }
 
 fn about(app: &mut App, ui: &mut Ui) {

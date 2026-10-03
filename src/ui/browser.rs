@@ -378,6 +378,21 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
             ui.close_menu();
         }
     }
+    ui.separator();
+    if ui.button("Share (copy code)").on_hover_text("A code to paste to a friend: they press Ctrl+V in DK.FM").clicked() {
+        let sh = super::sharing::playlist_share(app, p);
+        super::sharing::copy(app, ui.ctx(), &sh, &format!("playlist \"{}\"", p.name));
+        ui.close_menu();
+    }
+    if ui.button("Export playlist file…").on_hover_text("A .dkfm file for big playlists: your friend drops it onto DK.FM").clicked() {
+        ui.close_menu();
+        super::sharing::export_file(app, p);
+    }
+    if ui.button("Export as M3U…").on_hover_text("For other players and devices").clicked() {
+        ui.close_menu();
+        super::sharing::export_m3u(app, p);
+    }
+    ui.separator();
     if ui.button("Delete playlist").clicked() {
         app.lib.delete_playlist(&p.id);
         if app.browser.view == View::Playlist(p.id.clone()) {

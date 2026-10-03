@@ -146,6 +146,8 @@ impl Downloader {
                 cover: col.cover.clone(),
                 auto_sync: Some(prev.as_ref().and_then(|p| p.auto_sync).unwrap_or(true)),
                 last_sync: Some(store::now_ms()),
+                edited: prev.as_ref().map(|p| p.edited).unwrap_or(false),
+                removed: prev.as_ref().map(|p| p.removed.clone()).unwrap_or_default(),
                 track_ids: prev.map(|p| p.track_ids).unwrap_or_default(),
                 created_at: store::now_ms(),
             });
@@ -409,17 +411,26 @@ impl Downloader {
         let pid = format!("sp-{}-{}", col.kind, col.id);
         let idx = self.lib.key_index();
         let mut ordered: Vec<String> = Vec::new();
+        let mut keys: Vec<Vec<String>> = Vec::new();
         for t in &col.tracks {
             let id = idx.get(&t.source_key).or_else(|| t.spotify_id.as_ref().and_then(|s| idx.get(&format!("sp:{s}")))).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)));
             if let Some(id) = id {
                 if !ordered.contains(id) {
                     ordered.push(id.clone());
+                    keys.push(itrack_keys(t));
                 }
             }
         }
         let complete = col.complete;
         self.lib.edit_playlist(&pid, |p| {
-            if complete {
+            if p.edited {
+                // you edited it in DK.FM: keep your order and removals, only add songs that are new
+                for (id, k) in ordered.iter().zip(&keys) {
+                    if !p.track_ids.contains(id) && !k.iter().any(|k| p.removed.contains(k)) {
+                        p.track_ids.push(id.clone());
+                    }
+                }
+            } else if complete {
                 p.track_ids = ordered;
             } else {
                 let rest: Vec<String> = p.track_ids.iter().filter(|id| !ordered.contains(id)).cloned().collect();
@@ -472,7 +483,7 @@ impl Downloader {
         let Fetched::Collection(col) = sources::fetch_any(url, &self.creds())? else { return Ok(0) };
         let idx = self.lib.key_index();
         let have = |t: &ITrack| idx.contains_key(&t.source_key) || t.spotify_id.as_ref().map(|s| idx.contains_key(&format!("sp:{s}"))).unwrap_or(false) || idx.contains_key(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title));
-        let missing: Vec<usize> = col.tracks.iter().enumerate().filter(|(_, t)| !have(t)).map(|(i, _)| i).collect();
+        let missing: Vec<usize> = col.tracks.iter().enumerate().filter(|(_, t)| !have(t) && !itrack_keys(t).iter().any(|k| p.removed.contains(k))).map(|(i, _)| i).collect();
         let n = missing.len();
         if n > 0 {
             self.notices.lock().push(format!("Auto-sync: {n} new song{} from \"{}\"", if n == 1 { "" } else { "s" }, p.name));
@@ -482,6 +493,10 @@ impl Downloader {
         }
         Ok(n)
     }
+}
+
+fn itrack_keys(t: &ITrack) -> Vec<String> {
+    crate::library::track_keys(Some(&t.source_key), t.spotify_id.as_deref(), t.youtube_id.as_deref(), t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)
 }
 
 fn apply_keys(lt: &mut store::Track, t: &ITrack, yid: Option<String>) {

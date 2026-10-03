@@ -4,6 +4,7 @@
 pub mod browser;
 pub mod cjk;
 pub mod deck;
+pub mod dupes;
 pub mod eqpanel;
 pub mod import;
 pub mod lyrics;
@@ -581,6 +582,11 @@ impl App {
                 "import" => self.browser.set_view(browser::View::Import),
                 "downloads" => self.browser.set_view(browser::View::Downloads),
                 "albums" => self.browser.set_view(browser::View::Albums),
+                "dupes" => self.browser.set_view(browser::View::Duplicates),
+                "playlist" => {
+                    let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
+                    if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
+                }
                 "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Appearance)),
                 "palette" => self.palette = Some(palette::PaletteState { query: std::env::var("DKFM_QUERY").unwrap_or_default(), ..Default::default() }),
                 "mini" => self.toggle_mini(ctx),

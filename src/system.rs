@@ -9,6 +9,40 @@ pub static HWND: AtomicIsize = AtomicIsize::new(0);
 pub static HIDDEN: AtomicBool = AtomicBool::new(false);
 pub static CTX: Mutex<Option<eframe::egui::Context>> = Mutex::new(None);
 
+/// Send a file to the Recycle Bin / Trash (never a permanent delete).
+pub fn trash(path: &std::path::Path) -> Result<(), String> {
+    #[cfg(windows)]
+    unsafe {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::{SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FO_DELETE, SHFILEOPSTRUCTW};
+        let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
+        from.extend([0, 0]); // double-NUL terminated list
+        let mut op: SHFILEOPSTRUCTW = std::mem::zeroed();
+        op.wFunc = FO_DELETE as _;
+        op.pFrom = from.as_ptr();
+        op.fFlags = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as _;
+        let r = SHFileOperationW(&mut op);
+        if r != 0 || op.fAnyOperationsAborted != 0 {
+            return Err(format!("Could not move {} to the Recycle Bin (error {r})", path.display()));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let home = dirs::home_dir().ok_or("no home folder")?;
+        let dir = if cfg!(target_os = "macos") { home.join(".Trash") } else { dirs::data_dir().unwrap_or_else(|| home.join(".local/share")).join("Trash/files") };
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let name = path.file_name().ok_or("bad path")?.to_string_lossy().into_owned();
+        let mut dest = dir.join(&name);
+        let mut n = 1;
+        while dest.exists() {
+            dest = dir.join(format!("{n} {name}"));
+            n += 1;
+        }
+        std::fs::rename(path, &dest).or_else(|_| std::fs::copy(path, &dest).and_then(|_| std::fs::remove_file(path))).map_err(|e| e.to_string())
+    }
+}
+
 /// Bring the window back (works even when the GUI loop is idle because the window is hidden).
 pub fn show_window() {
     HIDDEN.store(false, Ordering::Relaxed);
@@ -307,5 +341,16 @@ pub fn cleanup_old() {
         if cache.exists() && !exe.starts_with(&cache) {
             let _ = std::fs::remove_dir_all(cache);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn trash_moves_file_away() {
+        let f = std::env::temp_dir().join("dkfm-trash-test.txt");
+        std::fs::write(&f, b"DK.FM recycle bin test - safe to delete").unwrap();
+        super::trash(&f).unwrap();
+        assert!(!f.exists());
     }
 }

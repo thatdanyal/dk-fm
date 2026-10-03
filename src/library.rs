@@ -43,6 +43,20 @@ pub fn ta_key(artist: &str, title: &str) -> String {
     format!("ta:{}|{}", n(&main_artist(artist)), n(title))
 }
 
+/// Every key a song is known by (source, Spotify, YouTube, artist+title).
+pub fn track_keys(source_key: Option<&str>, spotify_id: Option<&str>, youtube_id: Option<&str>, artist: &str, title: &str) -> Vec<String> {
+    let mut k: Vec<String> = Vec::with_capacity(4);
+    k.extend(source_key.filter(|s| !s.is_empty()).map(String::from));
+    k.extend(spotify_id.map(|s| format!("sp:{s}")));
+    k.extend(youtube_id.map(|s| format!("yt:{s}")));
+    k.push(ta_key(artist, title));
+    k
+}
+
+fn keys_of(t: &Track) -> Vec<String> {
+    track_keys(t.source_key.as_deref(), t.spotify_id.as_deref(), t.youtube_id.as_deref(), &t.artist, &t.title)
+}
+
 pub fn main_artist(a: &str) -> String {
     RE_ARTIST_SPLIT.split(a).next().unwrap_or("Unknown").trim().to_string()
 }
@@ -367,6 +381,142 @@ impl Library {
         self.changed();
     }
 
+    /// Add songs to the end of a playlist (skipping ones already in it). Returns how many.
+    pub fn playlist_add(&self, pid: &str, ids: &[String]) -> usize {
+        let mut d = self.data.write();
+        let keys: Vec<String> = ids.iter().filter_map(|i| d.tracks.get(i)).flat_map(keys_of).collect();
+        let Some(p) = d.playlists.iter_mut().find(|p| p.id == pid) else { return 0 };
+        let before = p.track_ids.len();
+        for id in ids {
+            if !p.track_ids.contains(id) {
+                p.track_ids.push(id.clone());
+            }
+        }
+        let n = p.track_ids.len() - before;
+        if p.is_imported() && n > 0 {
+            p.edited = true;
+            p.removed.retain(|k| !keys.contains(k));
+        }
+        drop(d);
+        self.changed();
+        n
+    }
+
+    /// Remove songs from a playlist; a synced playlist remembers them so sync won't re-add them.
+    pub fn playlist_remove(&self, pid: &str, ids: &[String]) {
+        let mut d = self.data.write();
+        let keys: Vec<String> = ids.iter().filter_map(|i| d.tracks.get(i)).flat_map(keys_of).collect();
+        let Some(p) = d.playlists.iter_mut().find(|p| p.id == pid) else { return };
+        p.track_ids.retain(|x| !ids.contains(x));
+        if p.is_imported() {
+            p.edited = true;
+            for k in keys {
+                if !p.removed.contains(&k) {
+                    p.removed.push(k);
+                }
+            }
+        }
+        drop(d);
+        self.changed();
+    }
+
+    /// Move songs (keeping their relative order) to just before `before` (None = the end).
+    pub fn playlist_move(&self, pid: &str, moving: &[String], before: Option<&str>) {
+        let mut d = self.data.write();
+        let Some(p) = d.playlists.iter_mut().find(|p| p.id == pid) else { return };
+        if before.map(|b| moving.iter().any(|m| m == b)).unwrap_or(false) {
+            return;
+        }
+        let picked: Vec<String> = p.track_ids.iter().filter(|x| moving.contains(x)).cloned().collect();
+        p.track_ids.retain(|x| !moving.contains(x));
+        let at = before.and_then(|b| p.track_ids.iter().position(|x| x == b)).unwrap_or(p.track_ids.len());
+        p.track_ids.splice(at..at, picked);
+        if p.is_imported() {
+            p.edited = true;
+        }
+        drop(d);
+        self.changed();
+    }
+
+    /// Copies of the same song (same artist + title, lengths within 4 s), best copy first:
+    /// lossless, then higher bitrate, then has cover art, then most played.
+    pub fn duplicate_groups(&self) -> Vec<Vec<String>> {
+        let d = self.data.read();
+        let mut by: HashMap<String, Vec<&Track>> = HashMap::new();
+        for t in d.tracks.values().filter(|t| !t.title.trim().is_empty()) {
+            by.entry(ta_key(&t.artist, &t.title)).or_default().push(t);
+        }
+        let quality = |t: &Track| {
+            let lossless = matches!(t.codec.to_lowercase().as_str(), c if c.contains("flac") || c.contains("alac") || c.contains("wav") || c.contains("pcm") || c.contains("aiff"));
+            (lossless, t.bitrate.unwrap_or(0), t.cover.is_some(), d.stats.get(&t.id).map(|s| s.plays).unwrap_or(0))
+        };
+        let mut out: Vec<Vec<String>> = Vec::new();
+        let mut take = |g: &mut Vec<&Track>| {
+            if g.len() > 1 {
+                g.sort_by(|a, b| quality(b).cmp(&quality(a)));
+                out.push(g.iter().map(|t| t.id.clone()).collect());
+            }
+            g.clear();
+        };
+        for (_, mut v) in by.into_iter().filter(|(_, v)| v.len() > 1) {
+            v.sort_by(|a, b| a.duration.total_cmp(&b.duration));
+            let mut g: Vec<&Track> = Vec::new();
+            for t in v {
+                if g.last().map(|l| t.duration - l.duration > 4.0).unwrap_or(false) {
+                    take(&mut g);
+                }
+                g.push(t);
+            }
+            take(&mut g);
+        }
+        out.sort_by_cached_key(|g| d.tracks.get(&g[0]).map(|t| (t.artist.to_lowercase(), t.title.to_lowercase())).unwrap_or_default());
+        out
+    }
+
+    /// Keep `keep` and fold the other copies into it (plays, likes, playlists, source keys),
+    /// dropping them from the library. Returns the dropped copies' files.
+    pub fn merge_duplicates(&self, keep: &str, others: &[String]) -> Vec<PathBuf> {
+        let mut d = self.data.write();
+        let mut paths = Vec::new();
+        for o in others.iter().filter(|o| *o != keep) {
+            let Some(t) = d.tracks.remove(o) else { continue };
+            paths.push(PathBuf::from(&t.path));
+            if let Some(k) = d.tracks.get_mut(keep) {
+                k.spotify_id = k.spotify_id.take().or(t.spotify_id);
+                k.youtube_id = k.youtube_id.take().or(t.youtube_id);
+                k.source_key = k.source_key.take().or(t.source_key);
+            }
+            if let Some(s) = d.stats.remove(o) {
+                let k = d.stats.entry(keep.to_string()).or_default();
+                k.plays += s.plays;
+                k.skips += s.skips;
+                k.liked |= s.liked;
+                k.last_played = k.last_played.max(s.last_played);
+            }
+            for p in d.playlists.iter_mut() {
+                if let Some(i) = p.track_ids.iter().position(|x| x == o) {
+                    if p.track_ids.iter().any(|x| x == keep) {
+                        p.track_ids.remove(i);
+                    } else {
+                        p.track_ids[i] = keep.to_string();
+                    }
+                }
+            }
+        }
+        drop(d);
+        self.changed();
+        paths
+    }
+
+    pub fn set_liked(&self, ids: &[String], liked: bool) {
+        let mut d = self.data.write();
+        for id in ids {
+            d.stats.entry(id.clone()).or_default().liked = liked;
+        }
+        drop(d);
+        self.changed();
+    }
+
     pub fn upsert_playlist(&self, pl: Playlist) -> String {
         let mut d = self.data.write();
         let id = pl.id.clone();
@@ -430,4 +580,49 @@ fn mtime_ms(p: &Path) -> f64 {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs_f64() * 1000.0)
         .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn track(id: &str, artist: &str, title: &str, dur: f64, codec: &str, kbps: u32) -> Track {
+        Track { id: id.into(), path: format!("/x/{id}.m4a"), artist: artist.into(), title: title.into(), duration: dur, codec: codec.into(), bitrate: Some(kbps), spotify_id: Some(format!("S{id}")), ..Default::default() }
+    }
+
+    #[test]
+    fn playlist_edits_and_duplicates() {
+        let dir = std::env::temp_dir().join(format!("dkfm-libtest-{}", std::process::id()));
+        std::env::set_var("DKFM_USER_DATA", &dir);
+        let lib = Library::load();
+        {
+            let mut d = lib.data.write();
+            for t in [track("a", "Sade", "Smooth Operator", 258.0, "AAC", 128), track("b", "Sade", "Smooth Operator", 259.5, "FLAC", 900), track("c", "Sade", "Smooth Operator (Live)", 400.0, "AAC", 128), track("d", "Drake", "Hold On", 230.0, "AAC", 256), track("e", "Drake", "Hold On", 300.0, "AAC", 256)] {
+                d.tracks.insert(t.id.clone(), t);
+            }
+            d.stats.insert("a".into(), Stat { plays: 5, liked: true, ..Default::default() });
+            d.playlists.push(Playlist { id: "p".into(), name: "P".into(), track_ids: vec!["a".into(), "d".into(), "e".into()], spotify_url: Some("https://open.spotify.com/playlist/x".into()), ..Default::default() });
+        }
+        // reorder: move e before a
+        lib.playlist_move("p", &["e".into()], Some("a"));
+        assert_eq!(lib.data.read().playlists[0].track_ids, ["e", "a", "d"]);
+        // remove marks a synced playlist edited and remembers the song's keys
+        lib.playlist_remove("p", &["d".into()]);
+        let p = lib.data.read().playlists[0].clone();
+        assert!(p.edited && p.track_ids == ["e", "a"] && p.removed.contains(&"sp:Sd".to_string()));
+        // adding it back forgets the removal
+        assert_eq!(lib.playlist_add("p", &["d".into(), "a".into()]), 1);
+        assert!(!lib.data.read().playlists[0].removed.contains(&"sp:Sd".to_string()));
+        // duplicates: a+b (same length, FLAC first); live version and the 70 s longer "Hold On" stay apart
+        let g = lib.duplicate_groups();
+        assert_eq!(g, vec![vec!["b".to_string(), "a".to_string()]]);
+        // merge keeps b, carries plays/like, swaps a for b in the playlist
+        let files = lib.merge_duplicates("b", &g[0]);
+        assert_eq!(files, vec![PathBuf::from("/x/a.m4a")]);
+        let d = lib.data.read();
+        assert!(!d.tracks.contains_key("a") && d.stats["b"].plays == 5 && d.stats["b"].liked);
+        assert_eq!(d.playlists[0].track_ids, ["e", "b", "d"]);
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

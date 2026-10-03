@@ -187,6 +187,10 @@ pub struct Playlist {
     #[serde(default, skip_serializing_if = "Option::is_none")] pub auto_sync: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")] pub last_sync: Option<f64>,
     #[serde(default)] pub created_at: f64,
+    /// you changed this synced playlist in DK.FM: sync then only adds new songs from the source
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub edited: bool,
+    /// songs you removed from it (song keys, so sync never brings them back)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub removed: Vec<String>,
 }
 
 impl Playlist {

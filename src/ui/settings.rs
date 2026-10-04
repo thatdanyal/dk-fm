@@ -928,6 +928,14 @@ const SOURCE_NAMES: [(&str, &str); 4] = [("library", "Your library"), ("songs", 
 fn search(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let s = app.settings.lock().clone();
+    caption(ui, &pal, "FIND SONGS ONLINE");
+    dim(ui, &pal, "The FIND SONGS tab searches YouTube and lists versions to pick from (clean, explicit, live...).");
+    row(ui, &pal, "Versions per search", |ui| {
+        if let Some(n) = choice(ui, &pal, &s.web_results, &[(1, "1"), (3, "3"), (5, "5"), (10, "10")]) {
+            app.edit_settings(|s| s.web_results = n);
+        }
+    });
+    spacer(ui);
     caption(ui, &pal, "ADD SONGS SEARCH");
     dim(ui, &pal, "The ADD SONGS box in a playlist searches your library and finds new songs online.");
     row(ui, &pal, "Results per search", |ui| {

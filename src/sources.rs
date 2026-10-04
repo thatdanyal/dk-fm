@@ -22,6 +22,8 @@ pub struct ITrack {
     pub youtube_id: Option<String>,
     pub direct_url: Option<String>,
     pub source_key: String,
+    /// the title as the source wrote it, "(Clean)" / "(Live)" and all (online searches only)
+    pub raw_title: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -592,8 +594,11 @@ pub fn search(q: &str, source: &str, n: usize) -> Result<Vec<ITrack>, String> {
                 return Some(ITrack { title, artists: vec![artist], duration_ms: Some((secs * 1000.0) as u64), cover, direct_url: Some(link.into()), source_key: format!("sc:{id}"), ..Default::default() });
             }
             let id = e["id"].as_str().filter(|i| i.len() == 11)?;
-            let (artist, title) = split_title(e["title"].as_str().unwrap_or(""), channel);
-            Some(yt_track(id, title, vec![artist], String::new(), e["duration"].as_f64(), None, source))
+            let raw = e["title"].as_str().unwrap_or("");
+            let (artist, title) = split_title(raw, channel);
+            let mut t = yt_track(id, title, vec![artist], String::new(), e["duration"].as_f64(), None, source);
+            t.raw_title = raw.to_string();
+            Some(t)
         })
         .take(n)
         .collect();
@@ -601,6 +606,59 @@ pub fn search(q: &str, source: &str, n: usize) -> Result<Vec<ITrack>, String> {
         return Err("No results".into());
     }
     Ok(out)
+}
+
+static RE_VERSION: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
+    [
+        (r"\b(explicit|dirty|uncensored)\b", "EXPLICIT"),
+        (r"\b(clean|censored|radio edit|radio version)\b", "CLEAN"),
+        (r"\b(instrumental|karaoke|backing track|no vocals|beat only)\b", "INSTRUMENTAL"),
+        (r"\b(a ?cappella|vocals only)\b", "A CAPPELLA"),
+        (r"\blive\b|\bconcert\b", "LIVE"),
+        (r"\b(acoustic|unplugged)\b", "ACOUSTIC"),
+        (r"\b(sped up|nightcore)\b", "SPED UP"),
+        (r"\b(slowed|reverb)\b", "SLOWED"),
+        (r"\bremix\b|\bbootleg\b", "REMIX"),
+        (r"\bcover\b", "COVER"),
+        (r"\b(official (music )?video|music video|mv)\b", "MUSIC VIDEO"),
+        (r"\blyrics?\b", "LYRICS VIDEO"),
+        (r"\b(extended|long version)\b", "EXTENDED"),
+    ]
+    .into_iter()
+    .map(|(r, l)| (Regex::new(&format!("(?i){r}")).unwrap(), l))
+    .collect()
+});
+
+/// The title without anything in brackets, for telling versions of one song apart.
+fn base_title(t: &ITrack) -> String {
+    static BR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s*[\(\[][^\)\]]*[\)\]]").unwrap());
+    BR.replace_all(&t.title, "").trim().to_lowercase()
+}
+
+/// Labels for one of several online versions of a song (EXPLICIT, CLEAN, INSTRUMENTAL, LIVE...),
+/// from its title and how it compares with the other results. Never picks one: it only tells
+/// them apart.
+pub fn version_tags(t: &ITrack, all: &[ITrack]) -> Vec<&'static str> {
+    let raw = if t.raw_title.is_empty() { &t.title } else { &t.raw_title };
+    let mut tags: Vec<&'static str> = RE_VERSION.iter().filter(|(r, _)| r.is_match(raw)).map(|(_, l)| *l).collect();
+    if t.explicit && !tags.contains(&"EXPLICIT") {
+        tags.insert(0, "EXPLICIT");
+    }
+    // YouTube Music marks only the explicit one: the same plain song without the mark is the
+    // clean one
+    let base = base_title(t);
+    let explicit_twin = all.iter().any(|o| o.explicit && o.source_key != t.source_key && base_title(o) == base);
+    if !t.explicit && explicit_twin && tags.is_empty() {
+        tags.push("CLEAN");
+    }
+    // "lyrics video" is noise once something more telling is known
+    if tags.len() > 1 {
+        tags.retain(|x| *x != "LYRICS VIDEO");
+    }
+    if tags.contains(&"EXPLICIT") {
+        tags.retain(|x| *x != "CLEAN");
+    }
+    tags
 }
 
 fn yt_track(id: &str, title: String, artists: Vec<String>, album: String, secs: Option<f64>, cover: Option<String>, source: &str) -> ITrack {
@@ -643,8 +701,9 @@ fn music_search(q: &str, n: usize) -> Result<Vec<ITrack>, String> {
         let thumb = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"].as_array().and_then(|a| a.last()).and_then(|t| t["url"].as_str());
         // album art: ask for a 544px copy of the square thumbnail
         let cover = thumb.map(|u| RE_THUMB_SIZE.replace(u, "=w544-h544").into_owned());
-        let mut t = yt_track(id, title, if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs");
+        let mut t = yt_track(id, title.clone(), if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs");
         t.explicit = r["badges"].to_string().contains("MUSIC_EXPLICIT_BADGE");
+        t.raw_title = title;
         out.push(t);
         if out.len() >= n {
             break;
@@ -874,6 +933,32 @@ pub fn rank(cands: Vec<Cand>, t: &ITrack) -> Vec<Cand> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn version_labels() {
+        let mk = |key: &str, title: &str, raw: &str, explicit: bool| ITrack { title: title.into(), raw_title: raw.into(), explicit, source_key: key.into(), ..Default::default() };
+        let all = vec![
+            mk("yt:a", "Song", "Song", true),
+            mk("yt:b", "Song", "Song", false),
+            mk("yt:c", "Song", "Artist - Song (Instrumental)", false),
+            mk("yt:d", "Song", "Artist - Song (Live at Wembley)", false),
+            mk("yt:e", "Song", "Artist - Song (Clean Version)", false),
+            mk("yt:f", "Song", "Artist - Song (Official Lyric Video)", false),
+            mk("yt:g", "Song", "Artist - Song (Explicit) [Official Video]", false),
+        ];
+        let tags: Vec<Vec<&str>> = all.iter().map(|t| version_tags(t, &all)).collect();
+        assert_eq!(tags[0], vec!["EXPLICIT"]);
+        assert_eq!(tags[1], vec!["CLEAN"]);
+        assert_eq!(tags[2], vec!["INSTRUMENTAL"]);
+        assert_eq!(tags[3], vec!["LIVE"]);
+        assert_eq!(tags[4], vec!["CLEAN"]);
+        assert_eq!(tags[5], vec!["LYRICS VIDEO"]);
+        assert_eq!(tags[6], vec!["EXPLICIT", "MUSIC VIDEO"]);
+        // nothing to compare with: no label at all
+        assert!(version_tags(&mk("yt:x", "Other", "Other", false), &all).is_empty());
+    }
+
     /// Real online search on both tabs (network + yt-dlp): `cargo test -- --ignored`
     /// with DKFM_USER_DATA pointing at a test profile.
     #[test]

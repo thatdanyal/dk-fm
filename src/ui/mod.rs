@@ -23,6 +23,7 @@ pub mod settings;
 pub mod sharing;
 pub mod stats;
 pub mod theme;
+pub mod websearch;
 pub mod welcome;
 pub mod widgets;
 

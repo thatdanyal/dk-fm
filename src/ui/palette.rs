@@ -90,6 +90,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         (format!("Private listening: {}", if app.lib.private.load(std::sync::atomic::Ordering::Relaxed) { "on > off" } else { "off > on" }), "incognito stats history record secret", "🔒", Act::Private),
         ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
         ("Now playing (full screen)".into(), "big cover lyrics fullscreen f11 karaoke", "🗖", Act::NowPlaying),
+        ("Find songs online (pick the version)".into(), "search youtube web download get new song clean explicit live instrumental version", "🌐", Act::View(View::Web)),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
         ("Open a playlist file from a friend (.dkfm)…".into(), "share shared import friend code", "📂", Act::OpenShare),

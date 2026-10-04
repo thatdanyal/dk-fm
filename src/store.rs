@@ -82,6 +82,7 @@ fn d_one() -> f32 { 1.0 }
 fn d_songs() -> String { "songs".into() }
 fn d_ten() -> u32 { 10 }
 fn d_five() -> u32 { 5 }
+fn d_three() -> u32 { 3 }
 fn d_sources() -> Vec<String> { ["library", "songs", "youtube"].map(String::from).to_vec() }
 fn d_normal() -> String { "normal".into() }
 fn d_pixel() -> String { "pixel".into() }
@@ -175,6 +176,9 @@ pub struct Settings {
     /// "find new songs" in a playlist: "songs" (YouTube Music) or "youtube", and how many results
     #[serde(default = "d_songs")] pub search_source: String,
     #[serde(default = "d_ten")] pub search_results: u32,
+    /// FIND SONGS (web search): how many versions to show, and where ("songs" | "youtube")
+    #[serde(default = "d_three")] pub web_results: u32,
+    #[serde(default = "d_songs")] pub web_source: String,
     /// playlist songs were last added to (listed first in Ctrl+K's playlist picker)
     #[serde(default)] pub last_playlist: String,
     /// where "add songs" looks, in order: library, songs (YouTube Music), youtube, soundcloud

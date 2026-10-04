@@ -46,7 +46,7 @@ enum Btn {
 }
 
 /// One result row; returns true when its button was clicked. `tip` = what + GET does.
-fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>, btn: Btn, tip: &str) -> bool {
+fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, tags: &[&str], sub: &str, secs: Option<f64>, btn: Btn, tip: &str) -> bool {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click());
     let br = Rect::from_min_size(Pos2::new(r.right() - 92.0, r.top() + 3.0), Vec2::new(86.0, 20.0));
     let over = resp.hovered() && ui.input(|i| i.pointer.hover_pos()).map(|q| br.contains(q)).unwrap_or(false);
@@ -57,9 +57,17 @@ fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, sub: &str, secs: Option<f64>
     let cy = r.center().y;
     let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 160.0, r.bottom())));
     let g = clip.layout_no_wrap(title.to_string(), vt(19.0), pal.text);
-    let gw = g.size().x;
+    let mut x = r.left() + 8.0 + g.size().x;
     clip.galley(Pos2::new(r.left() + 8.0, cy - g.size().y / 2.0), g, pal.text);
-    clip.text(Pos2::new(r.left() + 16.0 + gw, cy), Align2::LEFT_CENTER, sub, vt(17.0), pal.dim);
+    // version labels (EXPLICIT, CLEAN, LIVE...) as small boxed tags
+    for t in tags {
+        let tg = clip.layout_no_wrap(t.to_string(), px(5.0), pal.accent2);
+        let tr = Rect::from_min_size(Pos2::new(x + 8.0, cy - 7.0), Vec2::new(tg.size().x + 8.0, 14.0));
+        frame_rect(&clip, tr, 1.0, if *t == "EXPLICIT" { pal.accent } else { pal.accent2 });
+        clip.galley(Pos2::new(tr.left() + 4.0, cy - tg.size().y / 2.0), tg, if *t == "EXPLICIT" { pal.accent } else { pal.accent2 });
+        x = tr.right();
+    }
+    clip.text(Pos2::new(x + 8.0, cy), Align2::LEFT_CENTER, sub, vt(17.0), pal.dim);
     if let Some(s) = secs {
         p.text(Pos2::new(r.right() - 104.0, cy), Align2::RIGHT_CENTER, fmt_time(s), vt(17.0), pal.dim);
     }
@@ -171,7 +179,7 @@ fn library_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, q: &str, gen: u64, w:
     for id in &local {
         let Some(t) = app.lib.track(id) else { continue };
         let inp = pl.track_ids.contains(id);
-        if row(ui, &pal, w, &t.title, format!("{} · {}", t.artist, t.album).trim_end_matches(" · "), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "") {
+        if row(ui, &pal, w, &t.title, &[], format!("{} · {}", t.artist, t.album).trim_end_matches(" · "), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "") {
             app.lib.playlist_add(&pl.id, std::slice::from_ref(id));
             app.edit_settings(|s| s.last_playlist = pl.id.clone());
         }
@@ -257,6 +265,11 @@ pub fn owned_ids(app: &App, found: &[ITrack]) -> Vec<Option<String>> {
 /// Online results, each with + ADD (you have it) / + GET (download it, into `pl` if given) or its
 /// download progress. Returns true when a button was clicked.
 pub fn result_rows(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, found: &[ITrack], owned: &[Option<String>], w: f32) -> bool {
+    result_rows_tagged(app, ui, pl, found, owned, &[], w)
+}
+
+/// `result_rows` with labels per result (see `sources::version_tags`).
+pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, found: &[ITrack], owned: &[Option<String>], tags: &[Vec<&str>], w: f32) -> bool {
     let pal = app.pal;
     // download progress of results being fetched
     let jobs: HashMap<String, (TStatus, f32)> = {
@@ -284,7 +297,8 @@ pub fn result_rows(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, found: &[I
             (None, None) => Btn::Get,
         };
         let sub = [t.artists.join(", "), t.album.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
-        if row(ui, &pal, w, &t.title, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn, tip) {
+        let tg: &[&str] = tags.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
+        if row(ui, &pal, w, &t.title, tg, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn, tip) {
             clicked = true;
             match (have, pl) {
                 (Some(id), Some(pl)) => {

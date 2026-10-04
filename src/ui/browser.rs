@@ -28,6 +28,8 @@ pub enum View {
     Import,
     Downloads,
     Duplicates,
+    /// FIND SONGS: search YouTube for versions of a song to download
+    Web,
 }
 
 /// Songs being dragged (to reorder a playlist, or onto a sidebar playlist).
@@ -103,8 +105,8 @@ pub const COLUMNS: [Col; 11] = [
 /// Screens in the tab strip above the library (the sidebar lists only playlists):
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
-pub const NAV: [(&str, &str, &str, &str, &str); 11] = [
-    ("home", "tab", "🏠", "HOME", "Home"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
+pub const NAV: [(&str, &str, &str, &str, &str); 12] = [
+    ("home", "tab", "🏠", "HOME", "Home"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
     ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
@@ -133,6 +135,7 @@ fn nav_of(v: &View) -> Option<&'static str> {
         View::Import => "import",
         View::Downloads => "downloads",
         View::Duplicates => "dupes",
+        View::Web => "web",
         View::Liked | View::Playlist(_) => return None,
     })
 }
@@ -153,6 +156,7 @@ pub fn view_for(key: &str) -> Option<View> {
         "dupes" => View::Duplicates,
         "import" => View::Import,
         "downloads" => View::Downloads,
+        "web" => View::Web,
         _ => return None,
     })
 }
@@ -171,13 +175,14 @@ pub struct BrowserState {
     artists: Vec<(String, String, Option<String>, usize)>,
     pub dupes: super::dupes::DupeState,
     pub add: super::addsongs::AddBox,
+    pub web: super::websearch::WebState,
     side_key: Option<(u64, u64, String)>,
     side_rows: Vec<SideRow>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), side_key: None, side_rows: Vec::new() }
+        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new() }
     }
 }
 
@@ -220,6 +225,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             View::Import => super::import::show(app, ui),
             View::Downloads => super::import::downloads(app, ui),
             View::Duplicates => super::dupes::show(app, ui),
+            View::Web => super::websearch::show(app, ui),
             _ => tracks_view(app, ui),
         }
     });

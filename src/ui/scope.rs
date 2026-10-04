@@ -40,6 +40,13 @@ impl ScopeState {
     pub fn invalidate(&mut self) {
         self.w = 0;
     }
+    /// Drop the texture and pixel buffers (rebuilt when it's on screen again).
+    pub fn release(&mut self) {
+        self.tex = None;
+        self.buf = Vec::new();
+        self.glow = Vec::new();
+        self.w = 0;
+    }
     pub fn cycle(&mut self, player: &Player) {
         let i = MODES.iter().position(|m| m.0 == self.mode).unwrap_or(0);
         self.mode = MODES[(i + 1) % MODES.len()].0.into();

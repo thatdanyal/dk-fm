@@ -22,6 +22,12 @@ pub struct ImportState {
     collapsed: HashSet<String>,
 }
 
+impl ImportState {
+    pub fn release(&mut self) {
+        self.cover = None;
+    }
+}
+
 fn library_keys(app: &App) -> HashSet<String> {
     app.lib.key_index().into_keys().collect()
 }

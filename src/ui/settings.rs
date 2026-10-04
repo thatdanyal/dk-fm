@@ -443,6 +443,10 @@ fn look(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.density = d);
         }
     });
+    let mut lc = s.list_covers;
+    if switch(ui, &pal, &mut lc, "ALBUM COVERS NEXT TO SONG TITLES") {
+        app.edit_settings(|s| s.list_covers = lc);
+    }
     spacer(ui);
     caption(ui, &pal, "CRT EFFECTS");
     let (mut sc, mut gl) = (s.scanlines, s.glow);
@@ -1224,10 +1228,17 @@ fn system_tab(app: &mut App, ui: &mut Ui) {
     if cfg!(target_os = "linux") {
         dim(ui, &pal, "The tray icon isn't available on Linux; closing the window quits DK.FM.");
     } else {
-        let mut t = app.settings.lock().close_to_tray;
-        if switch(ui, &pal, &mut t, "CLOSE BUTTON KEEPS MUSIC PLAYING IN THE TRAY") {
-            app.edit_settings(|s| s.close_to_tray = t);
-        }
+        let mode = app.settings.lock().close_mode().to_string();
+        row(ui, &pal, "The X button", |ui| {
+            if let Some(m) = choice(ui, &pal, &mode, &[("playing".to_string(), "TRAY WHILE PLAYING"), ("tray".to_string(), "ALWAYS TRAY"), ("quit".to_string(), "QUITS")]) {
+                app.edit_settings(|s| s.close_mode = m);
+            }
+        });
+        dim(ui, &pal, match mode.as_str() {
+            "tray" => "Closing the window keeps DK.FM running in the tray, even when paused.",
+            "quit" => "Closing the window quits DK.FM (music stops).",
+            _ => "Closing the window while music plays keeps it playing in the tray; with nothing playing, DK.FM quits completely.",
+        });
         dim(ui, &pal, "Right-click the tray icon for play/pause, next and Quit.");
     }
     ui.add_space(10.0);

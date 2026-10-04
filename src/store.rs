@@ -160,6 +160,9 @@ pub struct Settings {
     #[serde(default)] pub spotify_user: String,
     #[serde(default = "d_true")] pub auto_update: bool,
     #[serde(default = "d_true")] pub close_to_tray: bool,
+    /// the window's X button: "playing" (keep playing in the tray while music plays, else quit),
+    /// "tray" (always to the tray) or "quit". Empty = from the older close_to_tray switch.
+    #[serde(default)] pub close_mode: String,
     #[serde(default)] pub start_at_login: bool,
     #[serde(default)] pub tray_hint_shown: bool,
     #[serde(default)] pub player: PlayerOpts,
@@ -185,6 +188,10 @@ pub struct Settings {
     #[serde(default = "d_one")] pub zoom: f32,
     /// track list rows: "compact" | "comfortable"
     #[serde(default = "d_comfy")] pub density: String,
+    /// lyrics text size on top of fitting the panel (Ctrl+scroll over the lyrics)
+    #[serde(default = "d_one")] pub lyrics_zoom: f32,
+    /// album covers next to song titles in lists
+    #[serde(default = "d_true")] pub list_covers: bool,
     #[serde(default)] pub custom_themes: Vec<CustomTheme>,
     /// visualizer colours: none = follow the theme, else [low, mid, peak] hex
     #[serde(default)] pub vis_colors: Option<[String; 3]>,
@@ -230,6 +237,13 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn close_mode(&self) -> &str {
+        match self.close_mode.as_str() {
+            "" if self.close_to_tray => "playing",
+            "" => "quit",
+            m => m,
+        }
+    }
     pub fn load() -> Self {
         let mut s: Settings = load_json(&data_dir().join("settings.json"));
         let music = dirs::audio_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Music"));

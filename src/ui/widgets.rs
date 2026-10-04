@@ -148,6 +148,12 @@ impl Covers {
         Self { map: HashMap::new(), order: VecDeque::new(), pending: HashSet::new(), tx, rx, jobs, wake, ctx: None }
     }
 
+    /// Forget every texture (they load again when shown).
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+
     /// Texture for a cover file at `size` px (None while loading).
     pub fn get(&mut self, ctx: &egui::Context, path: PathBuf, name: &str, size: u32) -> Option<egui::TextureId> {
         while let Ok((key, img)) = self.rx.try_recv() {

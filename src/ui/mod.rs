@@ -130,6 +130,59 @@ pub struct App {
     pub nowplaying: bool,
 }
 
+/// The deck (play / pause, volume) is always on screen and big enough to use: it's put back if a
+/// layout lacks it, gets its own pane when dropped among other panels' tabs, and the pane it's in
+/// can't be squeezed below the compact deck's size.
+pub fn keep_deck(dock: &mut DockState<Tab>) {
+    const MIN: Vec2 = Vec2::new(230.0, 48.0);
+    let Some((surf, node, _)) = dock.find_tab(&Tab::Deck) else {
+        let tree = dock.main_surface_mut();
+        if tree.is_empty() {
+            *dock = default_dock();
+        } else {
+            tree.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
+        }
+        return;
+    };
+    if !surf.is_main() {
+        return;
+    }
+    let tree = dock.main_surface_mut();
+    // tabbed together with other panels: give it its own pane above them
+    if let egui_dock::Node::Leaf { tabs, .. } = &tree[node] {
+        if tabs.len() > 1 {
+            if let Some(t) = tree.find_tab(&Tab::Deck) {
+                tree.remove_tab(t);
+                tree.split_above(node, 0.4, vec![Tab::Deck]);
+            }
+            return;
+        }
+    }
+    let Some(r) = tree[node].rect().filter(|r| r.is_positive()) else { return };
+    let (mut need_w, mut need_h) = (r.width() < MIN.x, r.height() < MIN.y);
+    let mut child = node;
+    while let Some(parent) = child.parent() {
+        if !need_w && !need_h {
+            break;
+        }
+        let first = parent.left() == child;
+        match &mut tree[parent] {
+            egui_dock::Node::Vertical { rect, fraction, .. } if need_h && rect.height() > MIN.y * 2.0 => {
+                let f = MIN.y / rect.height();
+                *fraction = if first { fraction.max(f) } else { fraction.min(1.0 - f) };
+                need_h = false;
+            }
+            egui_dock::Node::Horizontal { rect, fraction, .. } if need_w && rect.width() > MIN.x * 1.5 => {
+                let f = MIN.x / rect.width();
+                *fraction = if first { fraction.max(f) } else { fraction.min(1.0 - f) };
+                need_w = false;
+            }
+            _ => {}
+        }
+        child = parent;
+    }
+}
+
 pub fn default_dock() -> DockState<Tab> {
     let mut d = DockState::new(vec![Tab::Library]);
     let s = d.main_surface_mut();
@@ -158,6 +211,7 @@ impl App {
             if let Ok(h) = cc.window_handle() {
                 if let RawWindowHandle::Win32(w) = h.as_raw() {
                     system::HWND.store(w.hwnd.get(), Ordering::Relaxed);
+                    crate::taskbar::init(w.hwnd.get(), player.clone());
                 }
             }
         }
@@ -442,6 +496,9 @@ impl App {
     }
 
     pub fn toggle_panel(&mut self, tab: Tab) {
+        if tab == Tab::Deck {
+            return self.show_panel(tab); // always there
+        }
         if let Some(loc) = self.dock.find_tab(&tab) {
             if self.dock.iter_all_tabs().count() > 1 {
                 self.dock.remove_tab(loc);
@@ -473,6 +530,16 @@ impl App {
             ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(self.normal_size.unwrap_or(Vec2::new(1360.0, 860.0))));
         }
+    }
+
+    /// Hidden in the tray: let go of what's only needed on screen (cover textures, the
+    /// visualizer's buffers), so DK.FM keeps very little RAM while it plays in the background.
+    pub fn release_memory(&mut self) {
+        self.covers.clear();
+        self.scope.invalidate();
+        self.scope.release();
+        self.import.release();
+        self.lyrics.trim();
     }
 
     pub fn current_track(&self) -> Option<crate::store::Track> {
@@ -517,7 +584,10 @@ impl App {
                         ui.set_min_width(160.0);
                         for t in Tab::ALL {
                             let on = self.dock.find_tab(&t).is_some();
-                            if ui.button(format!("{} {}", if on { "✔" } else { "  " }, t.name())).clicked() {
+                            let r = ui.add_enabled(t != Tab::Deck, egui::Button::new(format!("{} {}", if on { "✔" } else { "  " }, t.name())));
+                            if t == Tab::Deck {
+                                r.on_disabled_hover_text("Always shown: it has play / pause and the volume");
+                            } else if r.clicked() {
                                 self.toggle_panel(t);
                             }
                         }
@@ -965,8 +1035,12 @@ impl egui_dock::TabViewer for Viewer<'_> {
             Tab::Lyrics => lyrics::show(self.app, ui),
         }
     }
-    fn closeable(&mut self, _tab: &mut Tab) -> bool {
-        self.app.layout_edit
+    fn closeable(&mut self, tab: &mut Tab) -> bool {
+        // the deck has play / pause and the volume: it can be moved and resized, never closed
+        self.app.layout_edit && *tab != Tab::Deck
+    }
+    fn allowed_in_windows(&self, tab: &mut Tab) -> bool {
+        *tab != Tab::Deck
     }
     fn scroll_bars(&self, _tab: &Tab) -> [bool; 2] {
         [false, false]
@@ -993,12 +1067,17 @@ impl eframe::App for App {
         }
         // close button -> tray (unless quitting for real)
         if ctx.input(|i| i.viewport().close_requested()) {
-            let to_tray = self.settings.lock().close_to_tray && cfg!(not(target_os = "linux")) && self.tray.is_some();
+            // the X keeps music playing in the tray; with nothing playing it really quits (so
+            // DK.FM isn't left running in the background), unless you chose otherwise
+            let mode = self.settings.lock().close_mode().to_string();
+            let playing = self.player.status().playing;
+            let to_tray = (mode == "tray" || mode == "playing" && playing) && cfg!(not(target_os = "linux")) && self.tray.is_some();
             if to_tray && !system::QUIT.load(Ordering::Relaxed) {
                 ctx.send_viewport_cmd(ViewportCommand::CancelClose);
                 if self.mini {
                     self.toggle_mini(ctx);
                 }
+                self.release_memory();
                 system::hide_window();
                 if !self.settings.lock().tray_hint_shown {
                     self.edit_settings(|s| s.tray_hint_shown = true);
@@ -1008,6 +1087,13 @@ impl eframe::App for App {
                 self.lib.flush();
                 self.settings.lock().save();
             }
+        }
+        if system::HIDDEN.load(Ordering::Relaxed) && self.frames > 2 {
+            // in the tray: nothing to draw, just keep the tray menu and media overlay current
+            self.sync_os();
+            ticker::set(ctx, 0);
+            self.persist();
+            return;
         }
         self.shortcuts(ctx);
         // Ctrl+V of a friend's code anywhere outside a text box (text boxes check their own)
@@ -1060,6 +1146,7 @@ impl eframe::App for App {
                 if dock.iter_all_tabs().count() == 0 {
                     dock = default_dock();
                 }
+                keep_deck(&mut dock);
                 let changed = serde_json::to_string(&dock).unwrap_or_default() != before;
                 self.dock = dock;
                 if changed {
@@ -1098,21 +1185,7 @@ impl eframe::App for App {
         }
         self.overlays(ctx);
 
-        // tray + OS media overlay
-        let st = self.player.status();
-        let cur = self.current_track();
-        let private = self.lib.private.load(Ordering::Relaxed);
-        if let Some(t) = &self.tray {
-            t.update(&cur.as_ref().map(|t| format!("{} — {}", t.title, t.artist)).unwrap_or_default(), st.playing, private);
-        }
-        if self.settings.lock().private_listening != private {
-            self.edit_settings(|s| s.private_listening = private); // turned on/off from the tray
-        }
-        if let (Some(m), Some(t)) = (self.media.as_mut(), cur.as_ref()) {
-            let cover = t.cover.as_ref().map(|c| self.lib.cover_path(c).to_string_lossy().into_owned());
-            m.update(&t.title, &t.artist, &t.album, cover.as_deref(), st.duration, st.playing, st.position);
-        }
-
+        let st = self.sync_os();
         // repaint cadence: idle = only on input; playing = 4 Hz (time readout), or the
         // visualizer's fps while it's actually on screen; nothing while minimized or in the tray
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
@@ -1135,6 +1208,28 @@ impl eframe::App for App {
         self.player.shutdown();
         self.lib.flush();
         self.settings.lock().save();
+    }
+}
+
+impl App {
+    /// Tray menu text and the OS media overlay (title, cover, play state). Returns the status.
+    fn sync_os(&mut self) -> crate::audio::Status {
+        let st = self.player.status();
+        #[cfg(windows)]
+        crate::taskbar::set_playing(st.playing);
+        let cur = self.current_track();
+        let private = self.lib.private.load(Ordering::Relaxed);
+        if let Some(t) = &self.tray {
+            t.update(&cur.as_ref().map(|t| format!("{} — {}", t.title, t.artist)).unwrap_or_default(), st.playing, private);
+        }
+        if self.settings.lock().private_listening != private {
+            self.edit_settings(|s| s.private_listening = private); // turned on/off from the tray
+        }
+        if let (Some(m), Some(t)) = (self.media.as_mut(), cur.as_ref()) {
+            let cover = t.cover.as_ref().map(|c| self.lib.cover_path(c).to_string_lossy().into_owned());
+            m.update(&t.title, &t.artist, &t.album, cover.as_deref(), st.duration, st.playing, st.position);
+        }
+        st
     }
 }
 

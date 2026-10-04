@@ -1012,7 +1012,11 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     // ---- columns (Settings > Lists: which, in what order; flexible ones share the free space)
     let w = ui.available_width();
     let narrow = w < 640.0;
-    let (chosen, row_h) = { let s = app.settings.lock(); (s.columns.clone(), if s.density == "compact" { 22.0 } else { 28.0 }) };
+    let (chosen, row_h, covers) = {
+        let s = app.settings.lock();
+        let compact = s.density == "compact";
+        (s.columns.clone(), match (compact, s.list_covers) { (true, false) => 22.0, (false, false) => 28.0, (true, true) => 28.0, (false, true) => 40.0 }, s.list_covers)
+    };
     let shown: Vec<&Col> = chosen.iter().filter_map(|c| COLUMNS.iter().find(|x| x.id == c)).filter(|c| !narrow || c.narrow).collect();
     let shown: Vec<&Col> = if shown.iter().any(|c| c.share > 0.0) { shown } else { COLUMNS.iter().filter(|c| c.id == "title").chain(shown).collect() };
     let fixed: f32 = shown.iter().map(|c| c.width).sum::<f32>() + 16.0;
@@ -1095,6 +1099,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     let cr = Rect::from_min_max(Pos2::new(x, r.top()), Pos2::new(x + cw, r.bottom()));
                     let clip = p.with_clip_rect(cr);
                     let (txt, color): (String, Color32) = match c.id {
+                        // hovering a row: ▶ here plays it with one click
+                        "num" if resp.hovered() => ("▶".into(), pal.accent),
                         "num" => (if is_cur { "▶".into() } else if num_mode && t.track.is_some() { t.track.unwrap().to_string() } else { (i + 1).to_string() }, if is_cur { pal.accent } else { pal.dim }),
                         "like" => ("♥".into(), if st.liked { pal.accent } else { pal.faint }),
                         "title" => (if st.hidden { format!("🚫 {}", t.title) } else { t.title.clone() }, if is_cur { pal.accent } else { dim(pal.text) }),
@@ -1109,9 +1115,29 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     };
                     let like = c.id == "like";
                     let color = if c.id == "title" || like { color } else { dim(color) };
+                    // album cover before the title, like Spotify
+                    let cr = if c.id == "title" && covers {
+                        let side = row_h - 8.0;
+                        let tr = Rect::from_min_size(Pos2::new(cr.left(), cy - side / 2.0), Vec2::splat(side));
+                        fill(&clip, tr, pal.bg);
+                        if let Some(cv) = t.thumb.as_ref().or(t.cover.as_ref()) {
+                            if let Some(tex) = app.covers.get(ui.ctx(), app.lib.cover_path(cv), cv, 64) {
+                                clip.image(tex, tr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), if st.hidden { with_alpha(Color32::WHITE, 90) } else { Color32::WHITE });
+                            }
+                        } else {
+                            clip.text(tr.center(), Align2::CENTER_CENTER, "♫", vt(side * 0.6), pal.faint);
+                        }
+                        Rect::from_min_max(Pos2::new(cr.left() + side + 8.0, cr.top()), cr.max)
+                    } else {
+                        cr
+                    };
+                    let clip = p.with_clip_rect(cr);
                     clip.text(if right { Pos2::new(cr.right(), cy) } else if like { Pos2::new(cr.center().x, cy) } else { Pos2::new(cr.left(), cy) }, if right { Align2::RIGHT_CENTER } else if like { Align2::CENTER_CENTER } else { Align2::LEFT_CENTER }, txt, vt(19.0), color);
                     if like && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
                         act = Some(RowAct::Like(id.clone()));
+                    }
+                    if c.id == "num" && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
+                        act = Some(RowAct::Play(i));
                     }
                     x += cw + 8.0;
                 }

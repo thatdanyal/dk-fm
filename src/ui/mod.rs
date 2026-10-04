@@ -184,13 +184,12 @@ pub fn keep_deck(dock: &mut DockState<Tab>) {
 }
 
 pub fn default_dock() -> DockState<Tab> {
+    // kept simple: the library, with the deck and the queue on the left (lyrics tabbed with the
+    // queue). Scope and equalizer are a click away in the View menu.
     let mut d = DockState::new(vec![Tab::Library]);
     let s = d.main_surface_mut();
-    let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
-    let [_deck, scope] = s.split_below(left, 0.46, vec![Tab::Scope, Tab::Eq]);
-    let _ = scope;
-    let [_lib, right] = s.split_right(lib, 0.72, vec![Tab::Queue]);
-    let _ = s.split_below(right, 0.58, vec![Tab::Lyrics]);
+    let [_lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
+    let _ = s.split_below(left, 0.46, vec![Tab::Queue, Tab::Lyrics]);
     d
 }
 
@@ -421,7 +420,7 @@ impl App {
     }
 
     // ------------------------------------------------------------ saved layouts
-    pub const PRESETS: [&'static str; 2] = ["Default", "Minimal"];
+    pub const PRESETS: [&'static str; 3] = ["Default", "Minimal", "Everything"];
 
     pub fn preset(name: &str) -> Option<DockState<Tab>> {
         match name {
@@ -429,6 +428,16 @@ impl App {
             "Minimal" => {
                 let mut d = DockState::new(vec![Tab::Library]);
                 let _ = d.main_surface_mut().split_left(NodeIndex::root(), 0.26, vec![Tab::Deck, Tab::Queue]);
+                Some(d)
+            }
+            "Everything" => {
+                // the older default: every panel open
+                let mut d = DockState::new(vec![Tab::Library]);
+                let s = d.main_surface_mut();
+                let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
+                let _ = s.split_below(left, 0.46, vec![Tab::Scope, Tab::Eq]);
+                let [_lib, right] = s.split_right(lib, 0.72, vec![Tab::Queue]);
+                let _ = s.split_below(right, 0.58, vec![Tab::Lyrics]);
                 Some(d)
             }
             _ => None,

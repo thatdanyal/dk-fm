@@ -89,7 +89,9 @@ fn d_comfy() -> String { "comfortable".into() }
 fn d_all() -> String { "all".into() }
 fn d_daily() -> String { "daily".into() }
 fn d_custom() -> String { "custom".into() }
-pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "album", "time", "plays"].map(String::from).to_vec() }
+/// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)
+fn d_hidden_tabs() -> Vec<String> { ["recent", "top"].map(String::from).to_vec() }
+pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "time"].map(String::from).to_vec() }
 pub const DEFAULT_PATTERN: &str = "{folder}/{artist} - {title}";
 fn d_pattern() -> String { DEFAULT_PATTERN.into() }
 
@@ -146,7 +148,7 @@ pub struct Session {
 pub struct Settings {
     #[serde(default = "d_theme")] pub theme: String,
     #[serde(default)] pub accent: Option<String>,
-    #[serde(default = "d_true")] pub scanlines: bool,
+    #[serde(default)] pub scanlines: bool,
     #[serde(default = "d_true")] pub glow: bool,
     #[serde(default)] pub music_folders: Vec<String>,
     #[serde(default)] pub download_dir: String,
@@ -204,7 +206,7 @@ pub struct Settings {
     #[serde(default)] pub sorts: std::collections::BTreeMap<String, String>,
     #[serde(default = "d_all")] pub start_view: String,
     #[serde(default)] pub sidebar_order: Vec<String>,
-    #[serde(default)] pub sidebar_hidden: Vec<String>,
+    #[serde(default = "d_hidden_tabs")] pub sidebar_hidden: Vec<String>,
     // ---- downloads
     /// file name pattern under the download folder ("/" makes folders)
     #[serde(default = "d_pattern")] pub name_pattern: String,

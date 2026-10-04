@@ -341,7 +341,7 @@ fn spectro(s: &mut ScopeState, c: &Cols, sr: f32) {
 
 /// A small radix-2 FFT. The visualizer only ever needs one fixed size, so this replaces a
 /// general-purpose FFT library (~800 KB of code) with precomputed tables.
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     rev: Vec<u32>,
     twiddle: Vec<(f32, f32)>,
@@ -350,7 +350,7 @@ struct Fft {
 }
 
 impl Fft {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         let bits = n.trailing_zeros();
         let tau = 2.0 * std::f32::consts::PI;
         Fft {
@@ -362,7 +362,7 @@ impl Fft {
     }
 
     /// In-place forward transform of (re, im).
-    fn process(&self, re: &mut [f32], im: &mut [f32]) {
+    pub(crate) fn process(&self, re: &mut [f32], im: &mut [f32]) {
         let n = self.n;
         for i in 0..n {
             let j = self.rev[i] as usize;

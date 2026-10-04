@@ -31,6 +31,8 @@ enum Act {
     ToggleShuffle,
     CycleRepeat,
     View(View),
+    /// "what's playing?" on FIND SONGS
+    Listen,
     Import(String),
     SyncAll,
     OpenShare,
@@ -91,6 +93,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
         ("Now playing (full screen)".into(), "big cover lyrics fullscreen f11 karaoke", "🗖", Act::NowPlaying),
         ("Discover new music".into(), "discover new recommendations similar radio explore", "🧭", Act::View(View::Discover)),
+        ("What's playing? Name the song playing on this PC".into(), "shazam identify recognize listen what song is this", "♫", Act::Listen),
         ("Find songs online (pick the version)".into(), "search youtube web download get new song clean explicit live instrumental version", "🌐", Act::View(View::Web)),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
@@ -198,6 +201,11 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         Act::View(v) => {
             app.show_panel(Tab::Library);
             app.browser.set_view(v);
+        }
+        Act::Listen => {
+            app.show_panel(Tab::Library);
+            app.browser.set_view(View::Web);
+            super::websearch::listen(app, ctx);
         }
         Act::Import(u) => {
             app.show_panel(Tab::Library);

@@ -11,6 +11,7 @@ pub const WHATS_NEW: &str = "biggest-update-2026-10";
 /// What's new, in plain words, one line each.
 const NEWS: &[(&str, &str)] = &[
     ("🧭", "DISCOVER: new music picked from the artists you play and the songs you like."),
+    ("♫", "WHAT'S PLAYING? (on FIND SONGS, or Ctrl+K): DK.FM names the song playing on your PC, like Shazam, and offers to get it."),
     ("🌐", "FIND SONGS: search YouTube and pick the version you want (clean, explicit, live, instrumental...), then + GET it."),
     ("🎤", "A new DK.FM logo, everywhere: the app, the taskbar and the tray."),
     ("✨", "Simpler for newcomers: fewer panels and columns open at first. Try the \"Default\" layout, or \"Everything\" for all panels."),

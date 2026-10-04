@@ -11,6 +11,7 @@ mod library;
 mod lyricsrc;
 mod net;
 mod player;
+mod recognize;
 mod share;
 mod single;
 mod sources;

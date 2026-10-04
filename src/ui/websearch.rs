@@ -1,6 +1,7 @@
 //! FIND SONGS: search YouTube Music / YouTube (not your library) and pick which version of a
 //! song to download. Shows a few results (Settings > Search, default 3), each labelled CLEAN /
 //! EXPLICIT / INSTRUMENTAL / LIVE ... where that can be told; nothing is ever picked for you.
+//! WHAT'S PLAYING? identifies a song playing on the PC (see recognize.rs) and offers its versions.
 use super::theme::{px, vt};
 use super::widgets::{button, tb_button};
 use super::App;
@@ -17,8 +18,19 @@ type Found = Result<Vec<ITrack>, String>;
 
 pub const SOURCES: [(&str, &str, &str); 2] = [("songs", "YOUTUBE MUSIC", "Songs on YouTube Music: studio versions, marked explicit where they are"), ("youtube", "YOUTUBE", "Any video on YouTube: live shows, covers, remixes...")];
 
+#[derive(Default, Clone)]
+pub enum Listen {
+    #[default]
+    Idle,
+    Busy,
+    Got(crate::recognize::Heard),
+    NoMatch,
+    Failed(String),
+}
+
 #[derive(Default)]
 pub struct WebState {
+    pub listen: Arc<Mutex<Listen>>,
     pub query: String,
     pub focus: bool,
     edited: Option<Instant>,
@@ -28,6 +40,24 @@ pub struct WebState {
     slot: Arc<Mutex<Vec<(Key, Found)>>>,
     /// (lib.gen, key) -> which results you already have
     owned: Option<(u64, Key, Vec<Option<String>>)>,
+}
+
+/// Start listening for the song playing on this PC (in the background).
+pub fn listen(app: &mut App, ctx: &egui::Context) {
+    let slot = app.browser.web.listen.clone();
+    if matches!(*slot.lock(), Listen::Busy) {
+        return;
+    }
+    *slot.lock() = Listen::Busy;
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        *slot.lock() = match crate::recognize::identify() {
+            Ok(Some(h)) => Listen::Got(h),
+            Ok(None) => Listen::NoMatch,
+            Err(e) => Listen::Failed(e),
+        };
+        ctx.request_repaint();
+    });
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -64,6 +94,39 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
             if button(ui, &pal, "SEARCH", true, true).clicked() {
                 go = true;
+            }
+        });
+        let heard = app.browser.web.listen.lock().clone();
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let busy = matches!(heard, Listen::Busy);
+            if button(ui, &pal, if busy { "LISTENING…" } else { "♫ WHAT'S PLAYING?" }, false, !busy).on_hover_text("Name the song playing on this PC right now (in a browser, a game, a video...)").clicked() {
+                listen(app, ui.ctx());
+            }
+            ui.add_space(6.0);
+            match &heard {
+                Listen::Idle => {
+                    ui.label(egui::RichText::new("Hear a song you like? DK.FM can tell you what it is.").font(vt(17.0)).color(pal.dim));
+                }
+                Listen::Busy => {
+                    ui.label(egui::RichText::new("Listening for about 10 seconds: keep the song playing").font(vt(17.0)).color(pal.accent2));
+                    ui.ctx().request_repaint_after(Duration::from_millis(500));
+                }
+                Listen::Got(h) => {
+                    let what = if h.album.is_empty() { format!("{} · {}", h.title, h.artist) } else { format!("{} · {} · {}", h.title, h.artist, h.album) };
+                    ui.label(egui::RichText::new(format!("Heard: {what}")).font(vt(19.0)).color(pal.text));
+                    if button(ui, &pal, "+ GET", true, true).on_hover_text("Show its versions to pick from").clicked() {
+                        app.browser.web.query = format!("{} {}", h.title, h.artist);
+                        app.browser.web.edited = None;
+                        go = true;
+                    }
+                }
+                Listen::NoMatch => {
+                    ui.label(egui::RichText::new("Couldn't name that one. Try again during a clear part of the song.").font(vt(17.0)).color(pal.accent));
+                }
+                Listen::Failed(e) => {
+                    ui.label(egui::RichText::new(e).font(vt(17.0)).color(pal.accent));
+                }
             }
         });
         ui.add_space(4.0);

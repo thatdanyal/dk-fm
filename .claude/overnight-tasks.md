@@ -24,7 +24,7 @@ STATUS: IN PROGRESS
 - [ ] First-run onboarding: friendly step-by-step instructions shown the first time the app is opened; ASK before creating a desktop/start-menu shortcut (only create it if the user says yes)
 - [ ] Update notice: users updating to this version see a "This is the biggest update yet" what's-new screen once
 - [ ] Better default settings: simpler, more minimalistic defaults (fewer panels/columns visible out of the box)
-- [ ] Logo: the user attached a new logo in another chat — it is NOT available here. Do not invent one; leave assets/icon.* as is and mention it in the final summary
+- [x] Logo: new DK logo (purple DK + mic) added as assets/icon.png (1024px, rounded, transparent corners) and assets/icon.ico (16–256px) by the user's main session. Done — do not change it.
 
 ## Notes for the next run
 (none yet)

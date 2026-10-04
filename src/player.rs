@@ -501,7 +501,7 @@ impl Player {
         loop {
             let ev = self.engine.events.recv_timeout(Duration::from_millis(250));
             match ev {
-                Ok(Event::Current(_)) => {
+                Ok(Event::Current) => {
                     self.st.lock().error_streak = 0;
                     self.notify();
                 }
@@ -529,7 +529,7 @@ impl Player {
                     self.preload_next();
                     self.notify();
                 }
-                Ok(Event::Ended(_)) => {
+                Ok(Event::Ended) => {
                     self.finish_listen(true);
                     let sleep = std::mem::replace(&mut self.st.lock().sleep, Sleep::Off);
                     if sleep != Sleep::EndOfTrack {

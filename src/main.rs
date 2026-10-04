@@ -26,6 +26,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 fn main() -> eframe::Result {
+    crash_log();
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(|s| s.as_str()) == Some("--test-play") {
         test_play(&args);
@@ -100,6 +101,9 @@ fn test_play(args: &[String]) {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let s = p.status();
         println!("t={:>2}s playing={} pos={:.2}/{:.1} track={:?}", i + 1, s.playing, s.position, s.duration, s.current.as_ref().and_then(|id| lib.track(id)).map(|t| t.title));
+        for n in std::mem::take(&mut *p.notices.lock()) {
+            println!("      {n}");
+        }
     }
 }
 
@@ -118,7 +122,7 @@ fn test_download(args: &[String]) {
     };
     println!("fetched \"{}\" ({} tracks, via {}) in {:.1}s", col.name, col.tracks.len(), col.via, t0.elapsed().as_secs_f32());
     let n = col.tracks.len().min(max);
-    let job = dl.start(col, Some((0..n).collect()), false);
+    let job = dl.start(col, Some((0..n).collect()));
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let jobs = dl.jobs.lock();
@@ -135,4 +139,27 @@ fn test_download(args: &[String]) {
     }
     println!("total {:.1}s", t0.elapsed().as_secs_f32());
     lib.flush();
+}
+
+/// Errors (panics) leave no message on screen (no console on Windows): write what happened to
+/// crash.log in the data folder, so it can be reported and fixed. A panic in a background
+/// thread only stops that thread; one in the window's thread closes DK.FM.
+fn crash_log() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        // (`info` has the file and line; release builds have no symbols for a backtrace)
+        let line = format!("[{}] DK.FM {} error in thread '{thread}': {info}\n", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"), env!("CARGO_PKG_VERSION"));
+        let path = store::data_dir().join("crash.log");
+        // keep the file small: just the latest few crashes
+        let old = std::fs::read_to_string(&path).unwrap_or_default();
+        let mut cut = old.len().saturating_sub(16 * 1024);
+        while !old.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let keep = &old[cut..];
+        let _ = std::fs::create_dir_all(store::data_dir());
+        let _ = std::fs::write(&path, format!("{keep}{line}"));
+        default(info);
+    }));
 }

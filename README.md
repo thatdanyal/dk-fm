@@ -53,7 +53,9 @@ when it's idle or in the tray.
 (`v2.0.<build number>`). The app checks on launch and every 30 minutes. When a new version is
 out, an **Update available** popup shows the version and "What's new" (your commit messages since
 the last release), with **LATER** and **DOWNLOAD & RESTART** buttons. Updating swaps the one
-program file and restarts. Pushes to other branches only build, as a dry run.
+program file and restarts (after checking the download is complete). The tests run on all three
+OSes first, and nothing is published unless they pass. Pushes to other branches only build and
+test, as a dry run.
 
 Write clear commit subjects. They become the release notes your users read.
 
@@ -71,6 +73,10 @@ The program ends up in `target/release/`. Useful for testing:
 - `DKFM_INSTALL_DIR=<folder>` makes the Windows installer install into a test folder.
 - `DKFM_PROFILE=1` logs frame times and repaint causes to `profile.log` in the data folder.
 - `dkfm --test-play [seconds]` plays the library without a window (audio engine check).
+- `cargo test` runs the tests (`cargo test -- --ignored` adds the ones that need the internet).
+
+If something goes wrong, DK.FM writes what happened to `crash.log` in the data folder
+(`%APPDATA%\DK.FM`, `~/Library/Application Support/DK.FM` or `~/.config/DK.FM`).
 
 ## Windows install
 

@@ -838,7 +838,7 @@ impl App {
                     let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).cloned();
                     if let Some(p) = p {
                         let sel: Vec<String> = p.track_ids.iter().take(3).cloned().collect();
-                        let u = self.lib.snapshot(format!("Removed 3 songs from \"{}\"", p.name), &[p.id.clone()], &[]);
+                        let u = self.lib.snapshot(format!("Removed 3 songs from \"{}\"", p.name), std::slice::from_ref(&p.id), &[]);
                         self.lib.playlist_remove(&p.id, &sel);
                         self.undoable(u);
                         self.browser.set_view(browser::View::Playlist(p.id.clone()));

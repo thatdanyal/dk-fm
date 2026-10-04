@@ -39,7 +39,22 @@ pub fn trash(path: &std::path::Path) -> Result<(), String> {
             dest = dir.join(format!("{n} {name}"));
             n += 1;
         }
-        std::fs::rename(path, &dest).or_else(|_| std::fs::copy(path, &dest).and_then(|_| std::fs::remove_file(path))).map_err(|e| e.to_string())
+        // Linux file managers only show (and can restore) a trashed file that has a matching
+        // info/<name>.trashinfo (freedesktop.org trash spec)
+        let info = (!cfg!(target_os = "macos")).then(|| dir.with_file_name("info").join(format!("{}.trashinfo", dest.file_name().unwrap_or_default().to_string_lossy())));
+        if let Some(info) = &info {
+            let full = std::path::absolute(path).unwrap_or(path.to_path_buf());
+            let url = full.to_string_lossy().split('/').map(|p| urlencoding::encode(p).into_owned()).collect::<Vec<_>>().join("/");
+            let _ = std::fs::create_dir_all(info.parent().unwrap_or(&dir));
+            let _ = std::fs::write(info, format!("[Trash Info]\nPath={url}\nDeletionDate={}\n", chrono::Local::now().format("%Y-%m-%dT%H:%M:%S")));
+        }
+        let moved = std::fs::rename(path, &dest).or_else(|_| std::fs::copy(path, &dest).and_then(|_| std::fs::remove_file(path))).map_err(|e| e.to_string());
+        if moved.is_err() {
+            if let Some(info) = &info {
+                let _ = std::fs::remove_file(info);
+            }
+        }
+        moved
     }
 }
 
@@ -190,7 +205,8 @@ impl Media {
         use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig, SeekDirection};
         let hwnd = HWND.load(Ordering::Relaxed);
         let cfg = PlatformConfig { dbus_name: "dkfm", display_name: "DK.FM", hwnd: if hwnd != 0 { Some(hwnd as *mut std::ffi::c_void) } else { None } };
-        let controls = MediaControls::new(cfg).ok().and_then(|mut c| {
+        // Linux: media keys go over D-Bus; without a session bus its thread would only fail
+        let controls = MediaControls::new(cfg).ok().filter(|_| session_bus()).and_then(|mut c| {
             let p = player.clone();
             c.attach(move |e| match e {
                 MediaControlEvent::Play => p.resume(),
@@ -226,6 +242,18 @@ impl Media {
     }
 }
 
+/// A D-Bus session bus to connect to (always true off Linux).
+fn session_bus() -> bool {
+    if !cfg!(target_os = "linux") {
+        return true;
+    }
+    match std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        // unix:path=/run/user/1000/bus,guid=… (other kinds of address: let zbus try)
+        Ok(a) => a.split(';').any(|a| a.strip_prefix("unix:path=").map(|p| std::path::Path::new(p.split(',').next().unwrap_or(p)).exists()).unwrap_or(true)),
+        Err(_) => std::env::var_os("XDG_RUNTIME_DIR").map(|d| std::path::Path::new(&d).join("bus").exists()).unwrap_or(false),
+    }
+}
+
 // ------------------------------------------------------------------------------------- start at login
 
 pub fn set_start_at_login(on: bool) -> Result<(), String> {
@@ -250,6 +278,8 @@ pub struct Update {
     pub version: String,
     pub notes: String,
     pub asset: Option<String>,
+    /// the asset's size in bytes (from GitHub), to check the download is complete
+    pub size: Option<u64>,
     pub page: String,
 }
 
@@ -276,15 +306,12 @@ pub fn check_update() -> Result<Option<Update>, String> {
         return Ok(None);
     }
     let want = if cfg!(windows) { "windows-x64.exe" } else if cfg!(target_os = "linux") { ".AppImage" } else { "" };
-    let asset = if want.is_empty() {
-        None
-    } else {
-        j["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"].as_str().map(|n| n.ends_with(want) && !n.contains("setup")).unwrap_or(false))).and_then(|x| x["browser_download_url"].as_str()).map(String::from)
-    };
+    let file = if want.is_empty() { None } else { j["assets"].as_array().and_then(|a| a.iter().find(|x| x["name"].as_str().map(|n| n.ends_with(want) && !n.contains("setup")).unwrap_or(false))) };
     Ok(Some(Update {
         version: tag.trim_start_matches('v').into(),
         notes: j["body"].as_str().unwrap_or("").replace("\r", "").trim().to_string(),
-        asset,
+        asset: file.and_then(|x| x["browser_download_url"].as_str()).map(String::from),
+        size: file.and_then(|x| x["size"].as_u64()),
         page: j["html_url"].as_str().unwrap_or("https://github.com/thatdanyal/dk-fm/releases/latest").into(),
     }))
 }
@@ -303,6 +330,11 @@ pub fn install_update(u: &Update) -> Result<(), String> {
     };
     let new = target.with_extension("new");
     crate::net::download(url, &new, false)?;
+    // never swap in a cut-off or wrong file: the app couldn't start (or update) any more
+    if let Err(e) = check_program(&new, u.size) {
+        let _ = std::fs::remove_file(&new);
+        return Err(e);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -317,6 +349,22 @@ pub fn install_update(u: &Update) -> Result<(), String> {
     }
     std::process::Command::new(&target).arg("--updated").spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// A downloaded update is complete (GitHub's size) and is a program for this OS.
+fn check_program(path: &std::path::Path, size: Option<u64>) -> Result<(), String> {
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size.is_some_and(|s| s != len) || len < 1024 * 1024 {
+        return Err("The download was incomplete. Please try again.".into());
+    }
+    let mut head = [0u8; 4];
+    std::io::Read::read_exact(&mut std::fs::File::open(path).map_err(|e| e.to_string())?, &mut head).map_err(|e| e.to_string())?;
+    let ok = if cfg!(windows) { head[..2] == *b"MZ" } else { head == *b"\x7fELF" };
+    if ok {
+        Ok(())
+    } else {
+        Err("The downloaded file isn't a DK.FM program. Please try again later.".into())
+    }
 }
 
 /// Remove the previous version left behind by an update.
@@ -362,5 +410,37 @@ mod tests {
         std::fs::write(&f, b"DK.FM recycle bin test - safe to delete").unwrap();
         super::trash(&f).unwrap();
         assert!(!f.exists());
+        #[cfg(target_os = "linux")]
+        {
+            // with its .trashinfo, so file managers show it and can put it back
+            let trash = dirs::data_dir().unwrap().join("Trash");
+            let info = std::fs::read_dir(trash.join("info")).unwrap().flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().contains("dkfm-trash-test.txt")).max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok()).expect("trashinfo");
+            let text = std::fs::read_to_string(&info).unwrap();
+            assert!(text.starts_with("[Trash Info]\nPath=/") && text.contains("dkfm-trash-test.txt\nDeletionDate="), "{text}");
+            let name = info.file_stem().unwrap();
+            assert!(trash.join("files").join(name).exists());
+            let _ = std::fs::remove_file(trash.join("files").join(name));
+            let _ = std::fs::remove_file(&info);
+        }
+    }
+
+    #[test]
+    fn update_must_be_a_whole_program() {
+        let f = std::env::temp_dir().join(format!("dkfm-update-test-{}", std::process::id()));
+        let magic: &[u8] = if cfg!(windows) { b"MZ\x90\0" } else { b"\x7fELF" };
+        let mut prog = magic.to_vec();
+        prog.resize(2 * 1024 * 1024, 0);
+        std::fs::write(&f, &prog).unwrap();
+        assert!(super::check_program(&f, Some(prog.len() as u64)).is_ok());
+        assert!(super::check_program(&f, None).is_ok());
+        // cut off
+        assert!(super::check_program(&f, Some(prog.len() as u64 + 1)).is_err());
+        // an error page instead of the program
+        std::fs::write(&f, b"<html>rate limited</html>").unwrap();
+        assert!(super::check_program(&f, None).is_err());
+        prog[..4].copy_from_slice(b"<htm");
+        std::fs::write(&f, &prog).unwrap();
+        assert!(super::check_program(&f, None).is_err());
+        let _ = std::fs::remove_file(&f);
     }
 }

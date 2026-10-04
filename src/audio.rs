@@ -37,12 +37,12 @@ pub enum Cmd {
 
 #[derive(Debug, Clone)]
 pub enum Event {
-    /// The current song is now `id` (after Play, a gapless advance, or a crossfade start).
-    Current(String),
+    /// A new current song (after Play, a gapless advance, or a crossfade start).
+    Current,
     /// Moved on to the preloaded song on its own (gapless / crossfade).
     Advanced(String),
     /// Reached the end with nothing preloaded.
-    Ended(String),
+    Ended,
     Error(String, String),
 }
 
@@ -188,20 +188,17 @@ impl Deck {
     fn seek(&mut self, secs: f64) {
         let secs = secs.max(0.0);
         let to = SeekTo::Time { time: Time::new(secs.trunc() as u64, secs.fract()), track_id: Some(self.track_id) };
-        match self.reader.seek(SeekMode::Accurate, to) {
-            Ok(_) => {
-                self.decoder.reset();
-                self.out.clear();
-                self.pending = [Vec::new(), Vec::new()];
-                if let Some(r) = self.resampler.as_mut() {
-                    use rubato::Resampler;
-                    r.reset();
-                }
-                self.base = secs;
-                self.frames_out = 0;
-                self.eof = false;
+        if self.reader.seek(SeekMode::Accurate, to).is_ok() {
+            self.decoder.reset();
+            self.out.clear();
+            self.pending = [Vec::new(), Vec::new()];
+            if let Some(r) = self.resampler.as_mut() {
+                use rubato::Resampler;
+                r.reset();
             }
-            Err(_) => {}
+            self.base = secs;
+            self.frames_out = 0;
+            self.eof = false;
         }
     }
 
@@ -603,7 +600,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                             }
                             cur = Some(d);
                             playing = autoplay;
-                            let _ = events.send(Event::Current(id));
+                            let _ = events.send(Event::Current);
                         }
                         Some(Err(e)) => {
                             cur = None;
@@ -614,10 +611,9 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     }
                 }
                 Cmd::Preload { id, path, gain_db } => {
-                    if next.as_ref().map(|n| n.id != id).unwrap_or(true) || fading.is_some() {
-                        if fading.is_none() {
-                            next = Deck::open(&id, &path, sr, gain_db).ok();
-                        }
+                    // (mid-crossfade, `next` is the song fading in: leave it)
+                    if fading.is_none() && next.as_ref().is_none_or(|n| n.id != id) {
+                        next = Deck::open(&id, &path, sr, gain_db).ok();
                     }
                 }
                 Cmd::ClearNext => {
@@ -667,7 +663,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
             FadeDone,
             FadeAbort,
             Gapless(usize),
-            Ended(String),
+            Ended,
         }
         while playing && prod.slots() >= CHUNK * 2 {
             if cur.is_none() {
@@ -679,11 +675,10 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
             {
                 let c = cur.as_mut().unwrap();
                 c.read(CHUNK, &mut a);
-                if fading.is_some() {
+                if let Some((elapsed, len)) = fading.as_mut() {
                     // equal-power crossfade between the outgoing (cur) and incoming (next) decks
                     if let Some(n) = next.as_mut() {
                         n.read(CHUNK, &mut b);
-                        let (elapsed, len) = fading.as_mut().unwrap();
                         let sr_f = sr as f64;
                         for i in 0..CHUNK {
                             let t = ((*elapsed + i as f64 / sr_f) / *len).clamp(0.0, 1.0) as f32;
@@ -705,10 +700,10 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                         fading = Some((0.0, c.remaining()));
                         if let Some(n) = next.as_ref() {
                             let _ = events.send(Event::Advanced(n.id.clone()));
-                            let _ = events.send(Event::Current(n.id.clone()));
+                            let _ = events.send(Event::Current);
                         }
                     } else if c.finished() {
-                        act = if next.is_some() { Act::Gapless(a.len()) } else { Act::Ended(c.id.clone()) };
+                        act = if next.is_some() { Act::Gapless(a.len()) } else { Act::Ended };
                     }
                 }
             }
@@ -727,12 +722,12 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     let id = n.id.clone();
                     cur = Some(n);
                     let _ = events.send(Event::Advanced(id.clone()));
-                    let _ = events.send(Event::Current(id));
+                    let _ = events.send(Event::Current);
                 }
-                Act::Ended(id) => {
+                Act::Ended => {
                     cur = None;
                     playing = false;
-                    let _ = events.send(Event::Ended(id));
+                    let _ = events.send(Event::Ended);
                 }
             }
             dsp.process(&mut mix);

@@ -93,7 +93,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if !dayset.contains(&day) { day -= 1; }
     while dayset.contains(&day) { streak += 1; day -= 1; }
     let peak = hours.iter().enumerate().max_by_key(|x| x.1).map(|x| x.0).unwrap_or(0);
-    let fmt_h = |h: usize| format!("{}{}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" });
+    let fmt_h = |h: usize| format!("{}{}", if h.is_multiple_of(12) { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" });
     let top_ids: Vec<String> = top.iter().map(|t| t.0.to_string()).collect();
     let tracks: HashMap<String, crate::store::Track> = top.iter().filter_map(|t| d.tracks.get(t.0).map(|x| (t.0.to_string(), x.clone()))).chain(sk.iter().filter_map(|t| d.tracks.get(t.0).map(|x| (t.0.to_string(), x.clone())))).collect();
     drop(d);
@@ -105,7 +105,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 (format!("{}", secs / 60), "MINUTES LISTENED"),
                 (plays.to_string(), "PLAYS"),
                 (songs.len().to_string(), "DIFFERENT SONGS"),
-                (tart.len().max(0).to_string(), "TOP ARTISTS"),
+                (tart.len().to_string(), "TOP ARTISTS"),
                 (format!("{streak} DAY{}", if streak == 1 { "" } else { "S" }), "LISTENING STREAK"),
                 (fmt_h(peak), "YOUR PEAK HOUR"),
             ];

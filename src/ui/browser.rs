@@ -805,7 +805,7 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
     }
     ui.separator();
     if ui.button("Delete playlist").clicked() {
-        let u = app.lib.snapshot(format!("Deleted playlist \"{}\"", p.name), &[p.id.clone()], &[]);
+        let u = app.lib.snapshot(format!("Deleted playlist \"{}\"", p.name), std::slice::from_ref(&p.id), &[]);
         app.lib.delete_playlist(&p.id);
         app.undoable(u);
         if app.browser.view == View::Playlist(p.id.clone()) {
@@ -1152,7 +1152,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     match act {
         Some(RowAct::Move(songs, before)) => {
             if let Some(p) = &cfg.playlist {
-                let u = app.lib.snapshot(format!("Moved {} in \"{}\"", plural(songs.len()), p.name), &[p.id.clone()], &[]);
+                let u = app.lib.snapshot(format!("Moved {} in \"{}\"", plural(songs.len()), p.name), std::slice::from_ref(&p.id), &[]);
                 app.lib.playlist_move(&p.id, &songs, before.as_deref());
                 app.undoable(u);
             }
@@ -1166,13 +1166,13 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         }
         Some(RowAct::Select(i, shift, cmd)) => {
             let id = ids[i].clone();
-            if shift && app.browser.anchor.is_some() {
-                let a = app.browser.anchor.unwrap();
+            if let Some(a) = app.browser.anchor.filter(|_| shift) {
                 if !cmd {
                     app.browser.selection.clear();
                 }
-                for k in a.min(i)..=a.max(i) {
-                    app.browser.selection.insert(ids[k].clone());
+                // (the list may have shrunk since the anchor was set, e.g. by a search)
+                for id in ids.iter().take(a.max(i) + 1).skip(a.min(i)) {
+                    app.browser.selection.insert(id.clone());
                 }
             } else if cmd {
                 if !app.browser.selection.remove(&id) {
@@ -1297,7 +1297,7 @@ fn plural(n: usize) -> String {
 }
 
 fn remove_from_playlist(app: &mut App, p: &crate::store::Playlist, sel: &[String]) {
-    let u = app.lib.snapshot(format!("Removed {} from \"{}\"", plural(sel.len()), p.name), &[p.id.clone()], &[]);
+    let u = app.lib.snapshot(format!("Removed {} from \"{}\"", plural(sel.len()), p.name), std::slice::from_ref(&p.id), &[]);
     app.lib.playlist_remove(&p.id, sel);
     app.undoable(u);
     app.browser.selection.clear();
@@ -1359,7 +1359,7 @@ fn rebuild_groups(app: &mut App) {
     let mut al: Vec<_> = albums.into_iter().map(|(k, v)| (k, v.0, v.1, v.2, v.3, v.4)).collect();
     al.sort_by(|a, b| a.2.to_lowercase().cmp(&b.2.to_lowercase()).then(a.1.to_lowercase().cmp(&b.1.to_lowercase())));
     let mut ar: Vec<_> = artists.into_iter().map(|(k, v)| (k, v.0, v.1, v.2)).collect();
-    ar.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+    ar.sort_by_key(|a| a.1.to_lowercase());
     drop(d);
     app.browser.albums = al;
     app.browser.artists = ar;

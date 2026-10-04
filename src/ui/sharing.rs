@@ -293,7 +293,7 @@ fn apply(app: &mut App, ctx: &egui::Context, inc: Incoming) {
             let pid = app.lib.new_playlist(&name, have);
             if !missing.is_empty() {
                 let col = Collection { kind: "shared".into(), id: pid.clone(), name: name.clone(), owner: "a friend".into(), tracks: p.songs.iter().map(|s| s.to_itrack()).collect(), complete: true, via: "share".into(), source: "share".into(), ..Default::default() };
-                app.dl.start_to(col, Some(missing.clone()), false, Some(pid.clone()));
+                app.dl.start_to(col, Some(missing.clone()), Some(pid.clone()));
             }
             app.show_panel(Tab::Library);
             app.browser.set_view(View::Playlist(pid));

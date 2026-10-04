@@ -311,7 +311,7 @@ fn get_release(app: &mut App, r: &Release) {
         let r = sources::generic(&url, Some(title), Some(kind), 300).map(|col| {
             let keys: HashSet<String> = lib.key_index().into_keys().collect();
             let sel: Vec<usize> = col.tracks.iter().enumerate().filter(|(_, t)| !super::import::owned(&keys, t)).map(|(i, _)| i).collect();
-            Some(dl.start(col, Some(sel), false))
+            Some(dl.start(col, Some(sel)))
         });
         if let Err(e) = &r {
             dl.notices.lock().push(e.clone());

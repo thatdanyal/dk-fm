@@ -14,6 +14,19 @@ pub fn data_dir() -> PathBuf {
     dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("DK.FM")
 }
 
+/// Tests: point the data folder at a fresh temp folder. The folder is one setting for the whole
+/// process, so tests that use it run one at a time while they hold the returned guard.
+#[cfg(test)]
+pub fn test_profile(name: &str) -> (parking_lot::MutexGuard<'static, ()>, PathBuf) {
+    static LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    let guard = LOCK.lock();
+    let dir = std::env::temp_dir().join(format!("dkfm-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::env::set_var("DKFM_USER_DATA", &dir);
+    (guard, dir)
+}
+
 pub fn now_secs() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -23,7 +36,18 @@ pub fn now_ms() -> f64 {
 }
 
 pub fn load_json<T: DeserializeOwned + Default>(path: &Path) -> T {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let Ok(bytes) = std::fs::read(path) else { return T::default() };
+    match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => {
+            // unreadable: set it aside instead of letting the next save overwrite it, so it can
+            // still be recovered (or restored from a backup)
+            if !bytes.is_empty() {
+                let _ = std::fs::rename(path, path.with_extension(format!("broken-{}.json", now_secs())));
+            }
+            T::default()
+        }
+    }
 }
 
 /// Atomic write (temp file + rename) so a crash never leaves a half-written file.
@@ -32,10 +56,14 @@ pub fn save_json<T: Serialize>(path: &Path, v: &T) {
         let _ = std::fs::create_dir_all(dir);
     }
     let tmp = path.with_extension("json.tmp");
-    if let Ok(bytes) = serde_json::to_vec(v) {
-        if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+    let Ok(bytes) = serde_json::to_vec(v) else { return };
+    // on disk before the rename, so a power cut can't leave an empty file in its place
+    let written = std::fs::File::create(&tmp).and_then(|mut f| {
+        std::io::Write::write_all(&mut f, &bytes)?;
+        f.sync_all()
+    });
+    if written.is_ok() {
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 
@@ -336,4 +364,31 @@ pub fn local_stamp(secs: i64, time: bool) -> String {
     let d = chrono::Local.timestamp_opt(secs, 0).single().unwrap_or_else(chrono::Local::now);
     let date = format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day());
     if time { format!("{date}_{:02}{:02}{:02}", d.hour(), d.minute(), d.second()) } else { date }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn broken_file_is_kept_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("dkfm-jsontest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("library.json");
+        let mut lib = LibraryData::default();
+        lib.playlists.push(Playlist { id: "p".into(), name: "Mine".into(), ..Default::default() });
+        save_json(&path, &lib);
+        assert_eq!(load_json::<LibraryData>(&path).playlists.len(), 1);
+        assert!(!dir.join("library.json.tmp").exists());
+        // cut off in the middle: loads empty, and the broken file is set aside
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+        assert!(load_json::<LibraryData>(&path).playlists.is_empty());
+        assert!(!path.exists());
+        let kept: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(kept.iter().any(|n| n.starts_with("library.broken-") && n.ends_with(".json")), "{kept:?}");
+        // a missing file is just empty
+        assert!(load_json::<LibraryData>(&dir.join("nope.json")).tracks.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

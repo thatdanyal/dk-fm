@@ -2,6 +2,7 @@
 name = "dkfm"
 version = "2.0.0"
 edition = "2021"
+rust-version = "1.87"
 description = "DK.FM — retro desktop music player"
 authors = ["thatdanyal"]
 license = "MIT"
@@ -61,13 +62,21 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Wind
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
+[lints.clippy]
+# style choices of this codebase: UI helpers take many arguments, DSP loops index several buffers
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+
 [profile.release]
 # optimize for size: measured no CPU difference while playing; the audio decoders and resampler
 # stay at full speed below (import + analysis speed)
 opt-level = "s"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
+# unwind: a panic in a background thread (media keys, a damaged music file, a download) stops
+# only that thread, not the whole app
+panic = "unwind"
 strip = true
 
 [profile.release.package]

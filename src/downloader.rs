@@ -49,8 +49,6 @@ pub struct Job {
     pub col: Collection,
     pub folder: PathBuf,
     pub fmt: String,
-    pub created: f64,
-    pub silent: bool,
     /// existing library playlist that finished songs are added to (e.g. "find new songs")
     pub target_playlist: Option<String>,
     pub cancel: Arc<AtomicBool>,
@@ -78,7 +76,8 @@ fn sanitize(s: &str) -> String {
 fn clean(s: &str) -> String {
     let t: String = s.chars().filter(|c| !"<>:\"/\\|?*".contains(*c) && !c.is_control()).collect();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    t.trim_end_matches(['.', ' ']).chars().take(120).collect::<String>()
+    // (cut first: a cut can end in a dot or space too, which Windows can't have)
+    t.chars().take(120).collect::<String>().trim_end_matches(['.', ' ']).to_string()
 }
 
 /// What a downloaded song's file name is built from.
@@ -128,7 +127,8 @@ pub fn render_name(pattern: &str, p: &NameParts) -> PathBuf {
             }
         }
         let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-        let mut s: String = s.trim_matches(['-', ' ']).trim_end_matches('.').trim_end().chars().take(200).collect();
+        let s: String = s.trim_matches(['-', ' ']).chars().take(200).collect();
+        let mut s = s.trim_end_matches(['.', ' ']).to_string();
         let last = i + 1 == segs.len();
         if s.is_empty() || s.chars().all(|c| c == '.') {
             if !last {
@@ -222,12 +222,12 @@ impl Downloader {
     }
 
     /// Queue a collection; `selected` = indices to download (None = all).
-    pub fn start(&self, col: Collection, selected: Option<Vec<usize>>, silent: bool) -> String {
-        self.start_to(col, selected, silent, None)
+    pub fn start(&self, col: Collection, selected: Option<Vec<usize>>) -> String {
+        self.start_to(col, selected, None)
     }
 
     /// Like `start`, but every song that finishes is also added to the playlist `target`.
-    pub fn start_to(&self, col: Collection, selected: Option<Vec<usize>>, silent: bool, target: Option<String>) -> String {
+    pub fn start_to(&self, col: Collection, selected: Option<Vec<usize>>, target: Option<String>) -> String {
         let job_id = format!("{}-{}", col.kind, col.id);
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
@@ -277,7 +277,7 @@ impl Downloader {
             }
         }
         drop(q);
-        self.jobs.lock().push(Job { id: job_id.clone(), col, folder, fmt, created: store::now_ms(), silent, target_playlist: target, cancel: Arc::new(AtomicBool::new(false)), tracks });
+        self.jobs.lock().push(Job { id: job_id.clone(), col, folder, fmt, target_playlist: target, cancel: Arc::new(AtomicBool::new(false)), tracks });
         // songs you already have go into the playlist now (and learn their Spotify ids), even
         // when nothing needs downloading
         self.mirror_job(&job_id);
@@ -387,7 +387,7 @@ impl Downloader {
         let _ = std::fs::create_dir_all(out_file.parent().unwrap_or(Path::new(".")));
 
         if out_file.exists() && forced.is_none() {
-            let ids = self.lib.add_files(&[out_file.clone()], |lt| apply_keys(lt, &t, None));
+            let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, None));
             self.with_track(job_id, idx, |jt| {
                 jt.status = TStatus::Done;
                 jt.note = Some("Already downloaded".into());
@@ -488,7 +488,7 @@ impl Downloader {
                 std::fs::copy(&audio, &out_file).map_err(|e| e.to_string())?;
             }
             let yid = if pick.id.is_empty() { None } else { Some(pick.id.clone()) };
-            let ids = self.lib.add_files(&[out_file.clone()], |lt| apply_keys(lt, &t, yid.clone()));
+            let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, yid.clone()));
             self.with_track(job_id, idx, |jt| {
                 jt.status = TStatus::Done;
                 jt.track_id = ids.first().cloned();
@@ -618,7 +618,7 @@ impl Downloader {
         let n = missing.len();
         if n > 0 {
             self.notices.lock().push(format!("Auto-sync: {n} new song{} from \"{}\"", if n == 1 { "" } else { "s" }, p.name));
-            self.start(col, Some(missing), true);
+            self.start(col, Some(missing));
         } else {
             self.mirror(&col);
         }
@@ -747,6 +747,10 @@ mod tests {
         assert_eq!(render_name("{artist}/{album}/{title}", &w).to_string_lossy().replace('\\', "/"), "_CON/ab/Wait");
         assert_eq!(render_name("../../{title}:<x>", &w).to_string_lossy(), "Waitx");
         assert_eq!(render_name("C:/Windows/{title}", &w).to_string_lossy().replace('\\', "/"), "C/Windows/Wait");
+        // cut to length, still no trailing dot or space
+        let long = format!("{}. Part 2", "a".repeat(119));
+        assert_eq!(clean(&long), "a".repeat(119));
+        assert!(!render_name(&format!("{}. {{title}}", "b".repeat(199)), &w).to_string_lossy().ends_with(['.', ' ']));
     }
 
     #[test]
@@ -760,8 +764,7 @@ mod tests {
     #[test]
     fn finished_song_goes_into_target_playlist() {
         // a file that's already downloaded finishes without yt-dlp or network
-        let dir = std::env::temp_dir().join(format!("dkfm-dltest-{}", std::process::id()));
-        std::env::set_var("DKFM_USER_DATA", &dir);
+        let (_profile, dir) = crate::store::test_profile("dltest");
         let music = dir.join("Music");
         std::fs::create_dir_all(music.join("Singles")).unwrap();
         std::fs::write(music.join("Singles").join("Daft Punk - One More Time.m4a"), b"not really audio").unwrap();
@@ -771,7 +774,7 @@ mod tests {
         let dl = Downloader::new(lib.clone(), settings);
         let t = ITrack { title: "One More Time".into(), artists: vec!["Daft Punk".into()], youtube_id: Some("abcdefghijk".into()), direct_url: Some("https://music.youtube.com/watch?v=abcdefghijk".into()), source_key: "yt:abcdefghijk".into(), ..Default::default() };
         let col = Collection { kind: "track".into(), id: "ytabcdefghijk".into(), name: t.title.clone(), tracks: vec![t], complete: true, source: "youtube".into(), ..Default::default() };
-        let job = dl.start_to(col, None, false, Some(pid.clone()));
+        let job = dl.start_to(col, None, Some(pid.clone()));
         let t0 = std::time::Instant::now();
         while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(10) {
             std::thread::sleep(Duration::from_millis(50));
@@ -791,13 +794,11 @@ mod tests {
         use lofty::config::WriteOptions;
         use lofty::file::TaggedFileExt;
         use lofty::prelude::*;
-        let dir = std::env::temp_dir().join(format!("dkfm-tagtest-{}", std::process::id()));
-        std::env::set_var("DKFM_USER_DATA", &dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let (_profile, dir) = crate::store::test_profile("tagtest");
         let lib = Library::load();
         // a tiny MP3: 20 silent MPEG-1 layer III frames (128 kbps, 44.1 kHz, 417 bytes each)
         let path = dir.join("song.mp3");
-        let frame: Vec<u8> = [0xFF, 0xFB, 0x90, 0x00].into_iter().chain(std::iter::repeat(0).take(413)).collect();
+        let frame: Vec<u8> = [0xFF, 0xFB, 0x90, 0x00].into_iter().chain(std::iter::repeat_n(0, 413)).collect();
         std::fs::write(&path, frame.repeat(20)).unwrap();
         let (sp, yt) = ("4cOdK2wGLETKBW3PvgPWqT", "FGBhQbmPwH8");
         let t = ITrack { title: "One More Time".into(), artists: vec!["Daft Punk".into()], spotify_id: Some(sp.into()), source_key: format!("sp:{sp}"), ..Default::default() };
@@ -834,8 +835,7 @@ mod tests {
 
     #[test]
     fn sync_links_songs_you_already_have_to_spotify() {
-        let dir = std::env::temp_dir().join(format!("dkfm-linktest-{}", std::process::id()));
-        std::env::set_var("DKFM_USER_DATA", &dir);
+        let (_profile, dir) = crate::store::test_profile("linktest");
         let lib = Library::load();
         // a song from a rebuilt library: no Spotify id, only artist + title
         lib.data.write().tracks.insert("a".into(), store::Track { id: "a".into(), path: "/x/a.m4a".into(), artist: "Daft Punk".into(), title: "One More Time".into(), ..Default::default() });
@@ -845,7 +845,7 @@ mod tests {
         let t = ITrack { title: "One More Time".into(), artists: vec!["Daft Punk".into()], spotify_id: Some(sp.into()), source_key: format!("sp:{sp}"), ..Default::default() };
         let col = Collection { kind: "playlist".into(), id: "x".into(), name: "Mix".into(), tracks: vec![t], complete: true, source: "spotify".into(), ..Default::default() };
         // nothing to download (you have it): it still lands in the playlist and learns its id
-        dl.start(col, Some(vec![]), true);
+        dl.start(col, Some(vec![]));
         let d = lib.data.read();
         assert_eq!(d.playlists.iter().find(|p| p.id == "sp-playlist-x").unwrap().track_ids, ["a"]);
         assert_eq!((d.tracks["a"].spotify_id.as_deref(), d.tracks["a"].source_key.clone()), (Some(sp), Some(format!("sp:{sp}"))));
@@ -866,7 +866,7 @@ mod tests {
         let dl = Downloader::new(lib.clone(), settings);
         let t = sources::search("daft punk one more time radio edit", "songs", 1).unwrap().remove(0);
         let col = Collection { kind: "track".into(), id: format!("yt{}", t.youtube_id.clone().unwrap()), name: t.title.clone(), tracks: vec![t], complete: true, source: "youtube".into(), ..Default::default() };
-        dl.start_to(col, None, false, Some(pid.clone()));
+        dl.start_to(col, None, Some(pid.clone()));
         let t0 = std::time::Instant::now();
         while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(180) {
             std::thread::sleep(Duration::from_millis(500));

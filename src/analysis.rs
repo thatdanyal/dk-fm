@@ -62,7 +62,8 @@ fn worker(rx: Receiver<(String, PathBuf)>, cache: Arc<Mutex<HashMap<String, Arc<
         let saved = std::fs::read(&file).ok().filter(|b| b.len() == PEAKS);
         if let (Some(p), Some(_)) = (&saved, known_gain) {
             cache.lock().insert(id.clone(), Arc::new(p.clone()));
-        } else if let Some((peaks, gain)) = analyze(&path) {
+        // (a damaged file that trips up the decoder is skipped, not the end of all analysis)
+        } else if let Some((peaks, gain)) = std::panic::catch_unwind(|| analyze(&path)).ok().flatten() {
             let _ = std::fs::write(&file, &peaks);
             cache.lock().insert(id.clone(), Arc::new(peaks));
             lib.set_gain(&id, gain);

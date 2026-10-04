@@ -233,7 +233,7 @@ pub fn run(args: &[&str], mut on_line: Option<&mut dyn FnMut(&str)>, cancel: Opt
     if status.success() {
         Ok(out)
     } else {
-        let msg = err.lines().filter(|l| l.starts_with("ERROR")).last().or_else(|| err.lines().last()).unwrap_or("yt-dlp failed").trim_start_matches("ERROR: ").to_string();
+        let msg = err.lines().rfind(|l| l.starts_with("ERROR")).or_else(|| err.lines().last()).unwrap_or("yt-dlp failed").trim_start_matches("ERROR: ").to_string();
         Err(msg)
     }
 }

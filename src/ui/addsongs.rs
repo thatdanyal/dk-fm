@@ -171,7 +171,7 @@ fn library_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, q: &str, gen: u64, w:
     for id in &local {
         let Some(t) = app.lib.track(id) else { continue };
         let inp = pl.track_ids.contains(id);
-        if row(ui, &pal, w, &t.title, &format!("{} · {}", t.artist, t.album).trim_end_matches(" · ").to_string(), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "") {
+        if row(ui, &pal, w, &t.title, format!("{} · {}", t.artist, t.album).trim_end_matches(" · "), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "") {
             app.lib.playlist_add(&pl.id, std::slice::from_ref(id));
             app.edit_settings(|s| s.last_playlist = pl.id.clone());
         }
@@ -294,7 +294,7 @@ pub fn result_rows(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, found: &[I
                 (None, _) => {
                     let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
                     let col = Collection { kind: "track".into(), id: cid.clone(), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
-                    app.dl.start_to(col, None, false, pl.map(|p| p.id.clone()));
+                    app.dl.start_to(col, None, pl.map(|p| p.id.clone()));
                     app.toast(match pl { Some(p) => format!("Downloading \"{}\" into \"{}\"", t.title, p.name), None => format!("Downloading \"{}\"", t.title) });
                 }
             }

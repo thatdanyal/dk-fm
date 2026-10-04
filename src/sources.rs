@@ -42,7 +42,6 @@ pub struct Collection {
 #[derive(Clone, Debug, Default)]
 pub struct ProfilePlaylist {
     pub name: String,
-    pub cover: Option<String>,
     pub total: u64,
     pub owner: String,
     pub url: String,
@@ -82,6 +81,9 @@ fn short_hash(s: &str) -> String {
 static RE_SP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:spotify:(playlist|album|track):([A-Za-z0-9]+))|open\.spotify\.com/(?:intl-[a-z-]+/)?(?:embed/)?(playlist|album|track)/([A-Za-z0-9]+)").unwrap());
 const LIKED_URL: &str = "spotify:liked";
 
+/// "A, B & C x D" -> A / B / C / D
+static RE_YT_ARTISTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*,\s*|\s+&\s+|\s+x\s+").unwrap());
+static RE_THUMB_SIZE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"=w\d+-h\d+").unwrap());
 static RE_SP_USER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"open\.spotify\.com/(?:intl-[a-z-]+/)?user/([^/?#]+)").unwrap());
 
 pub fn detect(url: &str) -> Option<&'static str> {
@@ -123,7 +125,7 @@ fn sp_token(c: &Creds) -> Result<String, String> {
     static CACHE: Mutex<(String, String, i64)> = Mutex::new((String::new(), String::new(), 0));
     let key = format!("{}:{}", c.id, c.secret);
     {
-        let g = CACHE.lock().unwrap();
+        let g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if g.0 == key && crate::store::now_secs() < g.2 - 60 {
             return Ok(g.1.clone());
         }
@@ -133,7 +135,7 @@ fn sp_token(c: &Creds) -> Result<String, String> {
         .map_err(|e| format!("Spotify auth failed ({e}). Check your Client ID / Secret in Settings."))?;
     let tok = j["access_token"].as_str().ok_or("Spotify auth failed")?.to_string();
     let exp = j["expires_in"].as_i64().unwrap_or(3600);
-    *CACHE.lock().unwrap() = (key, tok.clone(), crate::store::now_secs() + exp);
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = (key, tok.clone(), crate::store::now_secs() + exp);
     Ok(tok)
 }
 
@@ -142,7 +144,7 @@ static USER_TOK: std::sync::Mutex<(String, String, i64)> = std::sync::Mutex::new
 /// Access token for the connected account (cached; refreshed and rotated as needed).
 fn user_token(c: &Creds) -> Result<String, String> {
     {
-        let g = USER_TOK.lock().unwrap();
+        let g = USER_TOK.lock().unwrap_or_else(|e| e.into_inner());
         // g.0 holds "old|new" after a rotation, so a caller still holding the old token also hits
         if g.0.split('|').any(|r| r == c.refresh) && crate::store::now_secs() < g.2 - 60 {
             return Ok(g.1.clone());
@@ -158,13 +160,13 @@ fn user_token(c: &Creds) -> Result<String, String> {
         }
         _ => c.refresh.clone(),
     };
-    *USER_TOK.lock().unwrap() = (key, tok.clone(), exp);
+    *USER_TOK.lock().unwrap_or_else(|e| e.into_inner()) = (key, tok.clone(), exp);
     Ok(tok)
 }
 
 /// Prime the cache right after "Connect Spotify" so the first import needs no refresh.
 pub fn seed_user_token(refresh: &str, access: &str, expires: i64) {
-    *USER_TOK.lock().unwrap() = (refresh.to_string(), access.to_string(), expires);
+    *USER_TOK.lock().unwrap_or_else(|e| e.into_inner()) = (refresh.to_string(), access.to_string(), expires);
 }
 
 fn sp_api(token: &str, url: &str) -> Result<Value, String> {
@@ -340,7 +342,7 @@ pub fn library(creds: &Creds) -> Result<Fetched, String> {
     let mut playlists = Vec::new();
     let liked_total = sp_api(&tok, "/me/tracks?limit=1")?["total"].as_u64().unwrap_or(0);
     if liked_total > 0 {
-        playlists.push(ProfilePlaylist { name: "Liked Songs".into(), cover: None, total: liked_total, owner: "you".into(), url: LIKED_URL.into(), kind: "LIKED".into(), note: String::new() });
+        playlists.push(ProfilePlaylist { name: "Liked Songs".into(), total: liked_total, owner: "you".into(), url: LIKED_URL.into(), kind: "LIKED".into(), note: String::new() });
     }
     let mut next = Some("/me/playlists?limit=50".to_string());
     while let Some(u) = next {
@@ -351,7 +353,6 @@ pub fn library(creds: &Creds) -> Result<Fetched, String> {
             let mine = p["owner"]["id"].as_str() == Some(my_id.as_str()) || p["collaborative"].as_bool().unwrap_or(false);
             playlists.push(ProfilePlaylist {
                 name: p["name"].as_str().unwrap_or("").into(),
-                cover: best_image(p.get("images")),
                 total,
                 owner: if mine { "you".into() } else { p["owner"]["display_name"].as_str().unwrap_or("").into() },
                 url: p["external_urls"]["spotify"].as_str().map(String::from).unwrap_or_else(|| format!("https://open.spotify.com/playlist/{pid}")),
@@ -369,7 +370,6 @@ pub fn library(creds: &Creds) -> Result<Fetched, String> {
             let Some(aid) = a["id"].as_str() else { continue };
             playlists.push(ProfilePlaylist {
                 name: a["name"].as_str().unwrap_or("").into(),
-                cover: best_image(a.get("images")),
                 total: a["total_tracks"].as_u64().unwrap_or(0),
                 owner: a["artists"][0]["name"].as_str().unwrap_or("").into(),
                 url: a["external_urls"]["spotify"].as_str().map(String::from).unwrap_or_else(|| format!("https://open.spotify.com/album/{aid}")),
@@ -496,10 +496,9 @@ pub fn generic(url: &str, name: Option<String>, kind: Option<&str>, limit: usize
         };
         let yid = if !is_sc { e["id"].as_str().filter(|i| i.len() == 11).map(String::from) } else { None };
         let page = e["webpage_url"].as_str().map(String::from).or_else(|| yid.as_ref().map(|i| format!("https://music.youtube.com/watch?v={i}"))).or(e["url"].as_str().map(String::from));
-        let split = Regex::new(r"(?i)\s*,\s*|\s+&\s+|\s+x\s+").unwrap();
         tracks.push(ITrack {
             title,
-            artists: split.split(&artist).filter(|s| !s.is_empty()).take(4).map(String::from).collect(),
+            artists: RE_YT_ARTISTS.split(&artist).filter(|s| !s.is_empty()).take(4).map(String::from).collect(),
             album: e["album"].as_str().unwrap_or("").into(),
             duration_ms: e["duration"].as_f64().map(|d| (d * 1000.0) as u64),
             source_key: yid.as_ref().map(|i| format!("yt:{i}")).unwrap_or_else(|| format!("url:{}", page.clone().unwrap_or_default())),
@@ -643,7 +642,7 @@ fn music_search(q: &str, n: usize) -> Result<Vec<ITrack>, String> {
         let secs = segs.last().map(|s| text(s)).and_then(|d| d.trim().split(':').try_fold(0.0, |acc, p| p.parse::<f64>().ok().map(|x| acc * 60.0 + x))).filter(|_| segs.len() > 1);
         let thumb = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"].as_array().and_then(|a| a.last()).and_then(|t| t["url"].as_str());
         // album art: ask for a 544px copy of the square thumbnail
-        let cover = thumb.map(|u| Regex::new(r"=w\d+-h\d+").unwrap().replace(u, "=w544-h544").into_owned());
+        let cover = thumb.map(|u| RE_THUMB_SIZE.replace(u, "=w544-h544").into_owned());
         let mut t = yt_track(id, title, if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs");
         t.explicit = r["badges"].to_string().contains("MUSIC_EXPLICIT_BADGE");
         out.push(t);

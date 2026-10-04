@@ -229,8 +229,7 @@ mod tests {
 
     #[test]
     fn checklist_ticks_and_summary() {
-        let dir = std::env::temp_dir().join(format!("dkfm-picktest-{}", std::process::id()));
-        std::env::set_var("DKFM_USER_DATA", &dir);
+        let (_profile, dir) = crate::store::test_profile("picktest");
         let lib = crate::library::Library::load();
         {
             let mut d = lib.data.write();

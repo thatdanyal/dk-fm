@@ -94,6 +94,8 @@ pub struct Library {
     pub private: AtomicBool,
     dirty: AtomicBool,
     history_dirty: AtomicBool,
+    /// the data folder, fixed when the library is loaded
+    dir: PathBuf,
     cover_dir: PathBuf,
     /// recent undoable changes (memory only)
     undo: parking_lot::Mutex<Vec<Undo>>,
@@ -183,6 +185,7 @@ impl Library {
             dirty: AtomicBool::new(false),
             history_dirty: AtomicBool::new(false),
             cover_dir,
+            dir,
             undo: Default::default(),
         });
         // save changes every few seconds even while the window is hidden or minimized (no frames
@@ -220,10 +223,10 @@ impl Library {
         static SAVING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
         let _g = SAVING.lock();
         if self.dirty.swap(false, Ordering::Relaxed) {
-            store::save_json(&data_dir().join("library.json"), &*self.data.read());
+            store::save_json(&self.dir.join("library.json"), &*self.data.read());
         }
         if self.history_dirty.swap(false, Ordering::Relaxed) {
-            store::save_json(&data_dir().join("history.json"), &*self.history.read());
+            store::save_json(&self.dir.join("history.json"), &*self.history.read());
         }
     }
 
@@ -342,7 +345,8 @@ impl Library {
 
     pub fn read_track(&self, file: &Path) -> Option<Track> {
         let meta = std::fs::metadata(file).ok()?;
-        let tagged = lofty::read_from_path(file).ok();
+        // a damaged file that trips up the tag reader is still added (named from its file name)
+        let tagged = std::panic::catch_unwind(|| lofty::read_from_path(file)).ok().and_then(|r| r.ok());
         let props = tagged.as_ref().map(|t| t.properties().clone());
         let tag = tagged.as_ref().and_then(|t| t.primary_tag().or_else(|| t.first_tag()));
         let base = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -352,7 +356,7 @@ impl Library {
         let artist = tag.and_then(|t| t.artist().map(|s| s.to_string())).filter(|s| !s.is_empty()).or_else(|| guess.as_ref().map(|g| g.0.clone())).unwrap_or_else(|| "Unknown Artist".into());
         let duration = props.as_ref().map(|p| p.duration().as_secs_f64()).unwrap_or(0.0);
         let mut bitrate = props.as_ref().and_then(|p| p.audio_bitrate());
-        if bitrate.map_or(true, |b| !(32..=6000).contains(&b)) && duration > 0.0 {
+        if bitrate.is_none_or(|b| !(32..=6000).contains(&b)) && duration > 0.0 {
             bitrate = Some(((meta.len() as f64 * 8.0) / duration / 1000.0).round() as u32);
         }
         let (cover, thumb) = tag.and_then(|t| t.pictures().first()).map(|p| self.save_cover(p.data())).unwrap_or((None, None));
@@ -461,7 +465,7 @@ impl Library {
                 let _ = std::fs::remove_file(e.path());
             }
         }
-        for e in std::fs::read_dir(data_dir().join("waves")).into_iter().flatten().flatten() {
+        for e in std::fs::read_dir(self.dir.join("waves")).into_iter().flatten().flatten() {
             let n = e.file_name().to_string_lossy().trim_end_matches(".bin").to_string();
             if !ids.contains(&n) && old(&e.path()) {
                 let _ = std::fs::remove_file(e.path());
@@ -937,8 +941,7 @@ mod tests {
 
     #[test]
     fn playlist_edits_and_duplicates() {
-        let dir = std::env::temp_dir().join(format!("dkfm-libtest-{}", std::process::id()));
-        std::env::set_var("DKFM_USER_DATA", &dir);
+        let (_profile, dir) = crate::store::test_profile("libtest");
         let lib = Library::load();
         {
             let mut d = lib.data.write();
@@ -981,8 +984,7 @@ mod tests {
 
     #[test]
     fn folders_pins_sort_undo_private() {
-        let dir = std::env::temp_dir().join(format!("dkfm-libtest2-{}", std::process::id()));
-        std::env::set_var("DKFM_USER_DATA", &dir);
+        let (_profile, dir) = crate::store::test_profile("libtest2");
         let lib = Library::load();
         let pl = |id: &str, name: &str, at: f64, url: Option<&str>| Playlist { id: id.into(), name: name.into(), created_at: at, spotify_url: url.map(String::from), ..Default::default() };
         {

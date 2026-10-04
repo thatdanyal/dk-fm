@@ -220,7 +220,7 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             if button(ui, &pal, &format!("DOWNLOAD {n} AS {fmt}"), true, n > 0).clicked() {
                 let mut sel: Vec<usize> = app.import.selected.iter().copied().collect();
                 sel.sort();
-                app.dl.start(c.clone(), Some(sel), false);
+                app.dl.start(c.clone(), Some(sel));
                 app.browser.set_view(View::Downloads);
             }
         });
@@ -241,10 +241,8 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             if on {
                 ui.painter().text(cb.center(), Align2::CENTER_CENTER, "✔", vt(16.0), pal.ink);
             }
-            if resp.clicked() {
-                if !app.import.selected.remove(&i) {
-                    app.import.selected.insert(i);
-                }
+            if resp.clicked() && !app.import.selected.remove(&i) {
+                app.import.selected.insert(i);
             }
             let p = ui.painter();
             let cy = r.center().y;
@@ -299,7 +297,7 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                             Ok(Fetched::Collection(c)) => {
                                 let keys: HashSet<String> = lib.key_index().into_keys().collect();
                                 let sel: Vec<usize> = c.tracks.iter().enumerate().filter(|(_, t)| !owned(&keys, t)).map(|(i, _)| i).collect();
-                                dl.start(c, Some(sel), false);
+                                dl.start(c, Some(sel));
                             }
                             Ok(_) => {}
                             Err(e) => dl.notices.lock().push(format!("{name}: {e}")),

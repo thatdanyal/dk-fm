@@ -1381,7 +1381,7 @@ fn keys(app: &mut App, ui: &mut Ui) {
 // ------------------------------------------------------------------------------- backups
 
 fn fmt_size(b: u64) -> String {
-    if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1u64 << 20) as f64) } else { format!("{} KB", (b + 1023) / 1024) }
+    if b >= 1 << 20 { format!("{:.1} MB", b as f64 / (1u64 << 20) as f64) } else { format!("{} KB", b.div_ceil(1024)) }
 }
 
 fn fmt_date(secs: i64) -> String {

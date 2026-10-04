@@ -7,6 +7,7 @@ pub mod cjk;
 pub mod deck;
 pub mod dupes;
 pub mod eqpanel;
+pub mod explore;
 pub mod fonts;
 pub mod home;
 pub mod import;
@@ -132,6 +133,7 @@ pub struct App {
     pub undo_toast: Option<(String, Instant)>,
     pub home: home::HomeState,
     pub recs: recs::Recs,
+    pub explore: explore::Explore,
     /// full-screen now playing
     pub nowplaying: bool,
 }
@@ -308,6 +310,7 @@ impl App {
             undo_toast: None,
             home: Default::default(),
             recs: Default::default(),
+            explore: Default::default(),
             nowplaying: false,
         };
         app.apply_look(&cc.egui_ctx);

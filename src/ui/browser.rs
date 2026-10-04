@@ -28,6 +28,8 @@ pub enum View {
     Import,
     Downloads,
     Duplicates,
+    /// new music picked from what you play
+    Discover,
     /// FIND SONGS: search YouTube for versions of a song to download
     Web,
 }
@@ -105,8 +107,8 @@ pub const COLUMNS: [Col; 11] = [
 /// Screens in the tab strip above the library (the sidebar lists only playlists):
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
-pub const NAV: [(&str, &str, &str, &str, &str); 12] = [
-    ("home", "tab", "🏠", "HOME", "Home"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
+pub const NAV: [(&str, &str, &str, &str, &str); 13] = [
+    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🧭", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
     ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
@@ -136,6 +138,7 @@ fn nav_of(v: &View) -> Option<&'static str> {
         View::Downloads => "downloads",
         View::Duplicates => "dupes",
         View::Web => "web",
+        View::Discover => "discover",
         View::Liked | View::Playlist(_) => return None,
     })
 }
@@ -157,6 +160,7 @@ pub fn view_for(key: &str) -> Option<View> {
         "import" => View::Import,
         "downloads" => View::Downloads,
         "web" => View::Web,
+        "discover" => View::Discover,
         _ => return None,
     })
 }
@@ -226,6 +230,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             View::Downloads => super::import::downloads(app, ui),
             View::Duplicates => super::dupes::show(app, ui),
             View::Web => super::websearch::show(app, ui),
+            View::Discover => super::explore::show(app, ui),
             _ => tracks_view(app, ui),
         }
     });

@@ -83,6 +83,7 @@ fn d_songs() -> String { "songs".into() }
 fn d_ten() -> u32 { 10 }
 fn d_five() -> u32 { 5 }
 fn d_three() -> u32 { 3 }
+fn d_template() -> String { "template".into() }
 fn d_sources() -> Vec<String> { ["library", "songs", "youtube"].map(String::from).to_vec() }
 fn d_normal() -> String { "normal".into() }
 fn d_pixel() -> String { "pixel".into() }
@@ -205,6 +206,10 @@ pub struct Settings {
     #[serde(default)] pub vis_bars: u32,
     // ---- layouts, lists, sidebar
     #[serde(default)] pub layouts: Vec<NamedLayout>,
+    /// "template" (docked panels that snap together) or "free" (every panel at a pixel position)
+    #[serde(default = "d_template")] pub layout_mode: String,
+    /// free layout: panel -> [x, y, width, height] in pixels from the top-left of the panel area
+    #[serde(default)] pub free_panels: std::collections::BTreeMap<String, [f32; 4]>,
     #[serde(default = "d_columns")] pub columns: Vec<String>,
     /// default sort per screen ("all", "liked", ...) -> "artist" / "-plays" ("-" = descending, "" = list order)
     #[serde(default)] pub sorts: std::collections::BTreeMap<String, String>,

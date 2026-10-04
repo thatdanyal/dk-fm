@@ -15,6 +15,7 @@ const NEWS: &[(&str, &str)] = &[
     ("🎤", "A new DK.FM logo, everywhere: the app, the taskbar and the tray."),
     ("✨", "Simpler for newcomers: fewer panels and columns open at first. Try the \"Default\" layout, or \"Everything\" for all panels."),
     ("📊", "Stats stay put: no more lists jumping around while you move the mouse."),
+    ("📐", "Free layout: put every panel exactly where you want it, to the pixel (Settings > Layouts > FREE)."),
     ("🔊", "The deck can't be closed or squeezed too small, so play, pause and volume are always there."),
     ("☰", "Drag songs in the queue to reorder them; hover a cover and click ▶ to play it."),
     ("💿", "Album covers next to every song in your lists."),

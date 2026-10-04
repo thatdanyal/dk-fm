@@ -9,6 +9,7 @@ pub mod dupes;
 pub mod eqpanel;
 pub mod explore;
 pub mod fonts;
+pub mod freelayout;
 pub mod home;
 pub mod import;
 pub mod keys;
@@ -531,6 +532,23 @@ impl App {
     pub fn reset_layout(&mut self) {
         self.dock = default_dock();
         self.save_dock();
+        self.edit_settings(|s| s.free_panels.clear());
+    }
+
+    fn layout_banner(&mut self, ctx: &egui::Context, text: &str) {
+        egui::Area::new(Id::new("layout-banner")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0]).order(Order::Foreground).show(ctx, |ui| {
+            egui::Frame::new().fill(self.pal.accent2).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(text).font(px(8.0)).color(self.pal.ink));
+                    if ui.button("RESET").clicked() {
+                        self.reset_layout();
+                    }
+                    if ui.button("DONE").clicked() {
+                        self.layout_edit = false;
+                    }
+                });
+            });
+        });
     }
 
     fn save_dock(&self) {
@@ -1129,6 +1147,12 @@ impl eframe::App for App {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::same(6))).show(ctx, |ui| deck::show_mini(self, ui));
         } else if self.nowplaying {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg)).show(ctx, |ui| nowplaying::show(self, ui));
+        } else if self.settings.lock().layout_mode == "free" {
+            let area = egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg).inner_margin(egui::Margin::same(4))).show(ctx, |ui| ui.max_rect()).inner;
+            freelayout::show(self, ctx, area);
+            if self.layout_edit {
+                self.layout_banner(ctx, "DRAG A TITLE BAR TO MOVE · DRAG THE CORNER TO RESIZE · PER PIXEL");
+            }
         } else {
             let pal = self.pal;
             egui::CentralPanel::default().frame(egui::Frame::new().fill(pal.bg).inner_margin(egui::Margin::same(4))).show(ctx, |ui| {
@@ -1173,19 +1197,7 @@ impl eframe::App for App {
                 }
             });
             if self.layout_edit {
-                egui::Area::new(Id::new("layout-banner")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0]).order(Order::Foreground).show(ctx, |ui| {
-                    egui::Frame::new().fill(self.pal.accent2).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("DRAG PANEL TABS TO MOVE · DRAG GAPS TO RESIZE · × HIDES").font(px(8.0)).color(self.pal.ink));
-                            if ui.button("RESET").clicked() {
-                                self.reset_layout();
-                            }
-                            if ui.button("DONE").clicked() {
-                                self.layout_edit = false;
-                            }
-                        });
-                    });
-                });
+                self.layout_banner(ctx, "DRAG PANEL TABS TO MOVE · DRAG GAPS TO RESIZE · × HIDES");
             }
         }
 

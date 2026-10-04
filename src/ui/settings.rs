@@ -657,6 +657,15 @@ fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
 
 fn layouts(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
+    caption(ui, &pal, "LAYOUT STYLE");
+    let mode = app.settings.lock().layout_mode.clone();
+    row(ui, &pal, "Panels", |ui| {
+        if let Some(m) = choice(ui, &pal, &mode, &[("template".to_string(), "TEMPLATE"), ("free".to_string(), "FREE (PER PIXEL)")]) {
+            app.edit_settings(|s| s.layout_mode = m);
+        }
+    });
+    dim(ui, &pal, if mode == "free" { "Free: put every panel exactly where you want it, any size, even overlapping. Ctrl+E, then drag a title bar to move and the corner to resize." } else { "Template: panels snap together side by side and fill the window. Ctrl+E, then drag tabs to move and the gaps to resize." });
+    spacer(ui);
     caption(ui, &pal, "PANEL LAYOUT");
     dim(ui, &pal, "Arrange the panels (LAYOUT in the title bar, or Ctrl+E), then save the arrangement here. Switch any time — also from Ctrl+K: type \"layout\".");
     ui.horizontal(|ui| {

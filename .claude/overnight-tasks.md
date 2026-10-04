@@ -21,9 +21,9 @@ STATUS: IN PROGRESS
 - [x] Lyrics fallback: if a song has no lyrics, fetch them from YouTube captions (yt-dlp subtitles/auto-captions) and save them with the song
 - [ ] "Shazam": identify music currently playing on the PC (capture system audio loopback for a few seconds, fingerprint, look up — e.g. an open song-recognition API / Shazam-style signature), show the result with a GET button
 - [x] Media controls outside the app: play/pause, next, previous from the taskbar / OS media overlay like Spotify (Windows SMTC + taskbar thumbnail buttons, MPRIS on Linux, Now Playing on macOS — e.g. the `souvlaki` crate)
-- [ ] First-run onboarding: friendly step-by-step instructions shown the first time the app is opened; ASK before creating a desktop/start-menu shortcut (only create it if the user says yes)
-- [ ] Update notice: users updating to this version see a "This is the biggest update yet" what's-new screen once
-- [ ] Better default settings: simpler, more minimalistic defaults (fewer panels/columns visible out of the box)
+- [x] First-run onboarding: friendly step-by-step instructions shown the first time the app is opened; ASK before creating a desktop/start-menu shortcut (only create it if the user says yes)
+- [x] Update notice: users updating to this version see a "This is the biggest update yet" what's-new screen once
+- [x] Better default settings: simpler, more minimalistic defaults (fewer panels/columns visible out of the box)
 - [x] Logo: new DK logo (purple DK + mic) added as assets/icon.png (1024px, rounded, transparent corners) and assets/icon.ico (16–256px) by the user's main session. Done — do not change it.
 
 ## Notes for the next run
@@ -35,3 +35,9 @@ STATUS: IN PROGRESS
   - Album covers in song rows can be turned off in Settings > Look; SMTC/MPRIS were already handled through `souvlaki` in `src/system.rs`.
   - The installer still creates shortcuts without asking; that's part of the first-run onboarding task.
 - Remaining, suggested order: better defaults -> update notice ("biggest update yet") -> first-run onboarding + ask before shortcut -> web search with version choice -> Discover -> per-pixel layout mode -> Shazam.
+- 2026-10-04 routine run 1 (commits d807318, 3462986): defaults, update notice and onboarding done.
+  - Defaults (`src/store.rs`, `default_dock()` in `src/ui/mod.rs`): fresh installs get Library + Deck + Queue/Lyrics (no Scope/EQ), scanlines off, columns num/like/title/artist/time, tabs Recent/Top hidden (`d_hidden_tabs`). Old full layout is the "Everything" preset. Existing users keep their saved values (all fields are saved).
+  - Welcome/what's new: `src/ui/welcome.rs` (Modal::Welcome / Modal::WhatsNew, picked by `welcome::first_modal` in App::new). Fresh install = no settings.json at start (`Settings.fresh`, serde-skipped); `onboarded` defaults to true for old settings files, set false only when fresh. `whats_new_seen` vs `welcome::WHATS_NEW`; fresh installs get it pre-set so they never see the notice. **Later runs: add each shipped feature as a line to `NEWS` in welcome.rs.**
+  - Installer (`src/install.rs`) no longer creates shortcuts; it only refreshes ones that already exist. The welcome's Windows-only step has two switches (off by default) -> `install::add_shortcuts`. Unverified on Windows (the PowerShell shortcut code itself is unchanged). Screenshots of both screens looked right under Xvfb (`apt install libxkbcommon-x11-0`, run `target/debug/dkfm` with `DKFM_USER_DATA=<tmp>` and `LIBGL_ALWAYS_SOFTWARE=1`).
+  - Build deps for the cloud: `apt-get install pkg-config libasound2-dev libgtk-3-dev libdbus-1-dev mingw-w64` and `rustup target add x86_64-pc-windows-gnu`.
+- Remaining, suggested order: web search with version choice -> Discover -> per-pixel layout mode -> Shazam.

@@ -160,6 +160,16 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
                 None => false,
             }
         }
+        Modal::Welcome { step, start_menu, desktop } => {
+            app.modal = super::welcome::show_welcome(app, ctx, step, start_menu, desktop);
+            false
+        }
+        Modal::WhatsNew => {
+            if super::welcome::show_whats_new(app, ctx) {
+                app.modal = Some(Modal::WhatsNew);
+            }
+            false
+        }
         Modal::Update => {
             let st = app.update.lock().clone();
             let mut close = false;

@@ -23,6 +23,7 @@ pub mod settings;
 pub mod sharing;
 pub mod stats;
 pub mod theme;
+pub mod welcome;
 pub mod widgets;
 
 use crate::downloader::Downloader;
@@ -70,6 +71,10 @@ pub enum Modal {
     Settings(settings::SetTab),
     Prompt { title: String, text: String, action: PromptAction },
     Update,
+    /// first-run welcome (shortcut switches start off)
+    Welcome { step: usize, start_menu: bool, desktop: bool },
+    /// the once-only notice after an update
+    WhatsNew,
 }
 
 #[derive(Clone)]
@@ -305,6 +310,7 @@ impl App {
             nowplaying: false,
         };
         app.apply_look(&cc.egui_ctx);
+        app.modal = welcome::first_modal(&app);
         app
     }
 

@@ -230,6 +230,13 @@ pub struct Settings {
     /// Home: new releases from your top artists (checked online at most once a day)
     #[serde(default = "d_true")] pub new_releases: bool,
     #[serde(default = "d_ten")] pub release_artists: u32,
+    // ---- welcome screens
+    /// the first-run welcome was finished (settings from before it existed count as done)
+    #[serde(default = "d_true")] pub onboarded: bool,
+    /// the "what's new" notice last shown (see ui::welcome::WHATS_NEW)
+    #[serde(default)] pub whats_new_seen: String,
+    /// no settings file yet when DK.FM started: a fresh install
+    #[serde(skip)] pub fresh: bool,
     /// keep any keys this version doesn't know about
     #[serde(flatten)] pub extra: Map<String, Value>,
 }
@@ -247,7 +254,13 @@ impl Settings {
         }
     }
     pub fn load() -> Self {
-        let mut s: Settings = load_json(&data_dir().join("settings.json"));
+        let path = data_dir().join("settings.json");
+        let fresh = !path.exists();
+        let mut s: Settings = load_json(&path);
+        s.fresh = fresh;
+        if fresh {
+            s.onboarded = false;
+        }
         let music = dirs::audio_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Music"));
         if s.music_folders.is_empty() && !s.extra.contains_key("musicFoldersSet") {
             s.music_folders = vec![music.to_string_lossy().into_owned()];

@@ -25,14 +25,14 @@ const CASSETTE: &[&str] = &[
 pub fn show(app: &mut App, ui: &mut Ui) {
     let avail = ui.available_size();
     // the deck always fits: smaller panels get a compact deck (the controls never disappear)
-    if avail.y < 250.0 || avail.x < 300.0 {
+    if avail.y < 280.0 || avail.x < 300.0 {
         return compact(app, ui);
     }
     let pal = app.pal;
     let st = app.player.status();
     let track = app.current_track();
     // cover + display shrink with the panel; big ones keep the full display
-    let top = (avail.y - 190.0).min(avail.x * 0.4).clamp(64.0, 168.0).round();
+    let top = (avail.y - 224.0).min(avail.x * 0.4).clamp(64.0, 168.0).round();
     egui::Frame::new().inner_margin(egui::Margin::same(10)).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 10.0;
         // ---- cover + LCD
@@ -44,7 +44,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             lcd(app, ui, lr, &st, track.as_ref(), top < 128.0);
         });
         // ---- waveform seek bar
-        let wh = (ui.available_height() - 110.0).clamp(28.0, 54.0);
+        let wh = (ui.available_height() - 144.0).clamp(28.0, 54.0);
         let (wr, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), wh), Sense::click_and_drag());
         waveform(app, ui, wr, &resp, &st);
         // ---- transport
@@ -67,7 +67,34 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
             sleep_button(app, ui);
         });
+        // ---- SHAZAM, its own button along the bottom
+        ui.horizontal(|ui| {
+            ui.add_space(((ui.available_width() - 150.0) / 2.0).max(0.0));
+            shazam_wide(app, ui, 150.0);
+        });
     });
+}
+
+/// The SHAZAM button as a wide bar (`w` px).
+fn shazam_wide(app: &mut App, ui: &mut Ui, w: f32) {
+    let pal = app.pal;
+    let busy = matches!(*app.browser.web.listen.lock(), super::websearch::Listen::Busy);
+    let r = tbtn(ui, &pal, if busy { "LISTENING…" } else { "♫ SHAZAM" }, Vec2::new(w, 26.0), busy, false);
+    app.mark("shazam", r.rect);
+    if r.on_hover_text("Shazam: name the song playing on this PC right now (in a browser, a game, a video…)").clicked() && !busy {
+        super::websearch::listen(app, ui.ctx());
+    }
+}
+
+/// SHAZAM: name the song playing on this PC (the answer floats above the window).
+fn shazam_button(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let busy = matches!(*app.browser.web.listen.lock(), super::websearch::Listen::Busy);
+    let r = icon(ui, &pal, if busy { "…" } else { "SHAZAM" }, busy);
+    app.mark("shazam", r.rect);
+    if r.on_hover_text("Shazam: name the song playing on this PC right now (in a browser, a game, a video…)").clicked() && !busy {
+        super::websearch::listen(app, ui.ctx());
+    }
 }
 
 /// Shuffle · previous · play/pause · next · repeat, centred; `k` scales the buttons.
@@ -179,7 +206,11 @@ fn compact(app: &mut App, ui: &mut Ui) {
             if tbtn(ui, &pal, "⏭", Vec2::new(40.0, 34.0) * k, false, false).on_hover_text("Next").clicked() {
                 app.player.next(true);
             }
-            if ui.available_width() > 90.0 {
+            let row = h >= 160.0; // room for a row of its own below
+            if !row && ui.available_width() > 170.0 {
+                volume(app, ui, if ui.available_width() > 280.0 { 140.0 } else { 80.0 });
+                shazam_button(app, ui);
+            } else if ui.available_width() > 90.0 {
                 volume(app, ui, if ui.available_width() > 200.0 { 60.0 } else { 8.0 });
             } else {
                 let muted = app.player.st.lock().muted;
@@ -188,6 +219,18 @@ fn compact(app: &mut App, ui: &mut Ui) {
                 }
             }
         });
+        if h >= 160.0 {
+            ui.horizontal(|ui| {
+                let liked = track.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);
+                if icon(ui, &pal, "♥", liked).on_hover_text("Like").clicked() {
+                    if let Some(t) = &track {
+                        app.lib.toggle_like(&t.id);
+                    }
+                }
+                let w = (ui.available_width() - 4.0).min(150.0);
+                shazam_wide(app, ui, w);
+            });
+        }
     });
 }
 

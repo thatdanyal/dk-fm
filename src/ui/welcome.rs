@@ -6,23 +6,29 @@ use super::{settings::window, App, Modal};
 use eframe::egui::{self, Vec2};
 
 /// Bump this (and rewrite NEWS) to show the notice again after a future update.
-pub const WHATS_NEW: &str = "biggest-update-2026-10";
+pub const WHATS_NEW: &str = "biggest-update-2026-10b";
 
-/// What's new, in plain words, one line each.
+/// What's new, in plain words, one line each (newest first).
 const NEWS: &[(&str, &str)] = &[
+    ("🌐", "FIND MUSIC: search songs, artists, albums, playlists, profiles, podcasts and audiobooks like on Spotify, with LOAD MORE. Open an artist to see all their songs and albums."),
+    ("▶", "Listen first: ▶ on any song you find online plays a preview before you download it (it isn't added to your library)."),
+    ("♫", "SHAZAM has its own button on the deck: DK.FM names the song playing on your PC and finds it for you."),
+    ("✨", "Songs like this: 10 to start (change it in Settings > Search), new-to-you songs first, nothing ticked until you choose."),
+    ("📖", "STUDY mode (title bar or Ctrl+Shift+S): just the lyrics and the deck. Pick what it shows in Settings > Layouts."),
+    ("🔲", "A new default layout, and RESET LAYOUT (or switching layouts) can be undone with UNDO / Ctrl+Z. A small window folds panels into tabs; full size stays exactly as you set it."),
+    ("📝", "Lyrics hold each line until it's sung, then glide smoothly to the next one."),
+    ("…", "… at the end of every song row: add it to playlists, the queue and more, like Spotify."),
+    ("⬇", "⬇ Downloads in the sidebar lists everything you downloaded; songs you get one at a time go into a Downloads folder."),
+    ("💿", "Songs saved twice show once, and CLEAN UP removes the extra copies. Delete from library & PC really deletes the file (to the Recycle Bin)."),
+    ("📦", "Moving to a new PC, or giving a friend a head start? Settings > Backup > SAVE MY WHOLE DK.FM."),
+    ("💡", "New here? Ctrl+K > Take the tour shows the main features one by one."),
+    ("🎧", "Better sound: downloads get the best audio YouTube has (HIGH), or LOSSLESS FLAC in Settings > Downloads."),
     ("🔍", "DISCOVER: new music picked from the artists you play and the songs you like."),
-    ("♫", "WHAT'S PLAYING? (on FIND SONGS, or Ctrl+K): DK.FM names the song playing on your PC, like Shazam, and offers to get it."),
-    ("🌐", "FIND SONGS: search YouTube and pick the version you want (clean, explicit, live, instrumental...), then + GET it."),
     ("🎤", "A new DK.FM logo, everywhere: the app, the taskbar and the tray."),
-    ("✨", "Simpler for newcomers: fewer panels and columns open at first. Try the \"Default\" layout, or \"Everything\" for all panels."),
-    ("📊", "Stats stay put: no more lists jumping around while you move the mouse."),
+    ("📊", "Stats stay put, and play counts stay in Stats instead of next to what you're listening to."),
     ("📐", "Free layout: put every panel exactly where you want it, to the pixel (Settings > Layouts > FREE)."),
-    ("🔊", "The deck can't be closed or squeezed too small, so play, pause and volume are always there."),
     ("☰", "Drag songs in the queue to reorder them; hover a cover and click ▶ to play it."),
-    ("💿", "Album covers next to every song in your lists."),
-    ("📝", "Lyrics grow and shrink with their panel, and come from YouTube captions when nothing else has them."),
-    ("▶", "Play, pause and skip from the taskbar thumbnail and your keyboard's media keys."),
-    ("🎧", "Better sound: downloads now get the best audio YouTube has (HIGH), or LOSSLESS FLAC in Settings > Downloads."),
+    ("⏸", "Play, pause and skip from the taskbar thumbnail and your keyboard's media keys."),
     ("🚪", "Closing DK.FM really quits: nothing left running in the background (keep it in the tray in Settings > System if you like)."),
 ];
 
@@ -94,7 +100,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
     let all = steps();
     let step = step.min(all.len() - 1);
     let folders: Vec<String> = app.music_folders().iter().map(|p| p.display().to_string()).collect();
-    let (mut next, mut back, mut skip, mut add_folder) = (false, false, false, false);
+    let (mut next, mut back, mut skip, mut add_folder, mut tour) = (false, false, false, false, false);
     let open = window(pal, ctx, "WELCOME", Vec2::new(520.0, 330.0), false, |ui| {
         ui.vertical_centered(|ui| match all[step] {
             Step::Hello => {
@@ -124,9 +130,9 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
                 title(ui, &pal, "GETTING SONGS");
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     line(ui, &pal, "📥", "+ IMPORT (Ctrl+I): paste a Spotify, YouTube or SoundCloud link and DK.FM downloads the songs.");
+                    line(ui, &pal, "🌐", "FIND MUSIC: search any song, artist or album, listen first, then + GET it.");
+                    line(ui, &pal, "♫", "SHAZAM on the deck names a song playing anywhere on your PC.");
                     line(ui, &pal, "🔎", "Ctrl+K: find any song in your library, or do anything else.");
-                    line(ui, &pal, "🏠", "HOME: mixes from your library and new releases from your artists.");
-                    line(ui, &pal, "🖱", "Right-click a song for everything you can do with it.");
                 });
             }
             Step::Shortcuts => {
@@ -147,9 +153,11 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
                 title(ui, &pal, "YOU'RE ALL SET");
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     line(ui, &pal, "▶", "Space plays and pauses; Ctrl+← / Ctrl+→ skip.");
-                    line(ui, &pal, "🖥", "F11: full-screen now playing with lyrics.");
-                    line(ui, &pal, "🧩", "Ctrl+E: move panels around. Ctrl+, : Settings.");
+                    line(ui, &pal, "📺", "F11: full-screen now playing with lyrics.");
+                    line(ui, &pal, "🔲", "Ctrl+E: move panels around. Ctrl+, : Settings.");
                 });
+                ui.add_space(6.0);
+                dim(ui, &pal, "New here? SHOW ME AROUND points out the main features one by one (about a minute).");
             }
         });
         ui.add_space(12.0);
@@ -157,7 +165,11 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
             ui.label(egui::RichText::new(format!("{}/{}", step + 1, all.len())).font(px(7.0)).color(pal.dim));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let last = step + 1 == all.len();
-                if button(ui, &pal, if last { "START LISTENING" } else { "NEXT" }, true, true).clicked() {
+                if last && button(ui, &pal, "SHOW ME AROUND", true, true).clicked() {
+                    next = true;
+                    tour = true;
+                }
+                if button(ui, &pal, if last { "I'LL EXPLORE MYSELF" } else { "NEXT" }, !last, true).clicked() {
                     next = true;
                 }
                 if step > 0 && button(ui, &pal, "BACK", false, true).clicked() {
@@ -180,6 +192,9 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
             std::thread::spawn(move || crate::install::add_shortcuts(start_menu, desktop));
         }
         app.edit_settings(|s| s.onboarded = true);
+        if tour {
+            super::tour::start(app);
+        }
         return None;
     }
     let step = if next { step + 1 } else if back { step.saturating_sub(1) } else { step };
@@ -189,7 +204,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
 /// The once-only notice after updating. Returns whether it stays open.
 pub fn show_whats_new(app: &mut App, ctx: &egui::Context) -> bool {
     let pal = app.pal;
-    let mut done = false;
+    let (mut done, mut tour) = (false, false);
     let open = window(pal, ctx, "WHAT'S NEW", Vec2::new(560.0, 420.0), true, |ui| {
         ui.horizontal(|ui| {
             logo(ui, 72.0);
@@ -212,10 +227,17 @@ pub fn show_whats_new(app: &mut App, ctx: &egui::Context) -> bool {
             if button(ui, &pal, "LET'S GO", true, true).clicked() {
                 done = true;
             }
+            if button(ui, &pal, "SHOW ME AROUND", false, true).on_hover_text("A quick tour of the main features").clicked() {
+                done = true;
+                tour = true;
+            }
         });
     });
     if done || !open {
         app.edit_settings(|s| s.whats_new_seen = WHATS_NEW.into());
+        if tour {
+            super::tour::start(app);
+        }
         return false;
     }
     true

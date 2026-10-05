@@ -217,6 +217,26 @@ impl Player {
         self.save_opts();
     }
 
+    /// Play one song right now, keeping the queue: it goes in just after the current song.
+    pub fn play_now(&self, id: String) {
+        let at = {
+            let mut st = self.st.lock();
+            if st.index < 0 || st.queue.is_empty() {
+                None
+            } else {
+                let at = (st.index + 1) as usize;
+                if let Some(u) = st.unshuffled.as_mut() { u.push(id.clone()); }
+                st.queue.insert(at, id.clone());
+                st.queue_gen += 1;
+                Some(at)
+            }
+        };
+        match at {
+            Some(at) => self.load(at as isize, true, 0.0),
+            None => self.play_list(vec![id], 0, Some(false)),
+        }
+    }
+
     pub fn play_index(&self, i: usize) {
         self.load(i as isize, true, 0.0);
     }

@@ -100,7 +100,7 @@ pub struct NameParts<'a> {
     pub title: &'a str,
     pub track: Option<u32>,
     pub year: Option<u32>,
-    /// the playlist / album name, or "Singles" / "Discovered"
+    /// the playlist / album name, or "Downloads" (songs you got one at a time)
     pub folder: &'a str,
 }
 
@@ -167,9 +167,13 @@ impl OrDefault for String {
     }
 }
 
-/// `{folder}`: the playlist or album name; single songs go to "Singles", radio finds to "Discovered".
+/// `{folder}`: the playlist or album name; songs you get one at a time (FIND MUSIC, Songs like
+/// this, Discover) go to "Downloads" (before 2.1: "Singles" / "Discovered").
+pub const DOWNLOADS: &str = "Downloads";
+/// `start_to` target that likes each song as it arrives (instead of adding it to a playlist)
+pub const LIKED: &str = "__liked__";
 fn folder_name(kind: &str, name: &str) -> String {
-    match kind { "track" => "Singles".into(), "radio" => "Discovered".into(), _ => name.into() }
+    match kind { "track" | "radio" => DOWNLOADS.into(), _ => name.into() }
 }
 
 /// Import matching strictness ->(minimum score to try a result, score to accept the best one
@@ -573,6 +577,10 @@ impl Downloader {
     fn deliver(&self, job_id: &str, idx: usize, ids: &[String]) {
         let Some(id) = ids.first() else { return };
         let Some((pid, ordered)) = self.jobs.lock().iter().find(|j| j.id == job_id).and_then(|j| Some((j.target_playlist.clone()?, j.tracks.len() > 1))) else { return };
+        if pid == LIKED {
+            self.lib.set_liked(&ids[..1], true);
+            return;
+        }
         if !ordered {
             self.lib.playlist_add(&pid, &ids[..1]);
             return;
@@ -807,7 +815,7 @@ mod tests {
         assert_eq!(r("{artist}/{album}/{track} {title}"), "ACDC/Back in Black/01 Hells Bells");
         assert_eq!(r("{year} - {album}\\{track}. {title}"), "1980 - Back in Black/01. Hells Bells");
         // missing values: empty folders are skipped, dangling separators trimmed
-        let q = NameParts { artist: "", album: "", title: "", track: None, year: None, folder: "Singles" };
+        let q = NameParts { artist: "", album: "", title: "", track: None, year: None, folder: "Downloads" };
         assert_eq!(render_name("{album}/{track} - {title}", &q).to_string_lossy(), "Untitled");
         assert_eq!(render_name("{artist}/{year}/{title}", &q).to_string_lossy().replace('\\', "/"), "Unknown/Untitled");
         // Windows: reserved characters and names, trailing dots, no escaping the folder
@@ -834,8 +842,8 @@ mod tests {
         // a file that's already downloaded finishes without yt-dlp or network
         let (_profile, dir) = crate::store::test_profile("dltest");
         let music = dir.join("Music");
-        std::fs::create_dir_all(music.join("Singles")).unwrap();
-        std::fs::write(music.join("Singles").join("Daft Punk - One More Time.m4a"), b"not really audio").unwrap();
+        std::fs::create_dir_all(music.join("Downloads")).unwrap();
+        std::fs::write(music.join("Downloads").join("Daft Punk - One More Time.m4a"), b"not really audio").unwrap();
         let lib = Library::load();
         let pid = lib.new_playlist("Mine", vec![]);
         let settings = Arc::new(Mutex::new(Settings { download_dir: music.display().to_string(), sync_hours: 0, ..Default::default() }));

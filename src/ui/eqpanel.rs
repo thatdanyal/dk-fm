@@ -47,8 +47,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 changed = true;
             }
         });
+        // fit the panel: a short one gets a thinner curve and shorter sliders, and the crossfade
+        // row only when there's room (it's also in Settings > Playback)
+        let room = ui.available_height();
+        let xfade = room > 215.0;
+        let curve_h = if room > 240.0 { 60.0 } else if room > 190.0 { 30.0 } else { 12.0 };
         // response curve
-        let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 60.0), Sense::hover());
+        let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), curve_h), Sense::hover());
         fill(ui.painter(), r, pal.lcd_bg);
         frame_rect(ui.painter(), r, 2.0, pal.line_hi);
         let n = (r.width() / 2.0) as usize;
@@ -70,7 +75,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         // sliders
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.spacing_mut().slider_width = (ui.available_height() - 50.0).clamp(70.0, 160.0);
+            ui.spacing_mut().slider_width = (ui.available_height() - if xfade { 72.0 } else { 44.0 }).clamp(28.0, 160.0);
             let col = |ui: &mut Ui, label: &str, v: &mut f32| -> bool {
                 let mut c = false;
                 ui.vertical(|ui| {
@@ -96,8 +101,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
             }
         });
-        ui.add_space(6.0);
         let mut opts = app.player.st.lock().opts.clone();
+        if !xfade {
+            return;
+        }
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("X-FADE").font(px(6.0)).color(pal.text));
             ui.spacing_mut().slider_width = 90.0;

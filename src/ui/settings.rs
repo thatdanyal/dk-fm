@@ -675,12 +675,31 @@ fn layouts(app: &mut App, ui: &mut Ui) {
     dim(ui, &pal, "Arrange the panels (LAYOUT in the title bar, or Ctrl+E), then save the arrangement here. Switch any time — also from Ctrl+K: type \"layout\".");
     ui.horizontal(|ui| {
         if button(ui, &pal, "EDIT LAYOUT", false, true).clicked() {
-            app.layout_edit = true;
+            if !app.layout_edit {
+                app.toggle_layout_edit();
+            }
             CLOSE.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        if button(ui, &pal, "RESET PANEL LAYOUT", false, true).clicked() {
+        if button(ui, &pal, "RESET PANEL LAYOUT", false, true).on_hover_text("Back to the default layout (UNDO / Ctrl+Z puts yours back)").clicked() {
             app.reset_layout();
-            app.toast("Layout reset");
+        }
+    });
+    dim(ui, &pal, "In a small window (not maximized), panels that don't fit fold into tabs for the time being; the layout you set comes back at full size.");
+    spacer(ui);
+    caption(ui, &pal, "STUDY MODE");
+    dim(ui, &pal, "STUDY in the title bar (or Ctrl+Shift+S) shows only what helps you focus, with the deck along the bottom. Pick what it shows, or arrange it yourself with LAYOUT while it's on: DK.FM remembers it.");
+    ui.horizontal_wrapped(|ui| {
+        for (name, panels) in super::STUDY_PRESETS {
+            if button(ui, &pal, name, false, true).clicked() {
+                let d = super::study_preset(panels);
+                let v = serde_json::to_value(&d).ok();
+                app.edit_settings(|s| s.study_dock = v);
+                if app.study.is_some() {
+                    app.toggle_study();
+                }
+                app.toggle_study();
+                CLOSE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     });
     spacer(ui);
@@ -942,11 +961,19 @@ const SOURCE_NAMES: [(&str, &str); 4] = [("library", "Your library"), ("songs", 
 fn search(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let s = app.settings.lock().clone();
-    caption(ui, &pal, "FIND SONGS ONLINE");
-    dim(ui, &pal, "The FIND SONGS tab searches YouTube and lists versions to pick from (clean, explicit, live...).");
+    caption(ui, &pal, "FIND MUSIC");
+    dim(ui, &pal, "FIND MUSIC searches YouTube Music. Under ALL it lists a few versions of the song to pick from (clean, explicit, live...); SEE ALL / LOAD MORE list more.");
     row(ui, &pal, "Versions per search", |ui| {
         if let Some(n) = choice(ui, &pal, &s.web_results, &[(1, "1"), (3, "3"), (5, "5"), (10, "10")]) {
             app.edit_settings(|s| s.web_results = n);
+        }
+    });
+    spacer(ui);
+    caption(ui, &pal, "SONGS LIKE THIS");
+    dim(ui, &pal, "How many songs \"Songs like this\" lists at first (SHOW MORE lists more).");
+    row(ui, &pal, "Songs to list", |ui| {
+        if let Some(n) = choice(ui, &pal, &s.like_count, &[(5, "5"), (10, "10"), (20, "20"), (50, "50")]) {
+            app.edit_settings(|s| s.like_count = n);
         }
     });
     spacer(ui);
@@ -1330,7 +1357,7 @@ fn naming(app: &mut App, ui: &mut Ui) {
     use crate::downloader::{render_name, NameParts, NAME_TOKENS};
     let pal = app.pal;
     caption(ui, &pal, "FILE NAMES");
-    dim(ui, &pal, "How downloaded songs are named inside the download folder. \"/\" makes a folder. {folder} is the playlist or album (single songs: Singles).");
+    dim(ui, &pal, "How downloaded songs are named inside the download folder. \"/\" makes a folder. {folder} is the playlist or album (songs you get one at a time: Downloads).");
     let mut pat = app.settings.lock().name_pattern.clone();
     let before = pat.clone();
     ui.horizontal(|ui| {
@@ -1359,7 +1386,7 @@ fn naming(app: &mut App, ui: &mut Ui) {
     let ext = crate::downloader::fmt_args(&app.settings.lock().download_format).0;
     let ex = |folder: &str, album: &str, track: Option<u32>| render_name(&pat, &NameParts { artist: "Daft Punk", album, title: "One More Time", track, year: Some(2001), folder }).display().to_string();
     ui.label(egui::RichText::new(format!("Example: {}.{ext}", ex("Party Mix", "Discovery", Some(1)))).color(pal.accent2));
-    dim(ui, &pal, &format!("A single song: {}.{ext}", ex("Singles", "", None)));
+    dim(ui, &pal, &format!("A single song: {}.{ext}", ex("Downloads", "", None)));
 }
 
 // ------------------------------------------------------------------------------- shortcuts
@@ -1577,6 +1604,12 @@ fn backups(app: &mut App, ui: &mut Ui) {
             app.setui.confirm = Some(Confirm::DeleteAll);
         }
     });
+    spacer(ui);
+    caption(ui, &pal, "MOVE TO A NEW PC · GIVE A FRIEND A HEAD START");
+    dim(ui, &pal, "One file with everything you've made and got: your playlists (in order), liked songs, every other song, and your settings, themes and layouts. Drop it on DK.FM on the other PC: songs already there are used, the rest download by themselves. It doesn't sync afterwards, and never holds your Spotify login, folders, play counts or history.");
+    if button(ui, &pal, "SAVE MY WHOLE DK.FM…", true, true).clicked() {
+        super::sharing::export_all(app);
+    }
     spacer(ui);
     caption(ui, &pal, "SHARE YOUR SETUP WITH A FRIEND");
     dim(ui, &pal, "A short code with your look & behaviour: theme, font, text size, lists, sidebar, shortcuts, visualizer, EQ and search. Never your Spotify login, folders, library, play counts or backups.");

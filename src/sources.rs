@@ -549,10 +549,10 @@ pub fn radio(title: &str, artist: &str, youtube_id: Option<&str>) -> Result<Coll
             v["entries"][0]["id"].as_str().ok_or("Could not find that song on YouTube Music.")?.to_string()
         }
     };
-    let mut col = generic(&format!("https://music.youtube.com/watch?v={seed}&list=RDAMVM{seed}"), Some(format!("Radio · {title}")), Some("radio"), 51)?;
+    let mut col = generic(&format!("https://music.youtube.com/watch?v={seed}&list=RDAMVM{seed}"), Some(format!("Songs like {title}")), Some("radio"), 51)?;
     col.tracks.retain(|t| t.youtube_id.as_deref() != Some(seed.as_str()));
     col.tracks.truncate(50);
-    col.owner = format!("Songs like {title} — {artist}");
+    col.owner = artist.to_string();
     col.id = format!("radio{seed}");
     Ok(col)
 }
@@ -676,40 +676,235 @@ fn music_search(q: &str, n: usize) -> Result<Vec<ITrack>, String> {
     let v = ytm("search", serde_json::json!({ "query": q, "params": "EgWKAQIIAWoKEAoQAxAEEAkQBQ==" }))?;
     let mut items = Vec::new();
     find_key(&v, "musicResponsiveListItemRenderer", &mut items);
+    Ok(items.into_iter().filter_map(song_item).take(n).collect())
+}
+
+/// A song in a YouTube Music search result ("Artist & Artist • Album • 3:45").
+fn song_item(r: &Value) -> Option<ITrack> {
     let runs = |r: &Value, col: usize| r["flexColumns"][col]["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"].as_array().cloned().unwrap_or_default();
-    let mut out = Vec::new();
-    for r in items {
-        let title_runs = runs(r, 0);
-        let Some(id) = r["playlistItemData"]["videoId"].as_str().or(title_runs.first().and_then(|t| t["navigationEndpoint"]["watchEndpoint"]["videoId"].as_str())) else { continue };
-        let title: String = title_runs.iter().filter_map(|t| t["text"].as_str()).collect();
-        // "Artist & Artist • Album • 3:45" (an unfiltered search starts with "Song •")
-        let mut segs: Vec<Vec<Value>> = vec![Vec::new()];
-        for run in runs(r, 1) {
-            if run["text"].as_str().map(|t| t.trim() == "•").unwrap_or(false) {
-                segs.push(Vec::new());
-            } else {
-                segs.last_mut().unwrap().push(run);
-            }
-        }
-        let text = |s: &[Value]| s.iter().filter_map(|t| t["text"].as_str()).collect::<String>();
-        if segs.len() > 2 && text(&segs[0]) == "Song" {
-            segs.remove(0);
-        }
-        let artists: Vec<String> = segs[0].iter().filter_map(|t| t["text"].as_str()).map(str::trim).filter(|t| !t.is_empty() && *t != "&" && *t != ",").map(String::from).collect();
-        let album = segs.iter().flatten().find(|t| t["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"] == "MUSIC_PAGE_TYPE_ALBUM").and_then(|t| t["text"].as_str()).unwrap_or("").to_string();
-        let secs = segs.last().map(|s| text(s)).and_then(|d| d.trim().split(':').try_fold(0.0, |acc, p| p.parse::<f64>().ok().map(|x| acc * 60.0 + x))).filter(|_| segs.len() > 1);
-        let thumb = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"].as_array().and_then(|a| a.last()).and_then(|t| t["url"].as_str());
-        // album art: ask for a 544px copy of the square thumbnail
-        let cover = thumb.map(|u| RE_THUMB_SIZE.replace(u, "=w544-h544").into_owned());
-        let mut t = yt_track(id, title.clone(), if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs");
-        t.explicit = r["badges"].to_string().contains("MUSIC_EXPLICIT_BADGE");
-        t.raw_title = title;
-        out.push(t);
-        if out.len() >= n {
-            break;
+    let title_runs = runs(r, 0);
+    let id = r["playlistItemData"]["videoId"].as_str().or(title_runs.first().and_then(|t| t["navigationEndpoint"]["watchEndpoint"]["videoId"].as_str()))?;
+    let title: String = title_runs.iter().filter_map(|t| t["text"].as_str()).collect();
+    // (an unfiltered search starts with "Song •")
+    let mut segs: Vec<Vec<Value>> = vec![Vec::new()];
+    for run in runs(r, 1) {
+        if run["text"].as_str().map(|t| t.trim() == "•").unwrap_or(false) {
+            segs.push(Vec::new());
+        } else {
+            segs.last_mut().unwrap().push(run);
         }
     }
-    Ok(out)
+    let text = |s: &[Value]| s.iter().filter_map(|t| t["text"].as_str()).collect::<String>();
+    if segs.len() > 2 && matches!(text(&segs[0]).as_str(), "Song" | "Video" | "Episode") {
+        segs.remove(0);
+    }
+    let artists: Vec<String> = segs[0].iter().filter_map(|t| t["text"].as_str()).map(str::trim).filter(|t| !t.is_empty() && *t != "&" && *t != ",").map(String::from).collect();
+    let album = segs.iter().flatten().find(|t| t["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"] == "MUSIC_PAGE_TYPE_ALBUM").and_then(|t| t["text"].as_str()).unwrap_or("").to_string();
+    let secs = segs.last().map(|s| text(s)).and_then(|d| parse_len(&d)).filter(|_| segs.len() > 1);
+    let thumb = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"].as_array().and_then(|a| a.last()).and_then(|t| t["url"].as_str());
+    // album art: ask for a 544px copy of the square thumbnail
+    let cover = thumb.map(|u| RE_THUMB_SIZE.replace(u, "=w544-h544").into_owned());
+    let mut t = yt_track(id, title.clone(), if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, cover, "songs");
+    t.explicit = r["badges"].to_string().contains("MUSIC_EXPLICIT_BADGE");
+    t.raw_title = title;
+    Some(t)
+}
+
+/// "3:45" / "1:02:03" -> seconds.
+fn parse_len(d: &str) -> Option<f64> {
+    let d = d.trim();
+    if !d.contains(':') {
+        return None;
+    }
+    d.split(':').try_fold(0.0, |acc, p| p.trim().parse::<f64>().ok().map(|x| acc * 60.0 + x))
+}
+
+// ------------------------------------------------------------------------------- online catalog (FIND MUSIC)
+
+/// What FIND MUSIC searches: (id, tab label).
+pub const CATEGORIES: [(&str, &str); 8] = [("all", "ALL"), ("songs", "SONGS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
+
+/// YouTube Music's search filters.
+fn category_params(cat: &str) -> Option<&'static str> {
+    Some(match cat {
+        "songs" => "EgWKAQIIAWoKEAoQAxAEEAkQBQ==",
+        "artists" => "EgWKAQIgAWoKEAoQAxAEEAkQBQ==",
+        "albums" => "EgWKAQIYAWoKEAoQAxAEEAkQBQ==",
+        "playlists" => "EgeKAQQoAEABagoQChADEAQQCRAF",
+        "profiles" => "EgWKAQJYAWoKEAoQAxAEEAkQBQ==",
+        "podcasts" => "EgWKAQJQAWoKEAoQAxAEEAkQBQ==",
+        _ => return None,
+    })
+}
+
+/// One thing found online.
+#[derive(Clone, Debug, Default)]
+pub struct Hit {
+    /// song | artist | album | playlist | profile | podcast
+    pub kind: String,
+    pub title: String,
+    /// "Album • Drake • 2026", "Artist • 133M monthly audience", ...
+    pub sub: String,
+    pub thumb: Option<String>,
+    /// its page (artist, album, playlist, profile, podcast)
+    pub browse: Option<String>,
+    /// album / playlist / podcast: the playlist that gets downloaded
+    pub playlist: Option<String>,
+    /// a song, video or episode
+    pub track: Option<ITrack>,
+}
+
+impl Hit {
+    fn of_track(t: ITrack) -> Hit {
+        let sub = [t.artists.join(", "), t.album.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
+        Hit { kind: "song".into(), title: t.title.clone(), sub, thumb: t.cover.clone(), track: Some(t), ..Default::default() }
+    }
+    /// An album (or playlist / podcast) as a release, for + GET.
+    pub fn release(&self) -> Option<Release> {
+        let parts: Vec<&str> = self.sub.split('•').map(str::trim).collect();
+        let kind = parts.iter().find(|p| matches!(**p, "Album" | "EP" | "Single")).map(|k| k.to_string()).unwrap_or_else(|| "Album".into());
+        let artist = parts.iter().find(|p| !matches!(**p, "Album" | "EP" | "Single") && p.parse::<u32>().is_err()).map(|a| a.to_string()).unwrap_or_default();
+        Some(Release { title: self.title.clone(), artist, kind, year: parts.iter().find_map(|p| p.parse::<u32>().ok().filter(|y| *y > 1900)), playlist: self.playlist.clone()?, cover: self.thumb.clone() })
+    }
+}
+
+/// A page of results; `more` continues it (LOAD MORE).
+#[derive(Clone, Debug, Default)]
+pub struct HitPage {
+    pub hits: Vec<Hit>,
+    pub more: Option<String>,
+}
+
+fn square_thumb(r: &Value, px: u32) -> Option<String> {
+    let mut t = Vec::new();
+    find_key(r, "thumbnails", &mut t);
+    let url = t.first().and_then(|a| a.as_array()).and_then(|a| a.last()).and_then(|t| t["url"].as_str())?;
+    Some(if RE_THUMB_SIZE.is_match(url) { RE_THUMB_SIZE.replace(url, format!("=w{px}-h{px}").as_str()).into_owned() } else { url.to_string() })
+}
+
+/// An artist / album / playlist / profile / podcast in a search result, else a song.
+fn hit_item(r: &Value) -> Option<Hit> {
+    let be = &r["navigationEndpoint"]["browseEndpoint"];
+    let kind = match be["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"].as_str().unwrap_or("") {
+        "MUSIC_PAGE_TYPE_ARTIST" => "artist",
+        "MUSIC_PAGE_TYPE_ALBUM" => "album",
+        "MUSIC_PAGE_TYPE_PLAYLIST" => "playlist",
+        "MUSIC_PAGE_TYPE_USER_CHANNEL" => "profile",
+        "MUSIC_PAGE_TYPE_PODCAST_SHOW_DETAIL_PAGE" => "podcast",
+        _ => return song_item(r).map(Hit::of_track),
+    };
+    let title = runs_text(&r["flexColumns"][0]["musicResponsiveListItemFlexColumnRenderer"]["text"]);
+    let sub = runs_text(&r["flexColumns"][1]["musicResponsiveListItemFlexColumnRenderer"]["text"]);
+    let browse = be["browseId"].as_str().map(String::from);
+    let mut eps = Vec::new();
+    find_key(r, "watchPlaylistEndpoint", &mut eps);
+    let playlist = eps
+        .iter()
+        .filter_map(|e| e["playlistId"].as_str())
+        .find(|p| !p.starts_with("RD"))
+        .map(String::from)
+        .or_else(|| browse.as_deref().and_then(|b| b.strip_prefix("VL").or(b.strip_prefix("MPSP"))).map(String::from))
+        .filter(|_| matches!(kind, "album" | "playlist" | "podcast"));
+    Some(Hit { kind: kind.into(), title, sub, thumb: square_thumb(&r["thumbnail"], 226), browse, playlist, track: None })
+}
+
+fn next_token(v: &Value) -> Option<String> {
+    let mut t = Vec::new();
+    find_key(v, "nextContinuationData", &mut t);
+    find_key(v, "continuationCommand", &mut t);
+    t.iter().find_map(|c| c["continuation"].as_str().or(c["token"].as_str())).map(String::from)
+}
+
+/// Search one category (`more` = the token from the page before, to load more).
+pub fn catalog(q: &str, cat: &str, more: Option<&str>) -> Result<HitPage, String> {
+    match cat {
+        "all" => {
+            // a few of each, fetched side by side
+            let parts: Vec<(&'static str, usize)> = vec![("artists", 3), ("songs", 6), ("albums", 6), ("playlists", 4)];
+            let handles: Vec<_> = parts
+                .into_iter()
+                .map(|(c, n)| {
+                    let q = q.to_string();
+                    (n, std::thread::spawn(move || catalog(&q, c, None)))
+                })
+                .collect();
+            let mut hits = Vec::new();
+            let mut err = None;
+            for (n, h) in handles {
+                match h.join().unwrap_or_else(|_| Err("search failed".into())) {
+                    Ok(p) => hits.extend(p.hits.into_iter().take(n)),
+                    Err(e) => err = Some(e),
+                }
+            }
+            if hits.is_empty() {
+                return Err(err.unwrap_or_else(|| "No results".into()));
+            }
+            Ok(HitPage { hits, more: None })
+        }
+        "audiobooks" => {
+            // YouTube Music has no audiobooks: long YouTube videos of them (`more` = how many so far)
+            let have: usize = more.and_then(|m| m.parse().ok()).unwrap_or(0);
+            let want = have + 20;
+            let found = search(&format!("{q} audiobook"), "youtube", want)?;
+            let full = found.len() >= want;
+            Ok(HitPage { hits: found.into_iter().skip(have).map(Hit::of_track).collect(), more: full.then(|| want.to_string()) })
+        }
+        _ => {
+            let v = match more {
+                Some(tok) => ytm("search", serde_json::json!({ "continuation": tok }))?,
+                None => ytm("search", serde_json::json!({ "query": q, "params": category_params(cat).ok_or("unknown category")? }))?,
+            };
+            let mut items = Vec::new();
+            find_key(&v, "musicResponsiveListItemRenderer", &mut items);
+            let hits: Vec<Hit> = items.into_iter().filter_map(hit_item).collect();
+            if hits.is_empty() && more.is_none() {
+                return Err("No results".into());
+            }
+            Ok(HitPage { more: next_token(&v).filter(|_| !hits.is_empty()), hits })
+        }
+    }
+}
+
+/// The songs of an album, playlist or podcast (by its playlist id), a page at a time.
+pub fn playlist_songs(playlist: &str, more: Option<&str>) -> Result<HitPage, String> {
+    let v = match more {
+        Some(tok) => ytm("browse", serde_json::json!({ "continuation": tok }))?,
+        None => ytm("browse", serde_json::json!({ "browseId": format!("VL{}", playlist.trim_start_matches("VL")) }))?,
+    };
+    let mut items = Vec::new();
+    find_key(&v, "musicResponsiveListItemRenderer", &mut items);
+    let hits: Vec<Hit> = items.into_iter().filter_map(list_item).map(Hit::of_track).collect();
+    Ok(HitPage { more: next_token(&v).filter(|_| !hits.is_empty()), hits })
+}
+
+/// A song in a playlist / album list: title | artists | album, its length in a fixed column.
+fn list_item(r: &Value) -> Option<ITrack> {
+    let id = r["playlistItemData"]["videoId"].as_str()?;
+    let col = |i: usize| &r["flexColumns"][i]["musicResponsiveListItemFlexColumnRenderer"]["text"];
+    let title = runs_text(col(0));
+    let artists: Vec<String> = col(1)["runs"].as_array().map(|a| a.iter().filter_map(|t| t["text"].as_str()).map(str::trim).filter(|t| !t.is_empty() && !matches!(*t, "&" | "," | "•")).map(String::from).collect()).unwrap_or_default();
+    // (an artist's song list has YouTube's play count there instead of the album)
+    let album = Some(runs_text(col(2))).filter(|a| !a.ends_with(" plays") && !a.ends_with(" views")).unwrap_or_default();
+    let secs = parse_len(&runs_text(&r["fixedColumns"][0]["musicResponsiveListItemFixedColumnRenderer"]["text"]));
+    let mut t = yt_track(id, title.clone(), if artists.is_empty() { vec!["Unknown Artist".into()] } else { artists }, album, secs, square_thumb(&r["thumbnail"], 544), "songs");
+    t.explicit = r["badges"].to_string().contains("MUSIC_EXPLICIT_BADGE");
+    t.raw_title = title;
+    Some(t)
+}
+
+/// A profile's public playlists.
+pub fn profile_playlists(browse: &str) -> Result<Vec<Hit>, String> {
+    let v = ytm("browse", serde_json::json!({ "browseId": browse }))?;
+    let mut items = Vec::new();
+    find_key(&v, "musicTwoRowItemRenderer", &mut items);
+    Ok(items
+        .into_iter()
+        .filter_map(|r| {
+            let b = r["navigationEndpoint"]["browseEndpoint"]["browseId"].as_str()?;
+            let pl = b.strip_prefix("VL")?;
+            Some(Hit { kind: "playlist".into(), title: runs_text(&r["title"]), sub: runs_text(&r["subtitle"]), thumb: square_thumb(&r["thumbnailRenderer"], 226), browse: Some(b.into()), playlist: Some(pl.into()), track: None })
+        })
+        .collect())
 }
 
 fn find_key<'a>(v: &'a Value, key: &str, out: &mut Vec<&'a Value>) {
@@ -752,6 +947,10 @@ impl Release {
 pub struct ArtistPage {
     pub songs: Vec<ITrack>,
     pub releases: Vec<Release>,
+    /// the playlist of all their songs (LOAD MORE after the top 5)
+    pub songs_all: Option<String>,
+    /// "Albums" / "Singles & EPs" in full: (label, browse id, params)
+    pub more: Vec<(String, String, String)>,
 }
 
 fn runs_text(v: &Value) -> String {
@@ -787,6 +986,7 @@ pub fn artist_page(id: &str) -> Result<ArtistPage, String> {
     // "Top songs": title | artists | plays | album
     let mut shelves = Vec::new();
     find_key(&v, "musicShelfRenderer", &mut shelves);
+    page.songs_all = shelves.iter().find_map(|s| s["bottomEndpoint"]["browseEndpoint"]["browseId"].as_str().or(s["title"]["runs"][0]["navigationEndpoint"]["browseEndpoint"]["browseId"].as_str())).and_then(|b| b.strip_prefix("VL")).map(String::from);
     for r in shelves.iter().flat_map(|s| s["contents"].as_array().map(|a| a.as_slice()).unwrap_or(&[])).map(|it| &it["musicResponsiveListItemRenderer"]) {
         let Some(vid) = r["playlistItemData"]["videoId"].as_str() else { continue };
         let cols: Vec<&Value> = r["flexColumns"].as_array().map(|a| a.iter().map(|c| &c["musicResponsiveListItemFlexColumnRenderer"]["text"]).collect()).unwrap_or_default();
@@ -803,18 +1003,36 @@ pub fn artist_page(id: &str) -> Result<ArtistPage, String> {
         if head != "Albums" && !head.starts_with("Singles") {
             continue;
         }
-        for r in s["contents"].as_array().map(|a| a.as_slice()).unwrap_or(&[]).iter().map(|it| &it["musicTwoRowItemRenderer"]).filter(|r| album_page(r)) {
-            let mut eps = Vec::new();
-            find_key(r, "watchPlaylistEndpoint", &mut eps);
-            let Some(pl) = eps.iter().filter_map(|e| e["playlistId"].as_str()).find(|p| p.starts_with("OLAK")) else { continue };
-            // "Single • 2026", "EP • 2024" or just "2025"
-            let sub = runs_text(&r["subtitle"]);
-            let parts: Vec<&str> = sub.split('•').map(str::trim).collect();
-            let kind = parts.iter().find(|p| matches!(**p, "Album" | "EP" | "Single")).map(|k| k.to_string()).unwrap_or_else(|| if head == "Albums" { "Album".into() } else { "Single".into() });
-            page.releases.push(Release { title: runs_text(&r["title"]), artist: name.clone(), kind, year: parts.iter().find_map(|p| p.parse::<u32>().ok().filter(|y| *y > 1900)), playlist: pl.into(), cover: first_thumb(&r["thumbnailRenderer"]) });
+        let more = &s["header"]["musicCarouselShelfBasicHeaderRenderer"]["moreContentButton"]["buttonRenderer"]["navigationEndpoint"]["browseEndpoint"];
+        if let Some(b) = more["browseId"].as_str() {
+            page.more.push((head.clone(), b.to_string(), urlencoding::decode(more["params"].as_str().unwrap_or("")).map(|p| p.into_owned()).unwrap_or_default()));
         }
+        let default = if head == "Albums" { "Album" } else { "Single" };
+        page.releases.extend(s["contents"].as_array().map(|a| a.as_slice()).unwrap_or(&[]).iter().filter_map(|it| release_item(&it["musicTwoRowItemRenderer"], &name, default)));
     }
     Ok(page)
+}
+
+/// An album / single tile ("Single • 2026", "EP • 2024" or just "2025").
+fn release_item(r: &Value, artist: &str, default: &str) -> Option<Release> {
+    if r["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"] != "MUSIC_PAGE_TYPE_ALBUM" {
+        return None;
+    }
+    let mut eps = Vec::new();
+    find_key(r, "watchPlaylistEndpoint", &mut eps);
+    let pl = eps.iter().filter_map(|e| e["playlistId"].as_str()).find(|p| p.starts_with("OLAK"))?;
+    let sub = runs_text(&r["subtitle"]);
+    let parts: Vec<&str> = sub.split('•').map(str::trim).collect();
+    let kind = parts.iter().find(|p| matches!(**p, "Album" | "EP" | "Single")).map(|k| k.to_string()).unwrap_or_else(|| default.into());
+    Some(Release { title: runs_text(&r["title"]), artist: artist.into(), kind, year: parts.iter().find_map(|p| p.parse::<u32>().ok().filter(|y| *y > 1900)), playlist: pl.into(), cover: first_thumb(&r["thumbnailRenderer"]) })
+}
+
+/// All of an artist's albums (or singles & EPs): the "more" page of their artist page.
+pub fn discography(artist: &str, browse: &str, params: &str) -> Result<Vec<Release>, String> {
+    let v = ytm("browse", serde_json::json!({ "browseId": browse, "params": params }))?;
+    let mut items = Vec::new();
+    find_key(&v, "musicTwoRowItemRenderer", &mut items);
+    Ok(items.into_iter().filter_map(|r| release_item(r, artist, "Album")).collect())
 }
 
 /// When a release came out (unix seconds): the upload date of its first song.
@@ -933,6 +1151,38 @@ pub fn rank(cands: Vec<Cand>, t: &ITrack) -> Vec<Cand> {
 
 #[cfg(test)]
 mod tests {
+    // network: cargo test catalog -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn catalog_finds_every_kind() {
+        for cat in ["all", "songs", "artists", "albums", "playlists", "profiles", "podcasts"] {
+            let p = catalog("drake", cat, None).unwrap();
+            println!("{cat}: {} · more {} · {:?}", p.hits.len(), p.more.is_some(), p.hits.iter().take(2).map(|h| (&h.kind, &h.title, &h.sub)).collect::<Vec<_>>());
+            assert!(!p.hits.is_empty());
+            if cat != "all" {
+                let next = catalog("drake", cat, p.more.as_deref()).unwrap();
+                println!("  next page: {}", next.hits.len());
+                assert!(!next.hits.is_empty());
+            }
+        }
+        let albums = catalog("drake", "albums", None).unwrap();
+        let a = albums.hits.iter().find(|h| h.playlist.is_some()).unwrap();
+        let songs = playlist_songs(a.playlist.as_ref().unwrap(), None).unwrap();
+        println!("album {}: {} songs, first {:?}", a.title, songs.hits.len(), songs.hits[0].track.as_ref().map(|t| (&t.title, &t.artists, t.duration_ms)));
+        assert!(songs.hits[0].track.as_ref().unwrap().duration_ms.is_some());
+        let artist = catalog("drake", "artists", None).unwrap().hits.into_iter().next().unwrap();
+        let page = artist_page(artist.browse.as_ref().unwrap()).unwrap();
+        println!("artist: {} songs, {} releases, all songs {:?}, more {:?}", page.songs.len(), page.releases.len(), page.songs_all, page.more);
+        let all = playlist_songs(page.songs_all.as_ref().unwrap(), None).unwrap();
+        println!("all songs: {} (+more {})", all.hits.len(), all.more.is_some());
+        let (_, b, p) = &page.more[0];
+        let disc = discography("Drake", b, p).unwrap();
+        println!("discography: {}", disc.len());
+        assert!(disc.len() >= page.releases.iter().filter(|r| r.kind == "Album").count());
+        let prof = catalog("drake", "profiles", None).unwrap().hits.into_iter().next().unwrap();
+        println!("profile playlists: {:?}", profile_playlists(prof.browse.as_ref().unwrap()).map(|v| v.len()));
+    }
+
     use super::*;
 
     #[test]

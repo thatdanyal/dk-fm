@@ -75,7 +75,7 @@ fn d_format() -> String { "high".into() }
 fn d_conc() -> u32 { 3 }
 fn d_sync() -> u32 { 6 }
 fn d_vol() -> f32 { 0.8 }
-fn d_vis() -> String { "bars".into() }
+fn d_vis() -> String { "off".into() }
 fn d_fps() -> u32 { 30 }
 fn d_repeat() -> String { "off".into() }
 fn d_one() -> f32 { 1.0 }
@@ -177,9 +177,12 @@ pub struct Settings {
     /// "find new songs" in a playlist: "songs" (YouTube Music) or "youtube", and how many results
     #[serde(default = "d_songs")] pub search_source: String,
     #[serde(default = "d_ten")] pub search_results: u32,
-    /// FIND SONGS (web search): how many versions to show, and where ("songs" | "youtube")
+    /// FIND MUSIC: how many versions of a song ALL shows (SEE ALL lists more); `web_source` is
+    /// from before FIND MUSIC had categories
     #[serde(default = "d_three")] pub web_results: u32,
     #[serde(default = "d_songs")] pub web_source: String,
+    /// "Songs like this": how many to list at first (SHOW MORE adds as many again)
+    #[serde(default = "d_ten")] pub like_count: u32,
     /// playlist songs were last added to (listed first in Ctrl+K's playlist picker)
     #[serde(default)] pub last_playlist: String,
     /// where "add songs" looks, in order: library, songs (YouTube Music), youtube, soundcloud
@@ -208,6 +211,8 @@ pub struct Settings {
     #[serde(default)] pub layouts: Vec<NamedLayout>,
     /// "template" (docked panels that snap together) or "free" (every panel at a pixel position)
     #[serde(default = "d_template")] pub layout_mode: String,
+    /// study mode's own layout (lyrics with the deck below, unless you arrange it differently)
+    #[serde(default)] pub study_dock: Option<Value>,
     /// free layout: panel -> [x, y, width, height] in pixels from the top-left of the panel area
     #[serde(default)] pub free_panels: std::collections::BTreeMap<String, [f32; 4]>,
     #[serde(default = "d_columns")] pub columns: Vec<String>,

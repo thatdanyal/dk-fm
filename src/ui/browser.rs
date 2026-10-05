@@ -1,7 +1,7 @@
 //! Library browser: sources sidebar + views (songs, albums, artists, playlists, stats, import,
 //! downloads). Song lists are virtualised (only visible rows are laid out).
 use super::theme::{px, vt};
-use super::widgets::{button, fill, fmt_long, fmt_time, frame_rect, with_alpha};
+use super::widgets::{button, fill, fmt_long, fmt_time, frame_rect, tb_button, with_alpha};
 use super::{App, Modal, PromptAction};
 use crate::library::main_artist;
 use crate::store::Track;
@@ -13,6 +13,8 @@ pub enum View {
     Home,
     All,
     Liked,
+    /// every song DK.FM downloaded (the sidebar's ⬇ Downloads), newest first
+    Downloaded,
     Top,
     Recent,
     Albums,
@@ -30,7 +32,7 @@ pub enum View {
     Duplicates,
     /// new music picked from what you play
     Discover,
-    /// FIND SONGS: search YouTube for versions of a song to download
+    /// FIND MUSIC: search YouTube Music for songs, artists, albums… to download
     Web,
 }
 
@@ -90,7 +92,8 @@ pub struct Col {
 const fn col(id: &'static str, head: &'static str, width: f32, share: f32, right: bool, sort: Option<SortKey>, name: &'static str, narrow: bool) -> Col {
     Col { id, head, width, share, right, sort, name, narrow }
 }
-pub const COLUMNS: [Col; 11] = [
+/// (play counts aren't a column: they belong in Stats, not next to what you're listening to)
+pub const COLUMNS: [Col; 10] = [
     col("num", "#", 44.0, 0.0, true, Some(SortKey::TrackNo), "# (position / track number)", true),
     col("like", "", 24.0, 0.0, false, None, "♥ Like", true),
     col("title", "TITLE", 0.0, 3.0, false, Some(SortKey::Title), "Title", true),
@@ -99,7 +102,6 @@ pub const COLUMNS: [Col; 11] = [
     col("genre", "GENRE", 0.0, 1.5, false, Some(SortKey::Genre), "Genre", false),
     col("year", "YEAR", 44.0, 0.0, true, Some(SortKey::Year), "Year", false),
     col("time", "TIME", 56.0, 0.0, true, Some(SortKey::Duration), "Length", true),
-    col("plays", "PLAYS", 44.0, 0.0, true, Some(SortKey::Plays), "Plays", false),
     col("bitrate", "KBPS", 48.0, 0.0, true, Some(SortKey::Bitrate), "Bitrate", false),
     col("added", "ADDED", 84.0, 0.0, true, Some(SortKey::Added), "Date added", false),
 ];
@@ -108,7 +110,7 @@ pub const COLUMNS: [Col; 11] = [
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
 pub const NAV: [(&str, &str, &str, &str, &str); 13] = [
-    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🔍", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
+    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🔍", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND MUSIC", "Find music online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
     ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
@@ -139,7 +141,7 @@ fn nav_of(v: &View) -> Option<&'static str> {
         View::Duplicates => "dupes",
         View::Web => "web",
         View::Discover => "discover",
-        View::Liked | View::Playlist(_) => return None,
+        View::Liked | View::Downloaded | View::Playlist(_) => return None,
     })
 }
 
@@ -151,6 +153,7 @@ pub fn view_for(key: &str) -> Option<View> {
         "home" => View::Home,
         "all" => View::All,
         "liked" => View::Liked,
+        "downloaded" => View::Downloaded,
         "top" => View::Top,
         "recent" => View::Recent,
         "albums" => View::Albums,
@@ -178,6 +181,9 @@ pub struct BrowserState {
     albums: Vec<(String, String, String, Option<String>, Option<u32>, usize)>, // key, name, artist, cover, year, n
     artists: Vec<(String, String, Option<String>, usize)>,
     pub dupes: super::dupes::DupeState,
+    /// extra copies of songs (every copy but the best), hidden from the library views; by gen
+    copies: (u64, std::sync::Arc<HashSet<String>>, Vec<Vec<String>>),
+    downloaded: (u64, std::sync::Arc<Vec<String>>),
     pub add: super::addsongs::AddBox,
     pub web: super::websearch::WebState,
     side_key: Option<(u64, u64, String)>,
@@ -188,7 +194,7 @@ pub struct BrowserState {
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0 }
+        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), copies: (u64::MAX, Default::default(), Vec::new()), downloaded: (u64::MAX, Default::default()), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0 }
     }
 }
 
@@ -280,6 +286,7 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     ui.painter().hline(strip.x_range(), strip.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
     let mut go: Option<&str> = None;
     for (id, label, r) in &tabs {
+        app.mark(id, *r);
         let resp = ui.interact(*r, ui.id().with(("nav", *id)), Sense::click());
         let on = cur == Some(*id);
         if on {
@@ -300,6 +307,7 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     let ry = area.top() + 7.0;
     for (id, w) in right {
         let r = Rect::from_min_size(Pos2::new(rx, ry), Vec2::new(w, row_h - 6.0));
+        app.mark(id, r);
         rx += w + 4.0;
         let resp = ui.interact(r, ui.id().with(("nav", id)), Sense::click());
         let on = cur == Some(id) || id == "more" && cur == Some("dupes");
@@ -436,6 +444,7 @@ enum SideAct {
 fn sidebar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let n_liked = app.lib.data.read().stats.values().filter(|s| s.liked).count();
+    let n_downloaded = downloaded_ids(app).len();
     let (sort, thumbs) = { let s = app.settings.lock(); (s.playlist_sort.clone(), s.sidebar_covers) };
     let custom = sort == "custom";
     let key = (app.lib.gen.load(std::sync::atomic::Ordering::Relaxed), app.plcovers.stamp(), sort.clone());
@@ -512,7 +521,17 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         ui.painter().text(r.center(), Align2::CENTER_CENTER, txt, vt(size), if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
         resp
     };
-    if hbtn(ui, hr.right() - 18.0, "+", 24.0, false, "New playlist", "pl-new").clicked() {
+    // + new playlist: a real plus (two bars), clearer than the pixel font's "+"
+    let pr = Rect::from_center_size(Pos2::new(hr.right() - 18.0, hr.center().y), Vec2::splat(24.0));
+    let presp = ui.interact(pr, ui.id().with("pl-new"), Sense::click()).on_hover_text("New playlist");
+    let pc = if presp.hovered() { pal.accent } else { pal.text };
+    if presp.hovered() {
+        frame_rect(ui.painter(), pr, 2.0, pal.line_hi);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    fill(ui.painter(), Rect::from_center_size(pr.center(), Vec2::new(14.0, 3.0)), pc);
+    fill(ui.painter(), Rect::from_center_size(pr.center(), Vec2::new(3.0, 14.0)), pc);
+    if presp.clicked() {
         app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
     }
     let r = hbtn(ui, hr.right() - 44.0, "↕", 15.0, !custom, "Sort playlists · new folder", "pl-sortb");
@@ -541,6 +560,9 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical().id_salt("side").auto_shrink([false; 2]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         item(ui, app, Some(View::Liked), "♥", "Liked", Some(n_liked), 0.0, None, None, false);
+        if n_downloaded > 0 {
+            item(ui, app, Some(View::Downloaded), "⬇", "Downloads", Some(n_downloaded), 0.0, None, None, false);
+        }
         for row in &rows {
             if row.is_folder {
                 let resp = item(ui, app, None, row.icon, &row.name, Some(row.n), 0.0, None, Some(SideDrag::Folder(row.id.clone())), false);
@@ -591,10 +613,6 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
                     playlist_menu_ui(app, ui, &pl);
                 }
             });
-        }
-        let none_yours = app.lib.data.read().playlists.iter().all(|p| p.is_imported());
-        if none_yours && item(ui, app, None, "+", "New playlist", None, 0.0, None, None, false).clicked() {
-            app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
         }
         // the empty space below: drop here to take a playlist out of its folder / unpin it
         let h = ui.available_height().max(28.0);
@@ -867,16 +885,42 @@ struct ListCfg {
     back: Option<View>,
 }
 
+/// Songs DK.FM downloaded: files inside the download folder (cached per library change).
+fn downloaded_ids(app: &mut App) -> std::sync::Arc<Vec<String>> {
+    let gen = app.lib.gen.load(std::sync::atomic::Ordering::Relaxed);
+    if app.browser.downloaded.0 != gen {
+        let norm = |p: &str| p.replace('\\', "/").to_lowercase();
+        let dir = norm(&app.settings.lock().download_dir);
+        let ids: Vec<String> = if dir.is_empty() { Vec::new() } else { app.lib.data.read().tracks.values().filter(|t| norm(&t.path).starts_with(&dir)).map(|t| t.id.clone()).collect() };
+        app.browser.downloaded = (gen, std::sync::Arc::new(ids));
+    }
+    app.browser.downloaded.1.clone()
+}
+
+/// Copies of a song beyond the best one (same song downloaded into two playlists' folders):
+/// the library views list each song once. Playlists still show what they contain.
+fn extra_copies(app: &mut App, gen: u64) -> std::sync::Arc<HashSet<String>> {
+    if app.browser.copies.0 != gen {
+        let groups = app.lib.duplicate_groups();
+        let extra: HashSet<String> = groups.iter().flat_map(|g| g.iter().skip(1).cloned()).collect();
+        app.browser.copies = (gen, std::sync::Arc::new(extra), groups);
+    }
+    app.browser.copies.1.clone()
+}
+
 fn tracks_view(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let gen = app.lib.gen.load(std::sync::atomic::Ordering::Relaxed);
     let view = app.browser.view.clone();
+    let extra = extra_copies(app, gen);
+    let downloaded = if view == View::Downloaded { downloaded_ids(app) } else { Default::default() };
     let cfg = {
         let d = app.lib.data.read();
-        let all = || d.tracks.values();
+        let all = || d.tracks.values().filter(|t| !extra.contains(&t.id));
         let now = crate::store::now_ms();
         let (ids, cfg): (Vec<String>, ListCfg) = match &view {
             View::All => (all().map(|t| t.id.clone()).collect(), ListCfg { title: "ALL TRACKS".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "all"), back: None }),
+            View::Downloaded => (downloaded.iter().cloned().collect(), ListCfg { title: "DOWNLOADS".into(), sub: "SONGS DK.FM DOWNLOADED".into(), cover: None, playlist: None, default_sort: Some((SortKey::Added, false)), back: None }),
             View::Liked => (all().filter(|t| d.stats.get(&t.id).map(|s| s.liked).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "LIKED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "liked"), back: None }),
             View::Top => (all().filter(|t| d.stats.get(&t.id).map(|s| s.plays > 0).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "MOST PLAYED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "top"), back: None }),
             View::Recent => (all().filter(|t| now - t.added_at < 60.0 * 86400.0 * 1000.0).map(|t| t.id.clone()).collect(), ListCfg { title: "RECENTLY ADDED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "recent"), back: None }),
@@ -1012,6 +1056,37 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+    // ⬇ Downloads: songs on their way
+    if view == View::Downloaded {
+        let n = app.dl.active_count();
+        if n > 0 {
+            egui::Frame::new().fill(pal.panel_hi).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("{n} song{} downloading…", if n == 1 { "" } else { "s" })).color(pal.text));
+                    if tb_button(ui, &pal, "SEE PROGRESS", false).clicked() {
+                        app.browser.set_view(View::Downloads);
+                    }
+                });
+            });
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(800));
+        }
+    }
+    // the same song saved more than once (e.g. in two playlists' folders): one click keeps the best
+    if view == View::All && !app.browser.copies.2.is_empty() && app.browser.search.is_empty() {
+        let groups = app.browser.copies.2.clone();
+        let n = groups.len();
+        egui::Frame::new().fill(pal.panel_hi).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{n} song{} saved more than once on your PC (shown once here).", if n == 1 { " is" } else { "s are" })).color(pal.text));
+                if button(ui, &pal, "CLEAN UP", true, true).on_hover_text("Keep the best copy of each (highest quality); playlists, plays and likes move to it and the extra files go to the Recycle Bin. Ctrl+Z undoes it.").clicked() {
+                    super::dupes::merge(app, groups.into_iter().map(|g| (g[0].clone(), g)).collect());
+                }
+                if tb_button(ui, &pal, "CHOOSE…", false).on_hover_text("Pick which copy to keep").clicked() {
+                    app.browser.set_view(View::Duplicates);
+                }
+            });
+        });
+    }
     // add-songs box: open on request, and always in an empty playlist
     if let Some(p) = &cfg.playlist {
         if app.browser.add.open || ids.is_empty() && app.browser.search.is_empty() {
@@ -1033,7 +1108,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     };
     let shown: Vec<&Col> = chosen.iter().filter_map(|c| COLUMNS.iter().find(|x| x.id == c)).filter(|c| !narrow || c.narrow).collect();
     let shown: Vec<&Col> = if shown.iter().any(|c| c.share > 0.0) { shown } else { COLUMNS.iter().filter(|c| c.id == "title").chain(shown).collect() };
-    let fixed: f32 = shown.iter().map(|c| c.width).sum::<f32>() + 16.0;
+    // (+ room at the right end for the ⋯ button)
+    let fixed: f32 = shown.iter().map(|c| c.width).sum::<f32>() + 16.0 + 30.0;
     let flex = (w - fixed - 8.0 * (shown.len().max(7) - 1) as f32).max(120.0);
     let shares: f32 = shown.iter().map(|c| c.share).sum();
     let cols: Vec<(&Col, f32)> = shown.into_iter().map(|c| (c, if c.share > 0.0 { flex * c.share / shares } else { c.width })).collect();
@@ -1170,6 +1246,31 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     ui.set_min_width(210.0);
                     track_menu(app, ui, &ids, i, cfg.playlist.as_ref());
                 });
+                // ⋯ at the right end (like Spotify): the same menu as right-click, e.g. Add to playlist
+                let menu_id = ui.make_persistent_id(("row-more", id));
+                let open = ui.memory(|m| m.is_popup_open(menu_id));
+                if open || ui.rect_contains_pointer(r) {
+                    let dr = Rect::from_center_size(Pos2::new(r.right() - 18.0, cy), Vec2::new(26.0, 22.0));
+                    let dresp = ui.interact(dr, menu_id.with("btn"), Sense::click()).on_hover_text("More: add to playlist, queue, …");
+                    if dresp.hovered() || open {
+                        frame_rect(ui.painter(), dr, 1.0, pal.line_hi);
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    for k in -1..=1 {
+                        fill(ui.painter(), Rect::from_center_size(dr.center() + Vec2::new(k as f32 * 6.0, 0.0), Vec2::splat(3.0)), if dresp.hovered() || open { pal.accent } else { pal.text });
+                    }
+                    if dresp.clicked() {
+                        if !app.browser.selection.contains(id) {
+                            app.browser.selection = HashSet::from([id.clone()]);
+                            app.browser.anchor = Some(i);
+                        }
+                        ui.memory_mut(|m| m.toggle_popup(menu_id));
+                    }
+                    egui::popup::popup_below_widget(ui, menu_id, &dresp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+                        ui.set_min_width(210.0);
+                        track_menu(app, ui, &ids, i, cfg.playlist.as_ref());
+                    });
+                }
             }
         });
         if let Some(p) = &recs {
@@ -1271,7 +1372,7 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
         app.player.enqueue(sel.clone());
         ui.close_menu();
     }
-    if ui.add_enabled(one.is_some(), egui::Button::new("✨ More like this")).clicked() {
+    if ui.add_enabled(one.is_some(), egui::Button::new("✨ Songs like this")).on_hover_text("Similar songs: listen first, download the ones you like").clicked() {
         if let Some(t) = &one {
             super::import::radio_for(app, t);
         }
@@ -1321,15 +1422,38 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
             ui.close_menu();
         }
     }
-    if ui.button(format!("Remove from library{}", if sel.len() > 1 { format!(" ({})", sel.len()) } else { String::new() })).clicked() {
-        let u = app.lib.snapshot(format!("Removed {} from your library", plural(sel.len())), &[], &sel);
-        for id in &sel {
-            app.lib.remove_track(id);
-        }
-        app.undoable(u);
-        app.browser.selection.clear();
+    if ui.button(format!("Delete from library & PC{}", if sel.len() > 1 { format!(" ({})", sel.len()) } else { String::new() })).on_hover_text("Removes the song from DK.FM and every playlist, and moves its file to the Recycle Bin (restore it from there if you change your mind)").clicked() {
+        delete_songs(app, &sel);
         ui.close_menu();
     }
+}
+
+/// "Delete from library & PC": out of the library and every playlist, files to the Recycle Bin.
+/// The song playing right now is left alone (its file is open).
+pub(super) fn delete_songs(app: &mut App, sel: &[String]) {
+    let playing = app.player.current_id();
+    let skipped = playing.as_ref().is_some_and(|p| sel.contains(p));
+    let sel: Vec<String> = sel.iter().filter(|id| Some(*id) != playing.as_ref()).cloned().collect();
+    if sel.is_empty() {
+        app.toast("That song is playing: skip to another song first, then delete it");
+        return;
+    }
+    let mut u = app.lib.snapshot(format!("Deleted {}", plural(sel.len())), &[], &sel);
+    let files: Vec<std::path::PathBuf> = sel.iter().filter_map(|id| app.lib.track(id)).map(|t| std::path::PathBuf::from(&t.path)).collect();
+    for id in &sel {
+        app.lib.remove_track(id);
+    }
+    u.trashed = files.len();
+    app.undoable(u);
+    app.browser.selection.clear();
+    let dl = app.dl.clone();
+    std::thread::spawn(move || {
+        let failed: Vec<String> = files.iter().filter(|f| f.exists()).filter_map(|f| crate::system::trash(f).err()).collect();
+        if let Some(e) = failed.first() {
+            dl.notices.lock().push(format!("{} file{} could not be moved to the Recycle Bin: {e}", failed.len(), if failed.len() == 1 { "" } else { "s" }));
+        }
+    });
+    app.toast(format!("Deleted {}: the file{} went to the Recycle Bin{}", plural(sel.len()), if sel.len() == 1 { "" } else { "s" }, if skipped { " (not the one playing now)" } else { "" }));
 }
 
 fn plural(n: usize) -> String {
@@ -1379,10 +1503,11 @@ fn rebuild_groups(app: &mut App) {
         return;
     }
     app.browser.groups_key = gen;
+    let extra = extra_copies(app, gen);
     let d = app.lib.data.read();
     let mut albums: std::collections::HashMap<String, (String, String, Option<String>, Option<u32>, usize)> = Default::default();
     let mut artists: std::collections::HashMap<String, (String, Option<String>, usize)> = Default::default();
-    for t in d.tracks.values() {
+    for t in d.tracks.values().filter(|t| !extra.contains(&t.id)) {
         if !t.album.is_empty() {
             let e = albums.entry(album_key(t)).or_insert_with(|| (t.album.clone(), if t.album_artist.is_empty() { t.artist.clone() } else { t.album_artist.clone() }, None, t.year, 0));
             e.4 += 1;

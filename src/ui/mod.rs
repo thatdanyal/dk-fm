@@ -18,6 +18,7 @@ pub mod nowplaying;
 pub mod palette;
 pub mod plcover;
 pub mod plpick;
+pub mod preview;
 pub mod queue;
 pub mod recs;
 pub mod scope;
@@ -25,6 +26,7 @@ pub mod settings;
 pub mod sharing;
 pub mod stats;
 pub mod theme;
+pub mod tour;
 pub mod websearch;
 pub mod welcome;
 pub mod widgets;
@@ -139,6 +141,17 @@ pub struct App {
     pub nowplaying: bool,
     /// the library view last shown (`browser.nav`)
     seen_nav: u64,
+    /// songs being fetched / played just to listen before downloading
+    pub previews: preview::Previews,
+    /// the layout before the last reset / switch / edit (UNDO puts it back), and whether that's
+    /// the newest undoable change
+    layout_undo: Option<(DockState<Tab>, std::collections::BTreeMap<String, [f32; 4]>, String)>,
+    undo_is_layout: bool,
+    /// study mode: your normal layout, kept while the study layout is shown
+    pub study: Option<DockState<Tab>>,
+    /// the guided tour's step, and where the parts it points at were drawn this frame
+    pub tour: Option<usize>,
+    pub marks: std::collections::HashMap<&'static str, Rect>,
 }
 
 /// A saved or shared layout, if it's sound: each panel at most once, every split with both
@@ -255,17 +268,104 @@ pub fn keep_deck(dock: &mut DockState<Tab>) {
 }
 
 pub fn default_dock() -> DockState<Tab> {
-    // kept simple: the library, with the deck and the queue on the left (lyrics tabbed with the
-    // queue). Scope and equalizer are a click away in the View menu.
+    // the deck, equalizer and visualizer down the left; the library over the lyrics; the queue
+    // on the right (the visualizer starts off and the equalizer flat and off)
     let mut d = DockState::new(vec![Tab::Library]);
     let s = d.main_surface_mut();
-    let [_lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
-    let _ = s.split_below(left, 0.46, vec![Tab::Queue, Tab::Lyrics]);
+    let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
+    let [deck, _scope] = s.split_below(left, 0.513, vec![Tab::Scope]);
+    let _ = s.split_below(deck, 0.5635, vec![Tab::Eq]);
+    let [lib, _queue] = s.split_right(lib, 0.72, vec![Tab::Queue]);
+    let _ = s.split_below(lib, 0.546, vec![Tab::Lyrics]);
     d
+}
+
+/// Study mode: the lyrics big, the deck along the bottom.
+pub fn study_dock() -> DockState<Tab> {
+    study_preset(&[Tab::Lyrics])
+}
+
+/// Study mode choices in Settings > Layouts: (name, panels above the deck).
+pub const STUDY_PRESETS: [(&str, &[Tab]); 4] = [("LYRICS", &[Tab::Lyrics]), ("LYRICS + QUEUE", &[Tab::Lyrics, Tab::Queue]), ("VISUALIZER", &[Tab::Scope]), ("JUST THE DECK", &[])];
+
+pub fn study_preset(panels: &[Tab]) -> DockState<Tab> {
+    match panels {
+        [] => DockState::new(vec![Tab::Deck]),
+        [first, rest @ ..] => {
+            let mut d = DockState::new(vec![*first]);
+            let s = d.main_surface_mut();
+            let [top, _deck] = s.split_below(NodeIndex::root(), 0.77, vec![Tab::Deck]);
+            let mut at = top;
+            for t in rest {
+                at = s.split_right(at, 0.6, vec![*t])[0];
+            }
+            d
+        }
+    }
+}
+
+/// Smallest comfortable size of a panel.
+fn min_size(tab: Tab) -> Vec2 {
+    match tab {
+        Tab::Library => Vec2::new(560.0, 300.0),
+        Tab::Deck => Vec2::new(300.0, 150.0),
+        Tab::Eq => Vec2::new(300.0, 130.0),
+        Tab::Queue => Vec2::new(240.0, 160.0),
+        Tab::Lyrics => Vec2::new(260.0, 140.0),
+        Tab::Scope => Vec2::new(220.0, 110.0),
+    }
+}
+
+/// Smallest comfortable size of node `i` of the layout (with what's inside it).
+fn needs(tree: &egui_dock::Tree<Tab>, i: usize) -> Vec2 {
+    match tree.iter().nth(i) {
+        Some(Node::Leaf { tabs, .. }) => tabs.iter().map(|t| min_size(*t)).fold(Vec2::ZERO, |a, b| a.max(b)),
+        Some(Node::Horizontal { .. }) => {
+            let (a, b) = (needs(tree, 2 * i + 1), needs(tree, 2 * i + 2));
+            Vec2::new(a.x + b.x, a.y.max(b.y))
+        }
+        Some(Node::Vertical { .. }) => {
+            let (a, b) = (needs(tree, 2 * i + 1), needs(tree, 2 * i + 2));
+            Vec2::new(a.x.max(b.x), a.y + b.y)
+        }
+        _ => Vec2::ZERO,
+    }
+}
+
+/// The layout for a window too small for it, for now only (nothing is saved): the panels fold
+/// into tabs, in two columns (the deck over the others, next to the library) or, when even that
+/// doesn't fit, one. At full size the layout is exactly as you set it.
+pub fn fit_dock(dock: &DockState<Tab>, area: Vec2) -> Option<DockState<Tab>> {
+    let need = needs(dock.main_surface(), 0);
+    if need.x <= area.x + 1.0 && need.y <= area.y + 1.0 {
+        return None;
+    }
+    let open: Vec<Tab> = Tab::ALL.into_iter().filter(|t| *t != Tab::Deck && *t != Tab::Library && dock.find_tab(t).is_some()).collect();
+    let has_lib = dock.find_tab(&Tab::Library).is_some();
+    let mut d;
+    if area.x >= 860.0 && has_lib {
+        d = DockState::new(vec![Tab::Library]);
+        let s = d.main_surface_mut();
+        let [_lib, left] = s.split_left(NodeIndex::root(), (320.0 / area.x).clamp(0.25, 0.4), vec![Tab::Deck]);
+        if !open.is_empty() {
+            let _ = s.split_below(left, if area.y < 560.0 { 0.55 } else { 0.42 }, open);
+        }
+    } else {
+        let mut rest: Vec<Tab> = if has_lib { vec![Tab::Library] } else { Vec::new() };
+        rest.extend(open);
+        if rest.is_empty() {
+            return None;
+        }
+        d = DockState::new(rest);
+        let _ = d.main_surface_mut().split_above(NodeIndex::root(), (190.0 / area.y).clamp(0.2, 0.4), vec![Tab::Deck]);
+    }
+    Some(d)
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext, lib: Arc<Library>, player: Arc<Player>, dl: Arc<Downloader>, watcher: Arc<FolderWatcher>, settings: Arc<Mutex<Settings>>, settings_dirty: Arc<AtomicBool>, hidden: bool) -> Self {
+        // (a background thread: deleting old previews mustn't slow the start)
+        std::thread::spawn(preview::clear_old);
         let (tkey, pal, dock_json, start) = {
             let s = settings.lock();
             lib.private.store(s.private_listening && s.keep_private, Ordering::Relaxed);
@@ -376,6 +476,12 @@ impl App {
             explore: Default::default(),
             nowplaying: false,
             seen_nav: 0,
+            previews: Default::default(),
+            layout_undo: None,
+            undo_is_layout: false,
+            study: None,
+            tour: None,
+            marks: Default::default(),
         };
         app.apply_look(&cc.egui_ctx);
         app.modal = welcome::first_modal(&app);
@@ -433,11 +539,52 @@ impl App {
     /// Keep a change undoable (Ctrl+Z or the toast's UNDO button).
     pub fn undoable(&mut self, u: crate::library::Undo) {
         self.undo_toast = Some((u.label.clone(), Instant::now()));
+        self.undo_is_layout = false;
         self.lib.push_undo(u);
+    }
+
+    /// Keep the layout as it is now, so UNDO / Ctrl+Z can bring it back after `label`.
+    pub fn remember_layout(&mut self, label: &str, toast: bool) {
+        let free = self.settings.lock().free_panels.clone();
+        self.layout_undo = Some((self.dock.clone(), free, label.to_string()));
+        self.undo_is_layout = true;
+        if toast {
+            self.undo_toast = Some((label.to_string(), Instant::now()));
+        }
+    }
+
+    /// Where a part of the window was drawn (for the guided tour).
+    pub fn mark(&mut self, id: &'static str, r: Rect) {
+        if self.tour.is_some() {
+            self.marks.insert(id, r);
+        }
+    }
+
+    /// Use this layout (and save it), leaving study mode.
+    pub fn set_dock(&mut self, d: DockState<Tab>) {
+        if self.study.is_some() {
+            self.toggle_study();
+        }
+        self.dock = d;
+        self.save_dock();
+    }
+
+    /// Put the layout back as it was before the last reset / switch / edit.
+    pub fn undo_layout(&mut self) -> bool {
+        let Some((d, free, label)) = self.layout_undo.take() else { return false };
+        self.dock = d;
+        self.save_dock();
+        self.edit_settings(|s| s.free_panels = free);
+        self.undo_is_layout = false;
+        self.toast(format!("Undone: {label}"));
+        true
     }
 
     pub fn undo(&mut self) {
         self.undo_toast = None;
+        if self.undo_is_layout && self.undo_layout() {
+            return;
+        }
         match self.lib.undo() {
             Some(u) if u.trashed > 0 => self.toast(format!("Undone: {}. The {} removed file{} are in the Recycle Bin: restore them from there to play them again", u.label, u.trashed, if u.trashed == 1 { "" } else { "s" })),
             Some(u) => self.toast(format!("Undone: {}", u.label)),
@@ -532,6 +679,10 @@ impl App {
         let saved = self.settings.lock().layouts.iter().find(|l| l.name == name).and_then(|l| load_dock(&l.dock));
         match saved.or_else(|| Self::preset(name)) {
             Some(d) => {
+                if self.study.is_some() {
+                    self.toggle_study();
+                }
+                self.remember_layout(&format!("Switched to the \"{name}\" layout"), true);
                 self.dock = d;
                 self.save_dock();
                 true
@@ -605,9 +756,40 @@ impl App {
     }
 
     pub fn reset_layout(&mut self) {
-        self.dock = default_dock();
+        self.remember_layout("Layout reset", true);
+        self.dock = if self.study.is_some() { study_dock() } else { default_dock() };
         self.save_dock();
-        self.edit_settings(|s| s.free_panels.clear());
+        if self.study.is_none() {
+            self.edit_settings(|s| s.free_panels.clear());
+        }
+    }
+
+    /// LAYOUT (edit mode) on / off; turning it on keeps the layout for UNDO.
+    pub fn toggle_layout_edit(&mut self) {
+        self.layout_edit = !self.layout_edit;
+        if self.layout_edit {
+            self.remember_layout("Layout changes", false);
+        }
+    }
+
+    /// Study mode: just the study layout (lyrics and the deck, unless you chose otherwise); your
+    /// normal layout comes back when you leave it.
+    pub fn toggle_study(&mut self) {
+        match self.study.take() {
+            Some(normal) => {
+                self.dock = normal;
+                self.toast("Study mode off");
+            }
+            None => {
+                self.nowplaying = false;
+                if let (true, Some(ctx)) = (self.mini, self.covers.ctx.clone()) {
+                    self.toggle_mini(&ctx);
+                }
+                let sd = self.settings.lock().study_dock.as_ref().and_then(load_dock).unwrap_or_else(study_dock);
+                self.study = Some(std::mem::replace(&mut self.dock, sd));
+                self.toast("Study mode: change what it shows with LAYOUT, or in Settings > Layouts");
+            }
+        }
     }
 
     fn layout_banner(&mut self, ctx: &egui::Context, text: &str) {
@@ -617,6 +799,9 @@ impl App {
                     ui.label(egui::RichText::new(text).font(px(8.0)).color(self.pal.ink));
                     if ui.button("RESET").clicked() {
                         self.reset_layout();
+                    }
+                    if self.layout_undo.is_some() && ui.button("UNDO").on_hover_text("Put the layout back as it was").clicked() {
+                        self.undo_layout();
                     }
                     if ui.button("DONE").clicked() {
                         self.layout_edit = false;
@@ -628,7 +813,12 @@ impl App {
 
     fn save_dock(&self) {
         let v = serde_json::to_value(&self.dock).ok();
-        self.edit_settings(|s| s.dock = v);
+        // in study mode the study layout is what you're arranging
+        if self.study.is_some() {
+            self.edit_settings(|s| s.study_dock = v);
+        } else {
+            self.edit_settings(|s| s.dock = v);
+        }
     }
 
     pub fn toggle_mini(&mut self, ctx: &egui::Context) {
@@ -688,8 +878,15 @@ impl App {
                     let room = |ui: &egui::Ui, w: f32| ui.available_width() > 200.0 + w;
                     let no_deck = self.dock.find_tab(&Tab::Deck).is_none();
                     let later = if no_deck { 170.0 } else { 0.0 }; // play / skip come first
-                    if room(ui, 240.0 + later) && tb_button(ui, &pal, "LAYOUT", self.layout_edit).clicked() {
-                        self.layout_edit = !self.layout_edit;
+                    let lr = if room(ui, 240.0 + later) { Some(tb_button(ui, &pal, "LAYOUT", self.layout_edit)) } else { None };
+                    if let Some(lr) = lr {
+                        self.mark("layout", lr.rect);
+                        if lr.clicked() {
+                            self.toggle_layout_edit();
+                        }
+                    }
+                    if room(ui, 300.0 + later) && tb_button(ui, &pal, "STUDY", self.study.is_some()).on_hover_text("Study mode: just the lyrics and the deck (Ctrl+Shift+S)").clicked() {
+                        self.toggle_study();
                     }
                     let r = tb_button(ui, &pal, "PANELS", false);
                     let pid = ui.make_persistent_id("panels-menu");
@@ -713,6 +910,7 @@ impl App {
                         }
                     });
                     let r = if room(ui, 160.0 + later) { tb_button(ui, &pal, "THEME", false) } else { ui.allocate_response(Vec2::ZERO, Sense::hover()) };
+                    self.mark("theme", r.rect);
                     let mut chosen = None;
                     let tid = ui.make_persistent_id("theme-menu");
                     if r.clicked() {
@@ -854,7 +1052,8 @@ impl App {
         match action {
             "palette" => self.palette = if self.palette.is_some() { None } else { Some(palette::PaletteState::default()) },
             "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Look)),
-            "layout" => self.layout_edit = !self.layout_edit,
+            "layout" => self.toggle_layout_edit(),
+            "study" => self.toggle_study(),
             "mini" => self.toggle_mini(ctx),
             "search" => {
                 self.show_panel(Tab::Library);
@@ -897,6 +1096,8 @@ impl App {
 
     fn overlays(&mut self, ctx: &egui::Context) {
         let pal = self.pal;
+        websearch::shazam_card(self, ctx);
+        tour::show(self, ctx);
         // toasts (bottom-right)
         // longer messages (e.g. how a friend uses a share code) stay long enough to read, and
         // a toast under the mouse stays until the mouse leaves
@@ -1161,6 +1362,12 @@ impl egui_dock::TabViewer for Viewer<'_> {
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
         match tab {
+            Tab::Scope => self.app.mark("scope", ui.max_rect()),
+            Tab::Eq => self.app.mark("eq", ui.max_rect()),
+            Tab::Library => self.app.mark("library", ui.max_rect()),
+            _ => {}
+        }
+        match tab {
             Tab::Deck => deck::show(self.app, ui),
             Tab::Scope => scope::show(self.app, ui),
             Tab::Library => browser::show(self.app, ui),
@@ -1194,6 +1401,8 @@ impl eframe::App for App {
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
         }
+        preview::poll(self);
+        self.marks.clear();
         // notices from background workers
         let n: Vec<String> = self.player.notices.lock().drain(..).chain(self.dl.notices.lock().drain(..)).collect();
         for m in n {
@@ -1249,7 +1458,7 @@ impl eframe::App for App {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::same(6))).show(ctx, |ui| deck::show_mini(self, ui));
         } else if self.nowplaying {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg)).show(ctx, |ui| nowplaying::show(self, ui));
-        } else if self.settings.lock().layout_mode == "free" {
+        } else if self.settings.lock().layout_mode == "free" && self.study.is_none() {
             let area = egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg).inner_margin(egui::Margin::same(4))).show(ctx, |ui| ui.max_rect()).inner;
             freelayout::show(self, ctx, area);
             if self.layout_edit {
@@ -1277,6 +1486,23 @@ impl eframe::App for App {
                 style.separator.color_dragged = pal.accent2;
                 style.separator.width = 5.0;
                 style.main_surface_border_stroke = egui::Stroke::NONE;
+                // a window too small for the layout gets a folded version of it, for now only
+                // (a maximized window always shows the layout exactly as you set it)
+                let maxed = ctx.input(|i| i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false));
+                if !self.layout_edit && !maxed {
+                    if let Some(mut small) = fit_dock(&self.dock, ui.available_size()) {
+                        DockArea::new(&mut small)
+                            .style(style)
+                            .draggable_tabs(false)
+                            .show_close_buttons(false)
+                            .show_add_buttons(false)
+                            .tab_context_menus(false)
+                            .show_leaf_close_all_buttons(false)
+                            .show_leaf_collapse_buttons(false)
+                            .show_inside(ui, &mut Viewer { app: self });
+                        return;
+                    }
+                }
                 let mut dock = std::mem::replace(&mut self.dock, DockState::new(vec![]));
                 let before = serde_json::to_string(&dock).unwrap_or_default();
                 DockArea::new(&mut dock)
@@ -1311,7 +1537,7 @@ impl eframe::App for App {
         settings::show_modal(self, ctx);
         sharing::show(self, ctx);
         if let UpdState::Available(u) = self.update.lock().clone() {
-            if self.update_dismissed.as_deref() != Some(&u.version) && self.modal.is_none() {
+            if self.update_dismissed.as_deref() != Some(&u.version) && self.modal.is_none() && self.tour.is_none() {
                 self.modal = Some(Modal::Update);
                 self.update_dismissed = Some(u.version.clone());
             }

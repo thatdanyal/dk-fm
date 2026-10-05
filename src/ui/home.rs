@@ -66,7 +66,6 @@ struct ArtistCache {
     ids: Vec<String>,
     /// (album key, title, cover, year, songs)
     albums: Vec<(String, String, Option<String>, Option<u32>, usize)>,
-    plays: u32,
 }
 
 /// "More from this artist" (online, fetched once per session).
@@ -172,7 +171,7 @@ fn tex(app: &mut App, ctx: &egui::Context, cover: Option<&String>, size: u32) ->
 }
 
 /// A cover from the web (kept in the discover folder).
-fn remote_tex(app: &mut App, ctx: &egui::Context, url: Option<&String>) -> Option<TextureId> {
+pub(super) fn remote_tex(app: &mut App, ctx: &egui::Context, url: Option<&String>) -> Option<TextureId> {
     let url = url?;
     let name = crate::library::remote_cover_name(url);
     let path = discover::covers_dir().join(&name);
@@ -251,7 +250,7 @@ fn rebuild(app: &mut App) {
 }
 
 /// Keys of everything you have (songs and albums), for "you don't have it yet".
-fn have_keys(app: &mut App) -> Arc<HashSet<String>> {
+pub(super) fn have_keys(app: &mut App) -> Arc<HashSet<String>> {
     let gen = app.lib.gen.load(std::sync::atomic::Ordering::Relaxed);
     if app.home.have.as_ref().map(|h| h.0 != gen).unwrap_or(true) {
         let mut keys: HashSet<String> = app.lib.key_index().into_keys().collect();
@@ -302,7 +301,7 @@ fn releases(app: &mut App, ctx: &egui::Context) -> (Vec<(Release, i64)>, bool, O
 
 /// Download a release like an import: the songs you don't have (an album or EP also becomes a
 /// playlist; a single's songs just join your library).
-fn get_release(app: &mut App, r: &Release) {
+pub(super) fn get_release(app: &mut App, r: &Release) {
     let (dl, lib, gets) = (app.dl.clone(), app.lib.clone(), app.home.gets.clone());
     gets.lock().insert(r.playlist.clone(), Ok(None));
     let (url, title, pl, kind) = (r.url(), r.title.clone(), r.playlist.clone(), if r.kind == "Single" { "track" } else { "album" });
@@ -321,7 +320,7 @@ fn get_release(app: &mut App, r: &Release) {
 }
 
 /// The + GET button of a release: (label, clickable).
-fn get_button(app: &App, r: &Release, have: bool) -> (String, bool) {
+pub(super) fn get_button(app: &App, r: &Release, have: bool) -> (String, bool) {
     let st = app.home.gets.lock().get(&r.playlist).cloned();
     match st {
         None if have => ("✔ HAVE IT".into(), false),
@@ -514,8 +513,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         ui.vertical(|ui| {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             for i in col * per_col..((col + 1) * per_col).min(ids.len()) {
-                                let plays = app.home.top[i].1;
-                                if song_row(app, ui, half, &ids, i, &format!("{plays} PLAY{}", if plays == 1 { "" } else { "S" })) {
+                                let len = app.lib.track(&ids[i]).map(|t| fmt_time(t.duration)).unwrap_or_default();
+                                if song_row(app, ui, half, &ids, i, &len) {
                                     acts.push(Act::Play(ids.clone(), i, false));
                                 }
                             }
@@ -592,7 +591,7 @@ fn artist_cache(app: &mut App, k: &str) {
         }
     }
     albums.sort_by(|a, b| b.3.cmp(&a.3).then(a.1.cmp(&b.1)));
-    let page = ArtistCache { key: k.to_string(), gen, name: ids.first().map(|t| main_artist(&t.artist)).unwrap_or_default(), plays: ids.iter().map(|t| plays(&t.id)).sum(), ids: ids.iter().map(|t| t.id.clone()).collect(), albums };
+    let page = ArtistCache { key: k.to_string(), gen, name: ids.first().map(|t| main_artist(&t.artist)).unwrap_or_default(), ids: ids.iter().map(|t| t.id.clone()).collect(), albums };
     drop(d);
     app.home.page = Some(page);
 }
@@ -647,7 +646,7 @@ pub fn artist_page(app: &mut App, ui: &mut Ui, k: &str) {
         app.browser.set_view(View::Artists);
         return;
     }
-    let (name, ids, albums, plays) = (page.name.clone(), page.ids.clone(), page.albums.clone(), page.plays);
+    let (name, ids, albums) = (page.name.clone(), page.ids.clone(), page.albums.clone());
     let mut acts: Vec<Act> = Vec::new();
     let mut sa = egui::ScrollArea::vertical().id_salt(("artist", k)).auto_shrink([false; 2]);
     if let Some(y) = app.home.scroll.take() {
@@ -682,7 +681,7 @@ pub fn artist_page(app: &mut App, ui: &mut Ui, k: &str) {
                     ui.label(egui::RichText::new("ARTIST").font(px(6.0)).color(pal.dim));
                     ui.label(egui::RichText::new(&name).font(px(16.0)).color(pal.text));
                     let n = |x: usize, w: &str| format!("{x} {w}{}", if x == 1 { "" } else { "S" });
-                    ui.label(egui::RichText::new(format!("{} · {} · {} IN YOUR LIBRARY", n(ids.len(), "SONG"), n(albums.len(), "ALBUM"), n(plays as usize, "PLAY"))).color(pal.dim));
+                    ui.label(egui::RichText::new(format!("{} · {} IN YOUR LIBRARY", n(ids.len(), "SONG"), n(albums.len(), "ALBUM"))).color(pal.dim));
                     ui.add_space(8.0);
                     ui.horizontal_wrapped(|ui| {
                         if button(ui, &pal, "▶ PLAY", true, true).clicked() {
@@ -708,9 +707,8 @@ pub fn artist_page(app: &mut App, ui: &mut Ui, k: &str) {
             ui.spacing_mut().item_spacing.y = 0.0;
             let top: Vec<String> = ids.iter().take(5).cloned().collect();
             for i in 0..top.len() {
-                let p = app.lib.stat(&top[i]).plays;
                 let len = app.lib.track(&top[i]).map(|t| fmt_time(t.duration)).unwrap_or_default();
-                if song_row(app, ui, w, &ids, i, &format!("{}{len}", if p > 0 { format!("{p} PLAY{} · ", if p == 1 { "" } else { "S" }) } else { String::new() })) {
+                if song_row(app, ui, w, &ids, i, &len) {
                     acts.push(Act::Play(ids.clone(), i, false));
                 }
             }

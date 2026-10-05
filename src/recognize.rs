@@ -1,4 +1,4 @@
-//! "What's playing?": listens to what the PC is playing for a few seconds (WASAPI loopback on
+//! SHAZAM: listens to what the PC is playing for a few seconds (WASAPI loopback on
 //! Windows; a "monitor" input, else the default input, elsewhere), makes a Shazam-style audio
 //! signature (spectral peaks in four frequency bands, 16 kHz mono) and looks it up.
 use crate::net;

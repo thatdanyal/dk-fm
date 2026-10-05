@@ -22,6 +22,8 @@ pub struct ImportState {
     collapsed: HashSet<String>,
     /// keys of every library song, rebuilt when the library changes
     keys: Option<(u64, Arc<HashSet<String>>)>,
+    /// "Songs like this": how many are listed (SHOW MORE adds more)
+    shown: usize,
 }
 
 impl ImportState {
@@ -111,11 +113,16 @@ fn take_result(app: &mut App, ctx: &egui::Context) {
                         if !hidden.is_empty() {
                             c.tracks.retain(|t| !owned(&hidden, t));
                         }
+                        let keys = library_keys(app);
+                        c.tracks.sort_by_key(|t| owned(&keys, t)); // (stable: new songs first, in order)
                     }
                 }
                 let keys = library_keys(app);
                 let hide_explicit = app.settings.lock().hide_explicit;
+                app.import.shown = app.settings.lock().like_count.max(1) as usize;
                 app.import.selected = match &f {
+                    // songs like this: nothing ticked; listen first, then pick
+                    Fetched::Collection(c) if c.kind == "radio" => HashSet::new(),
                     Fetched::Collection(c) => c.tracks.iter().enumerate().filter(|(_, t)| !owned(&keys, t) && !(hide_explicit && t.explicit)).map(|(i, _)| i).collect(),
                     Fetched::Profile { playlists, .. } => (0..playlists.len()).collect(),
                 };
@@ -217,10 +224,13 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new(&c.name).font(px(11.0)).color(pal.text));
                 let via = match c.via.as_str() { "api" => "SPOTIFY API", "embed" => "SPOTIFY PUBLIC PAGE", "youtube" => "YOUTUBE", _ => "SOUNDCLOUD" };
-                let kind = if c.kind == "radio" { "RADIO".to_string() } else { c.kind.to_uppercase() };
+                let kind = if c.kind == "radio" { "SONGS LIKE THIS".to_string() } else { c.kind.to_uppercase() };
                 ui.label(egui::RichText::new([kind, c.owner.clone(), format!("{} TRACKS", c.tracks.len()), via.into()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")).color(pal.dim));
                 if !c.complete {
                     ui.label(egui::RichText::new("⚠ Spotify's public page only lists the first 100 tracks. Connect your Spotify account in Settings to get all of your own playlists.").color(pal.accent2));
+                }
+                if c.kind == "radio" {
+                    ui.label(egui::RichText::new("▶ on a song plays a preview (not downloaded). Tick the ones you like, then download them.").color(pal.dim));
                 }
             });
         });
@@ -241,9 +251,21 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             }
         });
     });
-    egui::ScrollArea::vertical().id_salt("import-list").auto_shrink([false; 2]).show_rows(ui, 28.0, c.tracks.len(), |ui, range| {
+    let total = c.tracks.len();
+    let listed = if c.kind == "radio" { app.import.shown.clamp(1, total.max(1)).min(total) } else { total };
+    let more = listed < total;
+    egui::ScrollArea::vertical().id_salt("import-list").auto_shrink([false; 2]).show_rows(ui, 28.0, listed + more as usize, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in range {
+            if i == listed {
+                ui.horizontal(|ui| {
+                    ui.add_space(64.0);
+                    if super::widgets::tb_button(ui, &pal, &format!("SHOW MORE ({} MORE)", total - listed), false).clicked() {
+                        app.import.shown = listed + app.settings.lock().like_count.max(1) as usize;
+                    }
+                });
+                continue;
+            }
             let t = &c.tracks[i];
             let w = ui.available_width();
             let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::click());
@@ -257,12 +279,18 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             if on {
                 ui.painter().text(cb.center(), Align2::CENTER_CENTER, "✔", vt(16.0), pal.ink);
             }
-            if resp.clicked() && !app.import.selected.remove(&i) {
+            if resp.clicked() && !ui.rect_contains_pointer(Rect::from_center_size(Pos2::new(r.left() + 50.0, r.center().y), Vec2::new(24.0, 22.0))) && !app.import.selected.remove(&i) {
                 app.import.selected.insert(i);
             }
-            let p = ui.painter();
             let cy = r.center().y;
-            p.text(Pos2::new(r.left() + 60.0, cy), Align2::RIGHT_CENTER, (i + 1).to_string(), vt(18.0), pal.dim);
+            // ▶ listen first (a temporary copy)
+            let pr = Rect::from_center_size(Pos2::new(r.left() + 50.0, cy), Vec2::new(24.0, 22.0));
+            if !owned(&keys, t) && (ui.rect_contains_pointer(r) || super::preview::active(app, t)) {
+                super::preview::button(app, ui, pr, t);
+            } else {
+                ui.painter().text(Pos2::new(r.left() + 60.0, cy), Align2::RIGHT_CENTER, (i + 1).to_string(), vt(18.0), pal.dim);
+            }
+            let p = ui.painter();
             let narrow = w < 600.0;
             let tw = if narrow { w - 260.0 } else { (w - 290.0) * 0.6 };
             p.with_clip_rect(Rect::from_min_size(Pos2::new(r.left() + 72.0, r.top()), Vec2::new(tw, 28.0))).text(Pos2::new(r.left() + 72.0, cy), Align2::LEFT_CENTER, &t.title, vt(19.0), pal.text);

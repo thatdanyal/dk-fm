@@ -106,6 +106,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if let Some(t) = &s.tex {
         ui.painter().image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     }
+    if s.mode == "off" {
+        ui.painter().text(r.center(), eframe::egui::Align2::CENTER_CENTER, "VISUALIZER OFF · CLICK TO TURN ON", px(6.0), pal.faint);
+    }
     // mode buttons while the mouse is over the visualizer. Not `resp.hovered()`: the buttons
     // take the hover from it, so they'd vanish under the mouse every other frame (flicker).
     if ui.rect_contains_pointer(outer) {

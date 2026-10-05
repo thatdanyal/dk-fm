@@ -31,7 +31,7 @@ enum Act {
     ToggleShuffle,
     CycleRepeat,
     View(View),
-    /// "what's playing?" on FIND SONGS
+    /// SHAZAM (also on the deck)
     Listen,
     Import(String),
     SyncAll,
@@ -50,6 +50,8 @@ enum Act {
     NowPlaying,
     ResetLayout,
     Panel(Tab),
+    Tour,
+    Study,
 }
 
 struct Item {
@@ -95,8 +97,10 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
         ("Now playing (full screen)".into(), "big cover lyrics fullscreen f11 karaoke", "🗖", Act::NowPlaying),
         ("Discover new music".into(), "discover new recommendations similar radio explore", "🔍", Act::View(View::Discover)),
-        ("What's playing? Name the song playing on this PC".into(), "shazam identify recognize listen what song is this", "♫", Act::Listen),
-        ("Find songs online (pick the version)".into(), "search youtube web download get new song clean explicit live instrumental version", "🌐", Act::View(View::Web)),
+        ("Shazam: name the song playing on this PC".into(), "shazam identify recognize listen what song is this whats playing", "♫", Act::Listen),
+        ("Find music online (songs, artists, albums, podcasts…)".into(), "search youtube web download get new song artist album playlist podcast audiobook profile clean explicit live instrumental version", "🌐", Act::View(View::Web)),
+        ("Take the tour".into(), "tutorial help guide how to features walkthrough instructions", "💡", Act::Tour),
+        (format!("Study mode: {}", if app.study.is_some() { "on > off" } else { "off > on" }), "focus study lyrics deck minimal", "📖", Act::Study),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
         ("Open a playlist file from a friend (.dkfm)…".into(), "share shared import friend code", "📂", Act::OpenShare),
@@ -207,11 +211,9 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
             app.show_panel(Tab::Library);
             app.browser.set_view(v);
         }
-        Act::Listen => {
-            app.show_panel(Tab::Library);
-            app.browser.set_view(View::Web);
-            super::websearch::listen(app, ctx);
-        }
+        Act::Listen => super::websearch::listen(app, ctx),
+        Act::Tour => super::tour::start(app),
+        Act::Study => app.toggle_study(),
         Act::Import(u) => {
             app.browser.set_view(View::Import);
             super::import::fetch_link(app, ctx, u);
@@ -225,7 +227,7 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
             });
         }
         Act::Mini => app.toggle_mini(ctx),
-        Act::Layout => app.layout_edit = !app.layout_edit,
+        Act::Layout => app.toggle_layout_edit(),
         Act::Visualizer => app.scope.cycle(&app.player),
         Act::Rescan => {
             app.rescan();

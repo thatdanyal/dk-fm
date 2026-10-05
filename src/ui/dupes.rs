@@ -15,7 +15,7 @@ pub struct DupeState {
     keep: HashMap<String, String>,
 }
 
-fn merge(app: &mut App, groups: Vec<(String, Vec<String>)>) {
+pub(super) fn merge(app: &mut App, groups: Vec<(String, Vec<String>)>) {
     let playing = app.player.current_id();
     let all: Vec<String> = groups.iter().flat_map(|g| g.1.iter().cloned()).collect();
     let mut u = app.lib.snapshot(format!("Merged {} duplicate{}", groups.len(), if groups.len() == 1 { "" } else { "s" }), &[], &all);

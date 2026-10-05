@@ -229,12 +229,71 @@ impl SharedSettings {
     }
 }
 
+/// Your whole DK.FM as a file: playlists (in order), liked songs, every other song, settings,
+/// themes and layouts — to move to a new PC, or give a friend a head start. No music files: the
+/// songs download again on the other PC, by their exact YouTube / Spotify ids. Never the Spotify
+/// login, folders, play counts, history or backups.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+pub struct SharedAll {
+    pub name: String,
+    pub settings: Option<SharedSettings>,
+    pub themes: Vec<CustomTheme>,
+    pub layouts: Vec<NamedLayout>,
+    /// the layout in use
+    pub dock: Option<Value>,
+    pub playlists: Vec<SharedPlaylist>,
+    pub liked: Vec<Song>,
+    /// the rest of the library: songs in no playlist and not liked
+    pub songs: Vec<Song>,
+}
+
+/// Most songs a whole-DK.FM file brings in.
+pub const MAX_ALL_SONGS: usize = 60_000;
+
+impl SharedAll {
+    pub fn of(name: &str, s: &Settings, d: &crate::store::LibraryData) -> SharedAll {
+        let mut used = std::collections::HashSet::new();
+        let tracks = |ids: &mut dyn Iterator<Item = &String>| -> Vec<Track> { ids.filter_map(|id| d.tracks.get(id)).cloned().collect() };
+        let playlists: Vec<SharedPlaylist> = d
+            .playlists
+            .iter()
+            .map(|p| {
+                used.extend(p.track_ids.iter().cloned());
+                playlist_of(&p.name, &tracks(&mut p.track_ids.iter()))
+            })
+            .filter(|p| !p.songs.is_empty())
+            .collect();
+        let liked_ids: Vec<&String> = d.stats.iter().filter(|(id, st)| st.liked && d.tracks.contains_key(*id)).map(|(id, _)| id).collect();
+        used.extend(liked_ids.iter().map(|i| (*i).clone()));
+        let liked = tracks(&mut liked_ids.into_iter()).iter().map(Song::of).filter(|s| !s.title.is_empty()).collect();
+        let mut rest: Vec<&Track> = d.tracks.values().filter(|t| !used.contains(&t.id)).collect();
+        rest.sort_by_cached_key(|t| (t.artist.to_lowercase(), t.title.to_lowercase()));
+        SharedAll {
+            name: short(name, 100),
+            settings: Some(SharedSettings::from(s)),
+            themes: s.custom_themes.clone(),
+            layouts: s.layouts.clone(),
+            dock: s.dock.clone(),
+            playlists,
+            liked,
+            songs: rest.into_iter().map(Song::of).filter(|s| !s.title.is_empty()).collect(),
+        }
+    }
+
+    pub fn song_count(&self) -> usize {
+        self.playlists.iter().map(|p| p.songs.len()).sum::<usize>() + self.liked.len() + self.songs.len()
+    }
+}
+
 #[derive(Debug)]
 pub enum Share {
     Theme(CustomTheme),
     Layout(NamedLayout),
     Settings(Box<SharedSettings>),
     Playlist(SharedPlaylist),
+    /// your whole DK.FM (files only: too big for a code)
+    Everything(Box<SharedAll>),
 }
 
 impl Share {
@@ -244,6 +303,7 @@ impl Share {
             Share::Layout(_) => "layout",
             Share::Settings(_) => "settings",
             Share::Playlist(_) => "playlist",
+            Share::Everything(_) => "all",
         }
     }
     fn json(&self) -> Value {
@@ -252,6 +312,7 @@ impl Share {
             Share::Layout(l) => serde_json::to_value(l),
             Share::Settings(s) => serde_json::to_value(s),
             Share::Playlist(p) => serde_json::to_value(p),
+            Share::Everything(a) => serde_json::to_value(a),
         }
         .unwrap_or(Value::Null)
     }
@@ -341,6 +402,37 @@ fn parse(kind: &str, v: Value) -> Result<Share, String> {
                 return Err("That shared playlist has no songs.".into());
             }
             Ok(Share::Playlist(SharedPlaylist { name: short(&p.name, 200).or_if_empty("Shared playlist"), songs }))
+        }
+        "all" => {
+            let a: SharedAll = serde_json::from_value(v).map_err(|_| BAD)?;
+            if a.song_count() > MAX_ALL_SONGS || a.playlists.len() > 2000 {
+                return Err(format!("That DK.FM has more than {MAX_ALL_SONGS} songs, which is more than DK.FM brings in at once."));
+            }
+            let layouts: Vec<NamedLayout> = a
+                .layouts
+                .into_iter()
+                .take(100)
+                .filter_map(|mut l| {
+                    fix_rects(&mut l.dock);
+                    crate::ui::load_dock(&l.dock)?;
+                    Some(NamedLayout { name: short(&l.name, 60).or_if_empty("Shared layout"), dock: l.dock })
+                })
+                .collect();
+            let dock = a.dock.and_then(|mut d| {
+                fix_rects(&mut d);
+                crate::ui::load_dock(&d).map(|_| d)
+            });
+            let songs = |v: Vec<Song>| v.into_iter().filter_map(clean_song).take(MAX_SONGS * 3).collect::<Vec<_>>();
+            Ok(Share::Everything(Box::new(SharedAll {
+                name: short(&a.name, 100).or_if_empty("a DK.FM"),
+                settings: a.settings.map(|s| s.sanitize()),
+                themes: a.themes.into_iter().take(100).filter_map(clean_theme).collect(),
+                layouts,
+                dock,
+                playlists: a.playlists.into_iter().map(|p| SharedPlaylist { name: short(&p.name, 200).or_if_empty("Playlist"), songs: p.songs.into_iter().filter_map(clean_song).take(MAX_SONGS).collect() }).filter(|p| !p.songs.is_empty()).collect(),
+                liked: songs(a.liked),
+                songs: songs(a.songs),
+            })))
         }
         _ => Err("That code needs a newer DK.FM. Update DK.FM (Settings → Updates) and paste it again.".into()),
     }
@@ -563,7 +655,7 @@ mod tests {
         assert!(code.len() < 1000, "{}", code.len());
         let Share::Layout(l) = decode(&code).unwrap() else { panic!() };
         let back: egui_dock::DockState<crate::ui::Tab> = serde_json::from_value(l.dock.clone()).unwrap();
-        assert_eq!((l.name.as_str(), back.iter_all_tabs().count()), ("Focus", 4));
+        assert_eq!((l.name.as_str(), back.iter_all_tabs().count()), ("Focus", 6));
         // not a dock layout
         assert!(decode(&encode(&Share::Layout(NamedLayout { name: "x".into(), dock: serde_json::json!({"a": 1}) }))).is_err());
 
@@ -682,7 +774,7 @@ mod tests {
         let mut z = DeflateEncoder::new(Vec::new(), Compression::default());
         z.write_all(&serde_json::to_vec(&j).unwrap()).unwrap();
         let Share::Settings(x) = decode(&format!("{PREFIX}settings:{}", crate::spotify_auth::b64(&z.finish().unwrap(), true))).unwrap() else { panic!() };
-        assert_eq!((x.theme.as_str(), x.zoom, x.columns.contains(&"title".to_string()), x.keys.len(), x.visualizer.as_str()), ("red-retro", 1.5, true, 0, "bars"));
+        assert_eq!((x.theme.as_str(), x.zoom, x.columns.contains(&"title".to_string()), x.keys.len(), x.visualizer.as_str()), ("red-retro", 1.5, true, 0, "off"));
         assert_eq!((x.eq.gains.len(), x.eq.gains[0]), (10, 12.0));
         assert!(!x.search_sources.is_empty());
     }
@@ -695,5 +787,29 @@ mod tests {
         let rel = m3u(&tracks, Some(Path::new("/music/DK.FM")));
         assert!(rel.contains("\nParty/Daft Punk - One More Time.m4a\n"), "{rel}");
         assert!(rel.contains("\n/other/intro.mp3\n"), "songs elsewhere stay absolute");
+    }
+
+    #[test]
+    fn whole_dkfm_file_round_trip() {
+        let mut d = crate::store::LibraryData::default();
+        for (id, title) in [("1", "One More Time"), ("2", "Harder"), ("3", "Around the World"), ("4", "Digital Love")] {
+            let mut t = track(id, title, "Daft Punk", &format!("C:/m/{id}.m4a"));
+            t.youtube_id = Some(format!("yt{id}abcdefgh"));
+            d.tracks.insert(id.into(), t);
+        }
+        d.playlists.push(crate::store::Playlist { id: "p".into(), name: "Party".into(), track_ids: vec!["2".into(), "1".into()], ..Default::default() });
+        d.stats.entry("3".into()).or_default().liked = true;
+        let mut s = Settings::default();
+        s.spotify_refresh_token = "SECRET".into();
+        s.music_folders = vec!["C:/Users/me/Music".into()];
+        let all = SharedAll::of("Dany", &s, &d);
+        assert_eq!((all.playlists.len(), all.playlists[0].songs.len(), all.liked.len(), all.songs.len()), (1, 2, 1, 1));
+        assert_eq!(all.playlists[0].songs[0].title, "Harder"); // in the playlist's order
+        let bytes = file_json(&Share::Everything(Box::new(all)));
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(!text.contains("SECRET") && !text.contains("C:/Users/me") && !text.contains("C:/m/"), "{text}");
+        let Share::Everything(back) = from_file_bytes(&bytes).unwrap() else { panic!() };
+        assert_eq!((back.name.as_str(), back.song_count(), back.songs[0].title.as_str()), ("Dany", 4, "Digital Love"));
+        assert!(back.songs[0].youtube.is_some());
     }
 }

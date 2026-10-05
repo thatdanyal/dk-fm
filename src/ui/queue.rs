@@ -46,6 +46,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.label(egui::RichText::new("  UP NEXT").font(px(5.0)).color(pal.dim));
             }
             let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click_and_drag());
+            // (not `resp.hovered()`: the play and × buttons take the hover from the row, which made
+            // them vanish under the mouse every other frame so clicks never landed)
+            let hovered = ui.rect_contains_pointer(r) && ui.ctx().dragged_id().is_none();
             let p = ui.painter();
             let current = i as isize == index;
             let moving = dragging == Some(i);
@@ -54,7 +57,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             } else if current {
                 fill(p, r, pal.sel);
                 fill(p, Rect::from_min_size(r.min, Vec2::new(3.0, r.height())), pal.accent);
-            } else if resp.hovered() && dragging.is_none() {
+            } else if hovered && dragging.is_none() {
                 fill(p, r, pal.panel_hi);
             }
             let alpha = if moving { 70 } else if (i as isize) < index { 100 } else { 255 };
@@ -67,7 +70,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
             }
             frame_rect(ui.painter(), thumb, 1.0, pal.line_hi);
-            if resp.hovered() && dragging.is_none() {
+            if hovered && dragging.is_none() {
                 let presp = ui.interact(thumb, ui.id().with(("qplay", i)), Sense::click());
                 let over = presp.hovered();
                 fill(ui.painter(), thumb, super::widgets::with_alpha(if over { pal.accent } else { pal.bg }, if over { 235 } else { 170 }));
@@ -82,7 +85,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             let clip = ui.painter().with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 26.0, r.bottom())));
             clip.text(r.min + Vec2::new(46.0, 5.0), Align2::LEFT_TOP, &t.title, vt(18.0), super::widgets::with_alpha(if current { pal.accent } else { pal.text }, alpha));
             clip.text(r.min + Vec2::new(46.0, 22.0), Align2::LEFT_TOP, &t.artist, vt(16.0), super::widgets::with_alpha(pal.dim, alpha));
-            if resp.hovered() && dragging.is_none() {
+            if hovered && dragging.is_none() {
                 // grip: drag to move
                 let gx = r.right() - 34.0;
                 for k in 0..3 {

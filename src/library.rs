@@ -99,7 +99,13 @@ pub struct Library {
     cover_dir: PathBuf,
     /// recent undoable changes (memory only)
     undo: parking_lot::Mutex<Vec<Undo>>,
+    /// songs downloaded just to listen before getting them (ids start with `PREVIEW`): playable,
+    /// but never saved, listed or counted in Stats
+    pub previews: RwLock<HashMap<String, Track>>,
 }
+
+/// Id prefix of a preview (see `Library::previews`).
+pub const PREVIEW: &str = "pv-";
 
 /// One undoable change: the playlists and songs it touched, as they were before it.
 pub struct Undo {
@@ -193,6 +199,7 @@ impl Library {
             cover_dir,
             dir,
             undo: Default::default(),
+            previews: Default::default(),
         });
         // save changes every few seconds even while the window is hidden or minimized (no frames
         // are drawn then), so downloads and auto-sync survive a crash, shutdown or forced close
@@ -481,7 +488,7 @@ impl Library {
 
     // ------------------------------------------------------------ queries & edits
     pub fn track(&self, id: &str) -> Option<Track> {
-        self.data.read().tracks.get(id).cloned()
+        self.data.read().tracks.get(id).cloned().or_else(|| if id.starts_with(PREVIEW) { self.previews.read().get(id).cloned() } else { None })
     }
 
     pub fn stat(&self, id: &str) -> Stat {
@@ -497,7 +504,7 @@ impl Library {
     }
 
     pub fn bump_play(&self, id: &str) {
-        if self.private.load(Ordering::Relaxed) {
+        if self.private.load(Ordering::Relaxed) || id.starts_with(PREVIEW) {
             return;
         }
         let mut d = self.data.write();
@@ -510,7 +517,7 @@ impl Library {
     }
 
     pub fn bump_skip(&self, id: &str) {
-        if self.private.load(Ordering::Relaxed) {
+        if self.private.load(Ordering::Relaxed) || id.starts_with(PREVIEW) {
             return;
         }
         self.data.write().stats.entry(id.to_string()).or_default().skips += 1;
@@ -525,7 +532,7 @@ impl Library {
     }
 
     pub fn add_history(&self, row: (String, i64, i64, u8)) {
-        if self.private.load(Ordering::Relaxed) {
+        if self.private.load(Ordering::Relaxed) || row.0.starts_with(PREVIEW) {
             return;
         }
         let mut h = self.history.write();

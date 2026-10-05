@@ -45,14 +45,16 @@ enum Btn {
     Retry,
 }
 
-/// One result row; returns true when its button was clicked. `tip` = what + GET does.
-fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, tags: &[&str], sub: &str, secs: Option<f64>, btn: Btn, tip: &str) -> bool {
-    let (r, resp) = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click());
+/// One result row (room at the left for the cover / ▶ preview); returns (button clicked, row).
+/// `tip` = what + GET does.
+fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, tags: &[&str], sub: &str, secs: Option<f64>, btn: Btn, tip: &str) -> (bool, Rect) {
+    let (full, resp) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click());
+    if resp.hovered() || ui.rect_contains_pointer(full) {
+        fill(ui.painter(), full, pal.panel_hi);
+    }
+    let r = Rect::from_min_max(Pos2::new(full.left() + LEAD, full.top()), full.max);
     let br = Rect::from_min_size(Pos2::new(r.right() - 92.0, r.top() + 3.0), Vec2::new(86.0, 20.0));
     let over = resp.hovered() && ui.input(|i| i.pointer.hover_pos()).map(|q| br.contains(q)).unwrap_or(false);
-    if resp.hovered() {
-        fill(ui.painter(), r, pal.panel_hi);
-    }
     let p = ui.painter();
     let cy = r.center().y;
     let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 160.0, r.bottom())));
@@ -90,8 +92,11 @@ fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, tags: &[&str], sub: &str, se
             resp.clone().on_hover_text(tip);
         }
     }
-    clickable && resp.clicked() && over
+    (clickable && resp.clicked() && over, full)
 }
+
+/// Left of a result row: its cover, with ▶ (listen first) over it.
+const LEAD: f32 = 30.0;
 
 pub fn show(app: &mut App, ui: &mut Ui, pl: &Playlist) {
     let pal = app.pal;
@@ -179,7 +184,12 @@ fn library_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, q: &str, gen: u64, w:
     for id in &local {
         let Some(t) = app.lib.track(id) else { continue };
         let inp = pl.track_ids.contains(id);
-        if row(ui, &pal, w, &t.title, &[], format!("{} · {}", t.artist, t.album).trim_end_matches(" · "), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "") {
+        let (hit, full) = row(ui, &pal, w, &t.title, &[], format!("{} · {}", t.artist, t.album).trim_end_matches(" · "), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "");
+        let cr = Rect::from_min_size(Pos2::new(full.left() + 4.0, full.top() + 3.0), Vec2::splat(24.0));
+        if let Some(tex) = t.thumb.as_ref().or(t.cover.as_ref()).and_then(|c| app.covers.get(ui.ctx(), app.lib.cover_path(c), c, 64)) {
+            ui.painter().image(tex, cr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
+        }
+        if hit {
             app.lib.playlist_add(&pl.id, std::slice::from_ref(id));
             app.edit_settings(|s| s.last_playlist = pl.id.clone());
         }
@@ -298,7 +308,18 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
         };
         let sub = [t.artists.join(", "), t.album.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
         let tg: &[&str] = tags.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
-        if row(ui, &pal, w, &t.title, tg, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn, tip) {
+        let (hit, full) = row(ui, &pal, w, &t.title, tg, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn, tip);
+        // cover, and ▶ to listen before getting it
+        let cr = Rect::from_min_size(Pos2::new(full.left() + 4.0, full.top() + 3.0), Vec2::splat(24.0));
+        if let Some(tex) = super::home::remote_tex(app, ui.ctx(), t.cover.as_ref()) {
+            ui.painter().image(tex, cr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
+        } else {
+            ui.painter().text(cr.center(), Align2::CENTER_CENTER, "♫", vt(16.0), pal.faint);
+        }
+        if have.is_none() && (ui.rect_contains_pointer(full) || super::preview::active(app, t)) {
+            super::preview::button(app, ui, cr, t);
+        }
+        if hit {
             clicked = true;
             match (have, pl) {
                 (Some(id), Some(pl)) => {

@@ -3,7 +3,7 @@
 //! sends is applied until you press APPLY / IMPORT.
 use super::browser::View;
 use super::theme::{px, vt, Pal};
-use super::widgets::{button, dim, fill, fmt_time, frame_rect};
+use super::widgets::{button, caption, dim, fill, fmt_time, frame_rect, switch};
 use super::{App, Tab};
 use crate::share::{self, Share, SharedSettings};
 use crate::sources::Collection;
@@ -21,6 +21,10 @@ pub struct Incoming {
     name: String,
     /// layout: parsed once for the diagram
     dock: Option<DockState<Tab>>,
+    /// a whole DK.FM: bring in its playlists, liked songs, other songs, settings & looks
+    pick: [bool; 4],
+    /// a whole DK.FM: songs already here
+    have_all: usize,
 }
 
 // ------------------------------------------------------------------------------- sending
@@ -133,10 +137,18 @@ fn open(app: &mut App, s: Share) {
         Share::Layout(l) => (Vec::new(), l.name.clone(), super::load_dock(&l.dock)),
         Share::Theme(t) => (Vec::new(), t.name.clone(), None),
         Share::Settings(_) => (Vec::new(), String::new(), None),
+        Share::Everything(a) => (Vec::new(), a.name.clone(), None),
+    };
+    let have_all = match &s {
+        Share::Everything(a) => {
+            let idx = app.lib.key_index();
+            a.playlists.iter().flat_map(|p| p.songs.iter()).chain(&a.liked).chain(&a.songs).filter(|x| x.keys().iter().any(|k| idx.contains_key(k))).count()
+        }
+        _ => 0,
     };
     app.palette = None;
     app.pick = None;
-    app.incoming = Some(Incoming { share: s, owned, name, dock });
+    app.incoming = Some(Incoming { share: s, owned, name, dock, pick: [true; 4], have_all });
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -147,6 +159,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         Share::Layout(_) => ("SHARED LAYOUT", Vec2::new(480.0, 330.0)),
         Share::Settings(_) => ("SHARED SETTINGS", Vec2::new(560.0, 420.0)),
         Share::Playlist(_) => ("SHARED PLAYLIST", Vec2::new(600.0, 470.0)),
+        Share::Everything(_) => ("A WHOLE DK.FM", Vec2::new(560.0, 420.0)),
     };
     let mut done: Option<bool> = None;
     let open = super::settings::window(pal, ctx, title, size, true, |ui| {
@@ -233,6 +246,25 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
                 if get > 0 { "IMPORT & DOWNLOAD" } else { "IMPORT" }
             }
+            Share::Everything(a) => {
+                heading(ui, &pal, &format!("Everything from \"{}\"", a.name));
+                let total = a.song_count();
+                dim(ui, &pal, &format!("{} playlists · {} liked songs · {} other songs · {} songs in all, {} already here, {} to download", a.playlists.len(), a.liked.len(), a.songs.len(), total, inc.have_all, total.saturating_sub(inc.have_all)));
+                ui.add_space(8.0);
+                caption(ui, &pal, "BRING IN");
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    switch(ui, &pal, &mut inc.pick[0], &format!("THE {} PLAYLISTS, IN THEIR ORDER", a.playlists.len()));
+                    ui.add_space(3.0);
+                    switch(ui, &pal, &mut inc.pick[1], &format!("THE {} LIKED SONGS", a.liked.len()));
+                    ui.add_space(3.0);
+                    switch(ui, &pal, &mut inc.pick[2], &format!("THE {} OTHER SONGS", a.songs.len()));
+                    ui.add_space(3.0);
+                    switch(ui, &pal, &mut inc.pick[3], "SETTINGS, THEMES AND LAYOUTS");
+                });
+                ui.add_space(8.0);
+                dim(ui, &pal, "Songs you already have are used as they are; the rest download in the background (Downloads shows the progress). Your own playlists, likes and songs stay. Settings you have now are backed up first.");
+                "BRING IT IN"
+            }
         };
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -285,11 +317,23 @@ fn apply(app: &mut App, ctx: &egui::Context, inc: Incoming) {
             app.browser.sort = None;
             app.toast("Your friend's settings are applied (your old ones are in Settings → Backup)");
         }
+        Share::Everything(a) => bring_in_all(app, ctx, &a, inc.pick),
         Share::Playlist(p) => {
             let name = inc.name.trim().to_string();
+            let missing = import_playlist(app, &p, &name, &inc.owned, "a friend");
+            app.toast(if missing == 0 { format!("Imported \"{name}\"") } else { format!("Imported \"{name}\": downloading {missing} song{}", if missing == 1 { "" } else { "s" }) });
+        }
+    }
+}
+
+/// A shared playlist into your library: the songs you have now, the rest download into it in
+/// order. Returns how many download. The same playlist shared again fills the one made before.
+fn import_playlist(app: &mut App, p: &share::SharedPlaylist, name: &str, owned: &[Option<String>], from: &str) -> usize {
+    let name = name.trim().to_string();
+    {
             let mut seen = std::collections::HashSet::new();
-            let have: Vec<String> = inc.owned.iter().flatten().filter(|id| seen.insert((*id).clone())).cloned().collect();
-            let missing: Vec<usize> = inc.owned.iter().enumerate().filter(|(_, o)| o.is_none()).map(|(i, _)| i).collect();
+            let have: Vec<String> = owned.iter().flatten().filter(|id| seen.insert((*id).clone())).cloned().collect();
+            let missing: Vec<usize> = owned.iter().enumerate().filter(|(_, o)| o.is_none()).map(|(i, _)| i).collect();
             // the same code again: fill the playlist it made before (unless you've changed it)
             let again = app.lib.data.read().playlists.iter().find(|p| p.name == name && p.source.as_deref() == Some("user") && !p.track_ids.is_empty() && p.track_ids.iter().all(|t| have.contains(t))).map(|p| p.id.clone());
             let pid = match again {
@@ -300,12 +344,92 @@ fn apply(app: &mut App, ctx: &egui::Context, inc: Incoming) {
                 None => app.lib.new_playlist(&name, have),
             };
             if !missing.is_empty() {
-                let col = Collection { kind: "shared".into(), id: pid.clone(), name: name.clone(), owner: "a friend".into(), tracks: p.songs.iter().map(|s| s.to_itrack()).collect(), complete: true, via: "share".into(), source: "share".into(), ..Default::default() };
+                let col = Collection { kind: "shared".into(), id: pid.clone(), name: name.clone(), owner: from.into(), tracks: p.songs.iter().map(|s| s.to_itrack()).collect(), complete: true, via: "share".into(), source: "share".into(), ..Default::default() };
                 app.dl.start_to(col, Some(missing.clone()), Some(pid.clone()));
             }
             app.browser.set_view(View::Playlist(pid));
-            app.toast(if missing.is_empty() { format!("Imported \"{name}\"") } else { format!("Imported \"{name}\": downloading {} song{}", missing.len(), if missing.len() == 1 { "" } else { "s" }) });
+            missing.len()
+    }
+}
+
+/// A whole DK.FM: its playlists, liked songs, other songs and settings, as picked.
+fn bring_in_all(app: &mut App, ctx: &egui::Context, a: &share::SharedAll, pick: [bool; 4]) {
+    let from = format!("{}'s DK.FM", a.name);
+    let mut downloading = 0;
+    if pick[3] {
+        let before = app.settings.lock().clone();
+        let _ = crate::backup::create(&app.lib, &before, "manual");
+        app.edit_settings(|st| {
+            if let Some(s) = &a.settings {
+                s.apply(st);
+            }
+            for t in &a.themes {
+                if !st.custom_themes.iter().any(|c| c.name == t.name) {
+                    st.custom_themes.push(t.clone());
+                }
+            }
+            for l in &a.layouts {
+                share::add_layout(st, l.clone());
+            }
+        });
+        if let Some(d) = a.dock.as_ref().and_then(super::load_dock) {
+            app.remember_layout("Layout from the shared DK.FM", false);
+            app.set_dock(d);
         }
+        let cur = app.settings.lock().clone();
+        app.set_theme(ctx);
+        app.apply_look(ctx);
+        app.apply_player(&cur);
+    }
+    let idx = app.lib.key_index();
+    let owned_of = |songs: &[share::Song]| -> Vec<Option<String>> { songs.iter().map(|x| x.keys().iter().find_map(|k| idx.get(k).cloned())).collect() };
+    if pick[0] {
+        for p in &a.playlists {
+            let owned = owned_of(&p.songs);
+            downloading += import_playlist(app, p, &p.name, &owned, &from);
+        }
+    }
+    // liked songs: the ones here are liked now, the others as they arrive
+    if pick[1] && !a.liked.is_empty() {
+        let owned = owned_of(&a.liked);
+        let have: Vec<String> = owned.iter().flatten().cloned().collect();
+        app.lib.set_liked(&have, true);
+        let missing: Vec<usize> = owned.iter().enumerate().filter(|(_, o)| o.is_none()).map(|(i, _)| i).collect();
+        if !missing.is_empty() {
+            downloading += missing.len();
+            let col = Collection { kind: "shared".into(), id: "all-liked".into(), name: "Liked".into(), owner: from.clone(), tracks: a.liked.iter().map(|s| s.to_itrack()).collect(), complete: true, via: "share".into(), source: "share".into(), ..Default::default() };
+            app.dl.start_to(col, Some(missing), Some(crate::downloader::LIKED.into()));
+        }
+    }
+    if pick[2] && !a.songs.is_empty() {
+        let owned = owned_of(&a.songs);
+        let missing: Vec<usize> = owned.iter().enumerate().filter(|(_, o)| o.is_none()).map(|(i, _)| i).collect();
+        if !missing.is_empty() {
+            downloading += missing.len();
+            let col = Collection { kind: "shared".into(), id: "all-songs".into(), name: from.clone(), owner: from.clone(), tracks: a.songs.iter().map(|s| s.to_itrack()).collect(), complete: true, via: "share".into(), source: "share".into(), ..Default::default() };
+            app.dl.start(col, Some(missing));
+        }
+    }
+    if downloading > 0 {
+        app.browser.set_view(View::Downloads);
+    }
+    app.toast(format!("Brought in {from}{}", if downloading > 0 { format!(": downloading {downloading} songs in the background") } else { String::new() }));
+}
+
+/// "Save my whole DK.FM…": a .dkfm file to open on another PC (or give a friend).
+pub fn export_all(app: &mut App) {
+    let name = app.settings.lock().spotify_user.clone();
+    let name = if name.is_empty() { "My".to_string() } else { name };
+    let all = {
+        let s = app.settings.lock().clone();
+        let d = app.lib.data.read();
+        share::SharedAll::of(&name, &s, &d)
+    };
+    let n = all.song_count();
+    let Some(path) = rfd::FileDialog::new().set_title("Save your whole DK.FM").set_file_name(format!("{name} DK.FM.{}", share::EXT)).add_filter("DK.FM file", &[share::EXT]).save_file() else { return };
+    match std::fs::write(&path, share::file_json(&Share::Everything(Box::new(all)))) {
+        Ok(()) => app.toast(format!("Saved your DK.FM ({n} songs, playlists and settings). Open the file on the other PC: drop it on DK.FM.")),
+        Err(e) => app.toast_err(format!("Couldn't save the file: {e}")),
     }
 }
 

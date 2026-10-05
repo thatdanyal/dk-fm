@@ -864,6 +864,8 @@ impl App {
             ui.painter().hline(full.x_range(), full.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
             ui.horizontal_centered(|ui| {
                 // logo
+                let _ = welcome::logo(ui, if self.mini { 14.0 } else { 20.0 });
+                ui.add_space(2.0);
                 let blink = self.player.status().playing && (ctx.input(|i| i.time) * 1.6) as i64 % 2 == 0;
                 let logo = egui::text::LayoutJob::default();
                 let mut job = logo;

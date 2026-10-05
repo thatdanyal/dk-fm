@@ -1,7 +1,7 @@
 //! The guided tour (offered at the end of the welcome, and from Ctrl+K / the what's-new screen):
 //! one feature at a time, lit up on screen with a short explanation. Panels and buttons say
-//! where they are with `App::mark` while they're drawn; a step whose part isn't on screen is
-//! explained in the middle instead.
+//! where they are with `App::mark` while they're drawn (a panel behind another tab is brought to
+//! the front for its step); a step whose part isn't on screen is explained in the middle instead.
 use super::theme::{px, vt};
 use super::widgets::{button, fill, frame_rect, with_alpha};
 use super::App;
@@ -33,6 +33,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         app.tour = None;
         return;
     };
+    // a panel that shares its spot with others (the scope sits behind the EQ by default) comes to
+    // the front for its step, so it can be lit up where it is
+    let tab = match id {
+        "scope" => Some(super::Tab::Scope),
+        "eq" => Some(super::Tab::Eq),
+        "library" => Some(super::Tab::Library),
+        _ => None,
+    };
+    if let Some(tab) = tab {
+        if app.dock.find_tab(&tab).is_some() && super::reveal(&mut app.dock, tab) {
+            app.marks.remove(id); // where it was last frame: behind another tab
+            ctx.request_repaint();
+        }
+    }
     let pal = app.pal;
     let screen = ctx.screen_rect();
     let target = app.marks.get(id).copied().filter(|r| r.is_positive() && screen.intersects(*r)).map(|r| r.expand(4.0).intersect(screen));

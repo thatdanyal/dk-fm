@@ -326,16 +326,19 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
                     app.lib.playlist_add(&pl.id, &[id]);
                 }
                 (Some(_), None) => {}
-                (None, _) => {
-                    let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
-                    let col = Collection { kind: "track".into(), id: cid.clone(), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
-                    app.dl.start_to(col, None, pl.map(|p| p.id.clone()));
-                    app.toast(match pl { Some(p) => format!("Downloading \"{}\" into \"{}\"", t.title, p.name), None => format!("Downloading \"{}\"", t.title) });
-                }
+                (None, _) => get(app, t, pl),
             }
         }
     }
     clicked
+}
+
+/// Download an online song to the library (and into `pl`, if given).
+pub fn get(app: &mut App, t: &ITrack, pl: Option<&Playlist>) {
+    let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
+    let col = Collection { kind: "track".into(), id: col_id(t), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
+    app.dl.start_to(col, None, pl.map(|p| p.id.clone()));
+    app.toast(match pl { Some(p) => format!("Downloading \"{}\" into \"{}\"", t.title, p.name), None => format!("Downloading \"{}\"", t.title) });
 }
 
 /// Download job id for a result ("yt" + video id, or "sc" + SoundCloud id).

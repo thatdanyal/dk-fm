@@ -44,6 +44,9 @@ pub enum Event {
     /// Reached the end with nothing preloaded.
     Ended,
     Error(String, String),
+    /// Now playing on this output device (the default changed or the old one went away), or
+    /// "" = there's no sound device to play on.
+    Device(String),
 }
 
 #[derive(Default, Clone)]
@@ -108,6 +111,8 @@ impl Engine {
 
 struct Deck {
     id: String,
+    path: PathBuf,
+    gain_db: f32,
     reader: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
@@ -159,6 +164,8 @@ impl Deck {
         let trim = db_to_lin(gain_db);
         Ok(Self {
             id: id.to_string(),
+            path: path.clone(),
+            gain_db,
             reader,
             decoder,
             track_id,
@@ -476,25 +483,40 @@ impl Dsp {
 
 // ------------------------------------------------------------------------------------------ mixer
 
-fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
+/// The sound card stream DK.FM plays into, and the ring buffer that feeds it.
+struct Output {
+    stream: cpal::Stream,
+    prod: rtrb::Producer<f32>,
+    sr: u32,
+    ring_len: usize,
+    /// the device's name, to notice when Windows / macOS / Linux switches the default output
+    name: String,
+    dead: Arc<AtomicBool>,
+}
+
+/// Open the system's default output device (playing).
+fn open_output(host: &cpal::Host, shared: &Arc<Shared>) -> Option<Output> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-    let host = cpal::default_host();
-    let device = host.default_output_device();
-    let config = device.as_ref().and_then(|d| d.default_output_config().ok());
-    let (sr, channels) = config.as_ref().map(|c| (c.sample_rate().0, c.channels() as usize)).unwrap_or((48000, 2));
-    shared.sample_rate.store(sr, Ordering::Relaxed);
-
+    let device = host.default_output_device()?;
+    let name = device.name().unwrap_or_default();
+    let config = device.default_output_config().ok()?;
+    let (sr, channels) = (config.sample_rate().0, config.channels() as usize);
     let ring_len = (sr as usize / 6) * 2; // ~170 ms of stereo audio
-    let (mut prod, mut cons) = rtrb::RingBuffer::<f32>::new(ring_len);
-
-    let _stream = (|| {
-        let device = device?;
-        let config = config?;
+    let (prod, mut cons) = rtrb::RingBuffer::<f32>::new(ring_len);
         let sh = shared.clone();
-        let mut last_flush = 0u64;
+        let mut last_flush = sh.flush.load(Ordering::Relaxed);
         let mut vol = 0.0f32;
-        let err = |e| eprintln!("audio stream error: {e}");
+        // the device went away (unplugged, Bluetooth/wireless headset off): the mixer opens the new default
+        let dead = Arc::new(AtomicBool::new(false));
+        let dead2 = dead.clone();
+        let err = move |e| {
+            eprintln!("audio stream error: {e}");
+            dead2.store(true, Ordering::Relaxed);
+        };
         let stream_cfg: cpal::StreamConfig = config.clone().into();
+        // DKFM_AUDIO_DEBUG=1: print the loudness actually sent to the sound card, once a second
+        let debug = std::env::var_os("DKFM_AUDIO_DEBUG").is_some();
+        let (mut dbg_sum, mut dbg_n) = (0.0f64, 0usize);
         let mut fill = move |out: &mut [f32]| {
             let f = sh.flush.load(Ordering::Relaxed);
             if f != last_flush {
@@ -511,6 +533,14 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                 vol += (target - vol) * 0.002;
                 for (i, s) in frame.iter_mut().enumerate() {
                     *s = if i % 2 == 0 { l * vol } else { r * vol };
+                }
+            }
+            if debug {
+                dbg_sum += out.iter().map(|s| (*s as f64) * (*s as f64)).sum::<f64>();
+                dbg_n += out.len();
+                if dbg_n >= sr as usize * channels {
+                    eprintln!("audio out: rms {:.5} vol {:.3} target {:.3}", (dbg_sum / dbg_n as f64).sqrt(), vol, target);
+                    (dbg_sum, dbg_n) = (0.0, 0);
                 }
             }
         };
@@ -552,8 +582,23 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
             }
         };
         stream.play().ok()?;
-        Some(stream)
-    })();
+    shared.sample_rate.store(sr, Ordering::Relaxed);
+    Some(Output { stream, prod, sr, ring_len, name, dead })
+}
+
+/// Name of the system's default output device right now.
+fn default_output_name(host: &cpal::Host) -> Option<String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    host.default_output_device().and_then(|d| d.name().ok())
+}
+
+fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
+    let host = cpal::default_host();
+    let mut out = open_output(&host, &shared);
+    let mut sr = out.as_ref().map(|o| o.sr).unwrap_or(48000);
+    let mut last_check = std::time::Instant::now();
+    let mut eq_state: Option<(bool, [f32; 10], f32)> = None;
+    let mut warned_none = false;
 
     let mut cur: Option<Deck> = None;
     let mut next: Option<Deck> = None;
@@ -561,7 +606,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
     // the sound card stream is stopped after a few seconds of silence (paused, nothing loaded):
     // an idle DK.FM (e.g. in the tray) then costs no CPU, and the OS audio engine can sleep
     let mut idle_since: Option<std::time::Instant> = Some(std::time::Instant::now());
-    let mut stream_on = _stream.is_some();
+    let mut stream_on = out.is_some();
     let mut xfade = 0.0f32;
     let mut fading: Option<(f64, f64)> = None; // (elapsed, length) seconds
     let mut dsp = Dsp::new(sr as f32);
@@ -575,7 +620,18 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
 
     loop {
         // commands: block briefly when idle, otherwise just drain
-        let wait = if playing && prod.slots() < CHUNK * 2 { Duration::from_millis(4) } else if playing { Duration::ZERO } else if stream_on { Duration::from_millis(100) } else { Duration::from_millis(1000) };
+        let room = out.as_ref().map(|o| o.prod.slots()).unwrap_or(0);
+        let wait = if playing && out.is_none() {
+            Duration::from_millis(250) // no sound device: look for one again shortly
+        } else if playing && room < CHUNK * 2 {
+            Duration::from_millis(4)
+        } else if playing {
+            Duration::ZERO
+        } else if stream_on {
+            Duration::from_millis(100)
+        } else {
+            Duration::from_millis(1000)
+        };
         let first = if wait.is_zero() {
             rx.try_recv().ok()
         } else {
@@ -647,7 +703,10 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                         flush(&shared);
                     }
                 }
-                Cmd::SetEq { enabled, gains, preamp } => dsp.set_eq(enabled, gains, preamp),
+                Cmd::SetEq { enabled, gains, preamp } => {
+                    eq_state = Some((enabled, gains, preamp));
+                    dsp.set_eq(enabled, gains, preamp);
+                }
                 Cmd::SetCrossfade(s) => xfade = s,
                 Cmd::SetGain { id, db } => {
                     for d in [cur.as_mut(), next.as_mut()].into_iter().flatten() {
@@ -661,8 +720,62 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
             }
         }
 
+        // follow the default output device: a headset or AirPods connecting, a device unplugged or
+        // switched in the system's sound settings. Checked about once a second while playing (and
+        // right away when playback starts), never while idle.
+        let starting = playing && !stream_on;
+        let lost = out.as_ref().is_some_and(|o| o.dead.load(Ordering::Relaxed));
+        if lost || (playing && (starting || out.is_none() || last_check.elapsed() > Duration::from_secs(1))) {
+            last_check = std::time::Instant::now();
+            let want = default_output_name(&host);
+            let have = out.as_ref().map(|o| o.name.clone());
+            if lost || (want.is_some() && want != have) {
+                // what's still in the old ring was never heard: pick the song up from where we are
+                let heard = match (cur.as_ref(), out.as_ref()) {
+                    (Some(c), Some(o)) if !lost => (c.position() - (o.ring_len - o.prod.slots()) as f64 / 2.0 / sr as f64).max(0.0),
+                    (Some(c), _) => c.position(),
+                    _ => 0.0,
+                };
+                out = None;
+                stream_on = false;
+                if let Some(o) = open_output(&host, &shared) {
+                    stream_on = true;
+                    if o.sr != sr {
+                        sr = o.sr;
+                        let (limiter, leveler) = (dsp.limiter, dsp.leveler);
+                        dsp = Dsp::new(sr as f32);
+                        (dsp.limiter, dsp.leveler) = (limiter, leveler);
+                        if let Some((e, g, p)) = eq_state {
+                            dsp.set_eq(e, g, p);
+                        }
+                        next = None; // reloaded by the player when it's needed
+                        fading = None;
+                    }
+                    if let Some(c) = cur.take() {
+                        let trim = c.trim_target;
+                        cur = match Deck::open(&c.id, &c.path, sr, c.gain_db) {
+                            Ok(mut d) => {
+                                d.trim_target = trim;
+                                d.trim = trim;
+                                d.seek(heard);
+                                Some(d)
+                            }
+                            Err(_) => Some(c),
+                        };
+                    }
+                    let _ = events.send(Event::Device(o.name.clone()));
+                    out = Some(o);
+                }
+            }
+            if out.is_none() && !warned_none {
+                warned_none = true;
+                let _ = events.send(Event::Device(String::new()));
+            } else if out.is_some() {
+                warned_none = false;
+            }
+        }
         // start / stop the sound card stream
-        if let Some(stream) = _stream.as_ref() {
+        if let Some(stream) = out.as_ref().map(|o| &o.stream) {
             use cpal::traits::StreamTrait;
             if playing {
                 idle_since = None;
@@ -687,7 +800,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
             Gapless(usize),
             Ended,
         }
-        while playing && prod.slots() >= CHUNK * 2 {
+        while playing && out.as_ref().is_some_and(|o| o.prod.slots() >= CHUNK * 2) {
             if cur.is_none() {
                 playing = false;
                 break;
@@ -762,7 +875,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     sc.push_back([fr[0], fr[1]]);
                 }
             }
-            if let Ok(mut ch) = prod.write_chunk_uninit(CHUNK * 2) {
+            if let Some(Ok(mut ch)) = out.as_mut().map(|o| o.prod.write_chunk_uninit(CHUNK * 2)) {
                 let (s1, s2) = ch.as_mut_slices();
                 let n1 = s1.len();
                 for (i, s) in s1.iter_mut().enumerate() {
@@ -780,7 +893,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
         st.playing = playing;
         match cur.as_ref() {
             Some(c) => {
-                let queued = (ring_len - prod.slots()) as f64 / 2.0 / sr as f64;
+                let queued = out.as_ref().map(|o| (o.ring_len - o.prod.slots()) as f64 / 2.0 / sr as f64).unwrap_or(0.0);
                 st.position = (c.position() - if playing { queued } else { 0.0 }).max(0.0);
                 st.duration = c.duration;
                 st.current = Some(c.id.clone());
@@ -790,5 +903,60 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                 st.position = 0.0;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// DKFM_DECODE_DIR=<folder> cargo test --release decode_folder -- --ignored --nocapture
+    /// decodes every song in a folder to the end, like the player does, and reports any that fail
+    #[test]
+    #[ignore]
+    fn decode_folder() {
+        let dir = std::env::var("DKFM_DECODE_DIR").expect("DKFM_DECODE_DIR");
+        let mut files = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(dir)];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if matches!(p.extension().and_then(|x| x.to_str()), Some("m4a" | "mp3" | "flac" | "opus" | "ogg" | "wav" | "webm")) {
+                    files.push(p);
+                }
+            }
+        }
+        let (mut ok, mut bad) = (0, 0);
+        for p in files {
+            let r = std::panic::catch_unwind(|| {
+                let mut d = super::Deck::open("t", &p, 48000, 0.0)?;
+                let mut buf = Vec::new();
+                let mut frames = 0u64;
+                while !d.finished() {
+                    d.read(512, &mut buf);
+                    if buf.iter().any(|s| !s.is_finite()) {
+                        return Err("non-finite sample".to_string());
+                    }
+                    frames += buf.len() as u64 / 2;
+                }
+                let secs = frames as f64 / 48000.0;
+                if d.duration > 0.0 && secs < d.duration - 2.0 {
+                    return Err(format!("stopped at {secs:.0}s of {:.0}s", d.duration));
+                }
+                Ok(())
+            });
+            match r {
+                Ok(Ok(())) => ok += 1,
+                Ok(Err(e)) => {
+                    bad += 1;
+                    println!("FAIL {}: {e}", p.display());
+                }
+                Err(_) => {
+                    bad += 1;
+                    println!("PANIC {}", p.display());
+                }
+            }
+        }
+        println!("{ok} ok, {bad} bad");
     }
 }

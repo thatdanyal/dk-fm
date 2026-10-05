@@ -568,6 +568,14 @@ impl Player {
                     }
                     self.notify();
                 }
+                Ok(Event::Device(name)) => {
+                    self.notices.lock().push(if name.is_empty() {
+                        "No speakers or headphones found: DK.FM will play as soon as one is connected".into()
+                    } else {
+                        format!("Now playing on {name}")
+                    });
+                    self.notify();
+                }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return,
                 Err(_) => {}
             }

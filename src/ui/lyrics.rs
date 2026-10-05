@@ -31,11 +31,6 @@ fn ease(x: f32) -> f32 {
     x * x * (3.0 - 2.0 * x)
 }
 
-fn mix(a: egui::Color32, b: egui::Color32, t: f32) -> egui::Color32 {
-    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t.clamp(0.0, 1.0)).round() as u8;
-    egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
-}
-
 impl LyricsState {
     /// Keep only lookups still running.
     pub fn trim(&mut self) {
@@ -115,14 +110,14 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
             });
         }
         Lyr::Synced(lines) => {
-            // a line stays lit until the next one starts; LEAD seconds before that, the text
-            // glides (eased) so the next line arrives centred exactly when it begins, and the
-            // highlight fades across. Every line is the same size: nothing jumps or re-wraps.
+            // a line stays lit until the next one starts, then the highlight moves straight to it
+            // (no fading, no greyed-out line left behind); LEAD seconds before that, the text
+            // glides (eased) so the next line arrives centred exactly when it begins. Every line
+            // is the same size: nothing jumps or re-wraps.
             let pos = app.player.status().position;
             let active = lines.iter().rposition(|(t, _)| *t <= pos);
             let next_at = lines.get(active.map(|a| a + 1).unwrap_or(0)).map(|l| l.0);
             let until = next_at.map(|n| n - pos).unwrap_or(f64::MAX);
-            let fade = if until <= LEAD { ease((1.0 - until / LEAD) as f32) } else { 0.0 };
             let target = if until <= LEAD { Some(active.map(|a| a + 1).unwrap_or(0)) } else { active };
             let st = &mut app.lyrics;
             // a new song, a seek or a jump of more than one line: snap there, no glide
@@ -155,9 +150,10 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                     ui.ctx().request_repaint();
                 }
             }
-            // wake up in time for the next glide
-            if until.is_finite() && until > LEAD {
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((until - LEAD).max(0.01)));
+            // wake up in time for the next glide, and to light the next line the moment it starts
+            if until.is_finite() {
+                let wait = if until > LEAD { until - LEAD } else { until };
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
             }
             let size = 22.0 * scale;
             let mut sa = egui::ScrollArea::vertical().auto_shrink([false; 2]).id_salt("lyr");
@@ -171,9 +167,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                 ui.vertical_centered(|ui| {
                     ui.spacing_mut().item_spacing.y = 8.0 * scale;
                     for (i, (lt, text)) in lines.iter().enumerate() {
-                        let lit = if Some(i) == active { 1.0 - fade } else if Some(i) == target && target != active { fade } else { 0.0 };
-                        let base = if active.map(|a| i < a).unwrap_or(false) { pal.faint } else { pal.dim };
-                        let color = mix(base, pal.accent, lit);
+                        let color = if Some(i) == active { pal.accent } else { pal.dim };
                         let txt = if text.is_empty() { "♪" } else { text.as_str() };
                         let r = ui.add(egui::Label::new(egui::RichText::new(txt).font(vt(size)).color(color)).wrap().sense(egui::Sense::click()));
                         ys.push(r.rect.center().y - top);

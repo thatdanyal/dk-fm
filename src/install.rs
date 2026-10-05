@@ -33,6 +33,7 @@ pub fn handle(args: &[String]) -> bool {
     if !(name.contains("setup") || has("--install")) {
         if has("--updated") {
             refresh_version(&me);
+            refresh_icons(&me);
         }
         return false;
     }
@@ -118,6 +119,7 @@ fn install(me: &Path) -> Result<PathBuf, String> {
             shortcut(&lnk, &exe);
         }
     }
+    refresh_icons(&exe);
     // the Electron version's start-at-login entry points at a program that no longer exists
     if !t.test && reg_get(RUN_KEY, ELECTRON_RUN_VALUE).is_some() {
         reg(&["delete", RUN_KEY, "/v", ELECTRON_RUN_VALUE, "/f"]);
@@ -173,6 +175,21 @@ fn refresh_version(me: &Path) {
     if same_path(me, &t.dir.join(EXE)) {
         reg(&["add", &t.key, "/v", "DisplayVersion", "/d", env!("CARGO_PKG_VERSION"), "/f"]);
     }
+}
+
+/// Windows keeps showing a program's old icon on shortcuts and the taskbar (it caches them)
+/// until it's told the icon changed: after an update, the new logo shows everywhere right away.
+fn refresh_icons(exe: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{SHChangeNotify, SHCNE_ASSOCCHANGED, SHCNE_UPDATEITEM, SHCNF_IDLIST, SHCNF_PATHW};
+    let t = Target::detect();
+    for p in [exe.to_path_buf(), t.start_menu.join("DK.FM.lnk"), t.desktop.join("DK.FM.lnk")] {
+        if p.exists() {
+            let w: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
+            unsafe { SHChangeNotify(SHCNE_UPDATEITEM as i32, SHCNF_PATHW, w.as_ptr().cast(), std::ptr::null()) };
+        }
+    }
+    unsafe { SHChangeNotify(SHCNE_ASSOCCHANGED as i32, SHCNF_IDLIST, std::ptr::null(), std::ptr::null()) };
 }
 
 fn register(t: &Target, exe: &Path) {

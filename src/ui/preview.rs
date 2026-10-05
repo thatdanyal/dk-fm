@@ -1,13 +1,15 @@
 //! Listen before you download: ▶ on an online song (Songs like this, search results, Discover)
-//! fetches a quick temporary copy and plays it right away, keeping your queue. Previews never
-//! join your library, playlists or Stats, and their files are cleared when DK.FM starts.
+//! fetches a quick temporary copy (a few seconds, only when asked: searching never waits on it)
+//! and plays it right away, keeping your queue. While it plays the deck offers KEEP (download it
+//! for real) or DISCARD (skip it). Previews never join your library, playlists or Stats, and
+//! their files are cleared when DK.FM starts.
 use super::theme::vt;
 use super::widgets::{fill, frame_rect, with_alpha};
 use super::App;
 use crate::library::PREVIEW;
 use crate::sources::ITrack;
 use crate::store::Track;
-use eframe::egui::{self, Align2, Rect, Sense, Ui};
+use eframe::egui::{self, Align2, Rect, Sense, Ui, Vec2};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,6 +20,10 @@ pub struct Previews {
     /// source key -> preview id once ready, or why it failed (None = still fetching)
     state: HashMap<String, Option<Result<String, String>>>,
     done: Arc<Mutex<Vec<(String, Result<Track, String>)>>>,
+    /// preview id -> the online song it's a preview of (for KEEP)
+    items: HashMap<String, ITrack>,
+    /// previews whose song is being downloaded (KEEP pressed)
+    kept: std::collections::HashSet<String>,
 }
 
 fn dir() -> PathBuf {
@@ -50,6 +56,7 @@ pub fn toggle(app: &mut App, t: &ITrack) {
 
 fn start(app: &mut App, t: &ITrack) {
     app.previews.state.insert(t.source_key.clone(), None);
+    app.previews.items.insert(id_of(t), t.clone());
     let (t, done, ctx, id) = (t.clone(), app.previews.done.clone(), app.covers.ctx.clone(), id_of(t));
     let covers = app.lib.cover_path("");
     std::thread::spawn(move || {
@@ -96,6 +103,31 @@ fn fetch(t: &ITrack, id: &str, covers: &std::path::Path) -> Result<Track, String
         youtube_id: t.youtube_id.clone(),
         ..Default::default()
     })
+}
+
+/// While a preview is playing: ⬇ KEEP downloads the song to your library (in your sound quality)
+/// and × DISCARD skips it. Draws nothing (and returns false) otherwise.
+pub fn keep_bar(app: &mut App, ui: &mut Ui, w: f32, h: f32) -> bool {
+    let Some(id) = app.player.current_id().filter(|id| id.starts_with(PREVIEW)) else { return false };
+    let Some(t) = app.previews.items.get(&id).cloned() else { return false };
+    let pal = app.pal;
+    let kept = app.previews.kept.contains(&id);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let bw = ((w - 6.0) / 2.0).max(40.0);
+        let keep = super::deck::tbtn(ui, &pal, if kept { "✔ KEEPING" } else { "⬇ KEEP" }, Vec2::new(bw, h), kept, !kept);
+        if !kept && keep.on_hover_text("Like it? Download it to your library (in your sound quality)").clicked() {
+            super::addsongs::get(app, &t, None);
+            app.previews.kept.insert(id.clone());
+        }
+        if super::deck::tbtn(ui, &pal, "× DISCARD", Vec2::new(bw, h), false, false).on_hover_text("Not for you: skip it. Nothing is saved").clicked() {
+            let at = app.player.st.lock().queue.iter().position(|q| *q == id);
+            if let Some(i) = at {
+                app.player.remove_at(i);
+            }
+        }
+    });
+    true
 }
 
 /// This song's preview is loading or is the song playing now (so its button stays visible).

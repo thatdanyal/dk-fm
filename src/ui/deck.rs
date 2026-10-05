@@ -67,10 +67,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
             sleep_button(app, ui);
         });
-        // ---- SHAZAM, its own button along the bottom
+        // ---- SHAZAM, its own button along the bottom (KEEP / DISCARD while a preview plays)
         ui.horizontal(|ui| {
-            ui.add_space(((ui.available_width() - 150.0) / 2.0).max(0.0));
-            shazam_wide(app, ui, 150.0);
+            let w = (ui.available_width() - 10.0).min(300.0);
+            ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
+            if !super::preview::keep_bar(app, ui, w, 26.0) {
+                ui.add_space(((w - 150.0) / 2.0).max(0.0));
+                shazam_wide(app, ui, 150.0);
+            }
         });
     });
 }
@@ -208,8 +212,11 @@ fn compact(app: &mut App, ui: &mut Ui) {
             }
             let row = h >= 160.0; // room for a row of its own below
             if !row && ui.available_width() > 170.0 {
-                volume(app, ui, if ui.available_width() > 280.0 { 140.0 } else { 80.0 });
-                shazam_button(app, ui);
+                let preview = app.player.current_id().is_some_and(|id| id.starts_with(crate::library::PREVIEW));
+                volume(app, ui, if preview { 200.0 } else if ui.available_width() > 280.0 { 140.0 } else { 80.0 });
+                if !(preview && super::preview::keep_bar(app, ui, 190.0, 34.0 * k)) {
+                    shazam_button(app, ui);
+                }
             } else if ui.available_width() > 90.0 {
                 volume(app, ui, if ui.available_width() > 200.0 { 60.0 } else { 8.0 });
             } else {
@@ -228,7 +235,9 @@ fn compact(app: &mut App, ui: &mut Ui) {
                     }
                 }
                 let w = (ui.available_width() - 4.0).min(150.0);
-                shazam_wide(app, ui, w);
+                if !super::preview::keep_bar(app, ui, (ui.available_width() - 4.0).min(300.0), 26.0) {
+                    shazam_wide(app, ui, w);
+                }
             });
         }
     });

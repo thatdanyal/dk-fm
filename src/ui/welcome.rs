@@ -11,12 +11,12 @@ pub const WHATS_NEW: &str = "biggest-update-2026-10b";
 /// What's new, in plain words, one line each (newest first).
 const NEWS: &[(&str, &str)] = &[
     ("🌐", "FIND MUSIC: search songs, artists, albums, playlists, profiles, podcasts and audiobooks like on Spotify, with LOAD MORE. Open an artist to see all their songs and albums."),
-    ("▶", "Listen first: ▶ on any song you find online plays a preview before you download it (it isn't added to your library)."),
+    ("▶", "Listen first: ▶ on any song you find online plays a preview. Like it? ⬇ KEEP on the deck downloads it; × DISCARD skips it and nothing is saved."),
     ("♫", "SHAZAM has its own button on the deck: DK.FM names the song playing on your PC and finds it for you."),
     ("✨", "Songs like this: 10 to start (change it in Settings > Search), new-to-you songs first, nothing ticked until you choose."),
     ("📖", "STUDY mode (title bar or Ctrl+Shift+S): just the lyrics and the deck. Pick what it shows in Settings > Layouts."),
     ("🔲", "A new default layout, and RESET LAYOUT (or switching layouts) can be undone with UNDO / Ctrl+Z. A small window folds panels into tabs; full size stays exactly as you set it."),
-    ("📝", "Lyrics hold each line until it's sung, then glide smoothly to the next one."),
+    ("📝", "Lyrics light up each line right as it's sung, and glide smoothly to the next one."),
     ("…", "… at the end of every song row: add it to playlists, the queue and more, like Spotify."),
     ("⬇", "⬇ Downloads in the sidebar lists everything you downloaded; songs you get one at a time go into a Downloads folder."),
     ("💿", "Songs saved twice show once, and CLEAN UP removes the extra copies. Delete from library & PC really deletes the file (to the Recycle Bin)."),
@@ -68,17 +68,20 @@ pub fn first_modal(app: &App) -> Option<Modal> {
     }
 }
 
-pub fn logo(ui: &mut egui::Ui, size: f32) {
-    let id = egui::Id::new("dkfm-logo");
+/// The DK.FM logo, `size` points square (sharp at any size: one texture per pixel size).
+pub fn logo(ui: &mut egui::Ui, size: f32) -> egui::Response {
+    let res = ((size * ui.ctx().pixels_per_point()).round() as u32).clamp(16, 256);
+    let id = egui::Id::new(("dkfm-logo", res));
     let tex = ui.ctx().data(|d| d.get_temp::<egui::TextureHandle>(id)).or_else(|| {
-        let img = image::load_from_memory(include_bytes!("../../assets/icon.png")).ok()?.resize(192, 192, image::imageops::FilterType::Lanczos3).to_rgba8();
+        let img = image::load_from_memory(include_bytes!("../../assets/icon.png")).ok()?.resize(res, res, image::imageops::FilterType::Lanczos3).to_rgba8();
         let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
         let t = ui.ctx().load_texture("dkfm-logo", ci, egui::TextureOptions::LINEAR);
         ui.ctx().data_mut(|d| d.insert_temp(id, t.clone()));
         Some(t)
     });
-    if let Some(t) = tex {
-        ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::splat(size)));
+    match tex {
+        Some(t) => ui.add(egui::Image::new(&t).fit_to_exact_size(Vec2::splat(size))),
+        None => ui.allocate_response(Vec2::splat(size), egui::Sense::hover()),
     }
 }
 

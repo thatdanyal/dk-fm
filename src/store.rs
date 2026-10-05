@@ -71,7 +71,7 @@ pub fn save_json<T: Serialize>(path: &Path, v: &T) {
 
 fn d_true() -> bool { true }
 fn d_theme() -> String { "red-retro".into() }
-fn d_format() -> String { "m4a".into() }
+fn d_format() -> String { "high".into() }
 fn d_conc() -> u32 { 3 }
 fn d_sync() -> u32 { 6 }
 fn d_vol() -> f32 { 0.8 }
@@ -163,9 +163,9 @@ pub struct Settings {
     #[serde(default)] pub spotify_refresh_token: String,
     #[serde(default)] pub spotify_user: String,
     #[serde(default = "d_true")] pub auto_update: bool,
-    #[serde(default = "d_true")] pub close_to_tray: bool,
+    #[serde(default)] pub close_to_tray: bool,
     /// the window's X button: "playing" (keep playing in the tray while music plays, else quit),
-    /// "tray" (always to the tray) or "quit". Empty = from the older close_to_tray switch.
+    /// "tray" (always to the tray) or "quit". Empty (never chosen) = quit: tray is opt-in.
     #[serde(default)] pub close_mode: String,
     #[serde(default)] pub start_at_login: bool,
     #[serde(default)] pub tray_hint_shown: bool,
@@ -257,7 +257,6 @@ impl Default for Settings {
 impl Settings {
     pub fn close_mode(&self) -> &str {
         match self.close_mode.as_str() {
-            "" if self.close_to_tray => "playing",
             "" => "quit",
             m => m,
         }

@@ -808,15 +808,22 @@ impl App {
     fn overlays(&mut self, ctx: &egui::Context) {
         let pal = self.pal;
         // toasts (bottom-right)
-        self.toasts.retain(|t| t.1.elapsed() < Duration::from_secs(if t.2 { 6 } else { 3 }));
+        // longer messages (e.g. how a friend uses a share code) stay long enough to read, and
+        // a toast under the mouse stays until the mouse leaves
+        let secs = |msg: &str, err: bool| (if err { 6.0 } else { 3.0 } + msg.chars().count() as f32 / 14.0).min(15.0);
+        self.toasts.retain(|t| t.1.elapsed().as_secs_f32() < secs(&t.0, t.2));
         if !self.toasts.is_empty() {
             let screen = ctx.screen_rect();
             let painter = ctx.layer_painter(LayerId::new(Order::Tooltip, Id::new("toasts")));
+            let hover = ctx.pointer_hover_pos();
             let mut y = screen.bottom() - 16.0;
-            for (msg, _, err) in self.toasts.iter().rev() {
+            for (msg, at, err) in self.toasts.iter_mut().rev() {
                 let galley = painter.layout(msg.clone(), vt(19.0), if *err { pal.accent } else { pal.text }, 380.0);
                 let size = galley.size() + Vec2::new(24.0, 16.0);
                 let r = Rect::from_min_size(egui::pos2(screen.right() - 16.0 - size.x, y - size.y), size);
+                if hover.is_some_and(|p| r.contains(p)) {
+                    *at = Instant::now();
+                }
                 fill(&painter, r.translate(Vec2::splat(4.0)), pal.shadow);
                 fill(&painter, r, pal.panel);
                 widgets::frame_rect(&painter, r, 2.0, pal.accent);

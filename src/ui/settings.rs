@@ -1083,19 +1083,29 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         }
     });
     ui.add_space(14.0);
-    caption(ui, &pal, "FORMAT");
-    let mut fmt = app.settings.lock().download_format.clone();
-    let before = fmt.clone();
-    row(ui, &pal, "Audio format", |ui| {
-        egui::ComboBox::from_id_salt("fmt").selected_text(match fmt.as_str() { "mp3-320" => "MP3 · 320 kbps", "mp3-v0" => "MP3 · V0", _ => "M4A · AAC original" }).width(330.0).show_ui(ui, |ui| {
-            ui.selectable_value(&mut fmt, "m4a".to_string(), "M4A · AAC original (recommended: smallest, no quality loss)");
-            ui.selectable_value(&mut fmt, "mp3-v0".to_string(), "MP3 · V0 VBR (~245 kbps)");
-            ui.selectable_value(&mut fmt, "mp3-320".to_string(), "MP3 · 320 kbps (largest, for old devices)");
-        });
+    caption(ui, &pal, "SOUND QUALITY");
+    let fmt = app.settings.lock().download_format.clone();
+    // older settings saved "m4a", which is HIGH now
+    let cur = if matches!(fmt.as_str(), "standard" | "lossless" | "mp3-320" | "mp3-v0") { fmt.clone() } else { "high".to_string() };
+    row(ui, &pal, "Downloads", |ui| {
+        if let Some(f) = choice(ui, &pal, &cur, &[("standard".to_string(), "STANDARD"), ("high".to_string(), "HIGH"), ("lossless".to_string(), "LOSSLESS")]) {
+            app.edit_settings(|s| s.download_format = f);
+        }
     });
-    if fmt != before {
-        app.edit_settings(|s| s.download_format = fmt);
-    }
+    dim(ui, &pal, match cur.as_str() {
+        "standard" => "YouTube's AAC stream as it is (about 128 kbps). Smallest files, about 4 MB a song.",
+        "lossless" => "The best stream YouTube has, saved as FLAC so nothing more is lost on the way. YouTube itself has no lossless audio, so it sounds like HIGH but files are about 5x bigger (25-40 MB a song).",
+        "mp3-320" | "mp3-v0" => "MP3, for old devices and car stereos. Slightly lower quality than HIGH.",
+        _ => "The best stream YouTube has (Opus, about 160 kbps), kept as 256 kbps AAC. Recommended: the best sound for its size, about 8 MB a song.",
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let mut mp3 = cur.starts_with("mp3");
+        if switch(ui, &pal, &mut mp3, "SAVE AS MP3 INSTEAD (OLD DEVICES)") {
+            app.edit_settings(|s| s.download_format = if mp3 { "mp3-320".into() } else { "high".into() });
+        }
+    });
+    dim(ui, &pal, "Only new downloads use this; songs you already have stay as they are.");
     let mut conc = app.settings.lock().download_concurrency;
     row(ui, &pal, "Parallel downloads", |ui| {
         if ui.add(egui::Slider::new(&mut conc, 1..=6)).changed() {
@@ -1241,7 +1251,7 @@ fn playback(app: &mut App, ui: &mut Ui) {
     ui.add_space(8.0);
     row(ui, &pal, "Visualizer FPS", |ui| {
         for f in [15u32, 30, 60] {
-            if ui.selectable_label(o.vis_fps == f, format!("{f}")).clicked() {
+            if super::widgets::outline_button(ui, &pal, &format!("{f}"), o.vis_fps == f).clicked() {
                 let m = o.visualizer.clone();
                 app.player.set_visualizer(&m, f);
             }
@@ -1341,7 +1351,7 @@ fn naming(app: &mut App, ui: &mut Ui) {
     if pat != before {
         app.edit_settings(|s| s.name_pattern = pat.clone());
     }
-    let ext = if app.settings.lock().download_format.starts_with("mp3") { "mp3" } else { "m4a" };
+    let ext = crate::downloader::fmt_args(&app.settings.lock().download_format).0;
     let ex = |folder: &str, album: &str, track: Option<u32>| render_name(&pat, &NameParts { artist: "Daft Punk", album, title: "One More Time", track, year: Some(2001), folder }).display().to_string();
     ui.label(egui::RichText::new(format!("Example: {}.{ext}", ex("Party Mix", "Discovery", Some(1)))).color(pal.accent2));
     dim(ui, &pal, &format!("A single song: {}.{ext}", ex("Singles", "", None)));

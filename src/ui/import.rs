@@ -200,7 +200,7 @@ fn header_cover(app: &App, ui: &mut Ui) {
 fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
     let pal = app.pal;
     let keys = library_keys(app);
-    let fmt = match app.settings.lock().download_format.as_str() { "mp3-320" => "MP3 320", "mp3-v0" => "MP3 V0", _ => "M4A" };
+    let fmt = crate::downloader::quality_label(&app.settings.lock().download_format);
     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
         ui.horizontal(|ui| {
             header_cover(app, ui);

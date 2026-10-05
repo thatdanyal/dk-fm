@@ -22,7 +22,8 @@ const NEWS: &[(&str, &str)] = &[
     ("💿", "Album covers next to every song in your lists."),
     ("📝", "Lyrics grow and shrink with their panel, and come from YouTube captions when nothing else has them."),
     ("⏯", "Play, pause and skip from the taskbar thumbnail and your keyboard's media keys."),
-    ("🚪", "Closing DK.FM with nothing playing really quits: nothing left running in the background."),
+    ("🎧", "Better sound: downloads now get the best audio YouTube has (HIGH), or LOSSLESS FLAC in Settings > Downloads."),
+    ("🚪", "Closing DK.FM really quits: nothing left running in the background (keep it in the tray in Settings > System if you like)."),
 ];
 
 #[derive(Clone, Copy, PartialEq)]

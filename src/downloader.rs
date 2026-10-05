@@ -169,11 +169,32 @@ pub fn thresholds(strictness: &str) -> (i32, i32, i32) {
     }
 }
 
-fn fmt_args(fmt: &str) -> (&'static str, Vec<&'static str>) {
+/// Sound quality (Settings > Downloads > Sound quality) -> (file extension, yt-dlp arguments).
+/// YouTube's best audio is Opus at about 160 kbps (AAC 256 kbps on YouTube Music with Premium);
+/// YouTube has no lossless audio, so LOSSLESS keeps exactly what that best stream has.
+pub fn fmt_args(fmt: &str) -> (&'static str, Vec<&'static str>) {
     match fmt {
-        "mp3-320" => ("mp3", vec!["-x", "--audio-format", "mp3", "--audio-quality", "320K"]),
-        "mp3-v0" => ("mp3", vec!["-x", "--audio-format", "mp3", "--audio-quality", "0"]),
-        _ => ("m4a", vec!["-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a", "--audio-quality", "0"]),
+        // the ~128 kbps AAC stream as it is: smallest files, never re-encoded
+        "standard" => ("m4a", vec!["-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a", "--audio-quality", "0"]),
+        // the best stream decoded once into FLAC: nothing more is lost on the way (about 5x larger)
+        // (16-bit: the source has nothing a 24-bit file would keep, and it halves the size)
+        "lossless" => ("flac", vec!["-f", "bestaudio", "-x", "--audio-format", "flac", "--postprocessor-args", "ExtractAudio:-sample_fmt s16"]),
+        "mp3-320" => ("mp3", vec!["-f", "bestaudio", "-x", "--audio-format", "mp3", "--audio-quality", "320K"]),
+        "mp3-v0" => ("mp3", vec!["-f", "bestaudio", "-x", "--audio-format", "mp3", "--audio-quality", "0"]),
+        // "high" (the default; older settings saved "m4a"): the best stream, kept if it's already
+        // 256 kbps AAC, else made into 256 kbps AAC so the Opus original's quality survives
+        _ => ("m4a", vec!["-f", "bestaudio[acodec^=mp4a][abr>=190]/bestaudio", "-x", "--audio-format", "m4a", "--audio-quality", "256K"]),
+    }
+}
+
+/// Short name of a sound quality setting, for the import screen and Settings.
+pub fn quality_label(fmt: &str) -> &'static str {
+    match fmt {
+        "standard" => "STANDARD",
+        "lossless" => "LOSSLESS (FLAC)",
+        "mp3-320" => "MP3 320",
+        "mp3-v0" => "MP3 V0",
+        _ => "HIGH",
     }
 }
 
@@ -383,10 +404,13 @@ impl Downloader {
         let first_artist = t.artists.first().cloned().unwrap_or_else(|| "Unknown".into());
         let album = if !t.album.is_empty() { t.album.clone() } else if kind == "playlist" || kind == "album" { job_name.clone() } else { t.title.clone() };
         let rel = render_name(&pattern, &NameParts { artist: &first_artist, album: &album, title: &t.title, track: t.track_no, year: t.year, folder: &folder_name(&kind, &job_name) });
-        let out_file = PathBuf::from(dir).join(format!("{}.{ext}", rel.display()));
+        let base = PathBuf::from(dir).join(&rel);
+        let out_file = PathBuf::from(format!("{}.{ext}", base.display()));
         let _ = std::fs::create_dir_all(out_file.parent().unwrap_or(Path::new(".")));
+        // already downloaded, maybe at another sound quality before it was changed
+        let existing = std::iter::once(ext).chain(["m4a", "flac", "mp3"]).map(|e| PathBuf::from(format!("{}.{e}", base.display()))).find(|p| p.exists());
 
-        if out_file.exists() && forced.is_none() {
+        if let (Some(out_file), None) = (existing, &forced) {
             let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, None));
             self.with_track(job_id, idx, |jt| {
                 jt.status = TStatus::Done;

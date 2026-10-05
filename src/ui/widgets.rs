@@ -65,6 +65,25 @@ pub fn tb_button(ui: &mut Ui, pal: &Pal, text: &str, on: bool) -> Response {
     resp
 }
 
+/// One option of a small set (e.g. visualizer FPS): the chosen one is outlined, never filled,
+/// so its text stays readable in every theme.
+pub fn outline_button(ui: &mut Ui, pal: &Pal, text: &str, on: bool) -> Response {
+    let font = vt(19.0);
+    let galley = ui.painter().layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(galley.size().x + 16.0, 24.0), Sense::click());
+    let p = ui.painter();
+    if on {
+        frame_rect(p, rect, 2.0, pal.accent);
+    } else if resp.hovered() {
+        frame_rect(p, rect, 1.0, pal.line_hi);
+    }
+    p.text(rect.center(), Align2::CENTER_CENTER, text, font, if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}
+
 /// On/off switch with a pixel label.
 pub fn switch(ui: &mut Ui, pal: &Pal, on: &mut bool, label: &str) -> bool {
     let font = px(7.0);

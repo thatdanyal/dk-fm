@@ -558,6 +558,10 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
     let mut cur: Option<Deck> = None;
     let mut next: Option<Deck> = None;
     let mut playing = false;
+    // the sound card stream is stopped after a few seconds of silence (paused, nothing loaded):
+    // an idle DK.FM (e.g. in the tray) then costs no CPU, and the OS audio engine can sleep
+    let mut idle_since: Option<std::time::Instant> = Some(std::time::Instant::now());
+    let mut stream_on = _stream.is_some();
     let mut xfade = 0.0f32;
     let mut fading: Option<(f64, f64)> = None; // (elapsed, length) seconds
     let mut dsp = Dsp::new(sr as f32);
@@ -571,7 +575,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
 
     loop {
         // commands: block briefly when idle, otherwise just drain
-        let wait = if playing && prod.slots() < CHUNK * 2 { Duration::from_millis(4) } else if playing { Duration::ZERO } else { Duration::from_millis(50) };
+        let wait = if playing && prod.slots() < CHUNK * 2 { Duration::from_millis(4) } else if playing { Duration::ZERO } else if stream_on { Duration::from_millis(100) } else { Duration::from_millis(1000) };
         let first = if wait.is_zero() {
             rx.try_recv().ok()
         } else {
@@ -657,6 +661,24 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
             }
         }
 
+        // start / stop the sound card stream
+        if let Some(stream) = _stream.as_ref() {
+            use cpal::traits::StreamTrait;
+            if playing {
+                idle_since = None;
+                if !stream_on {
+                    stream_on = stream.play().is_ok();
+                    if !stream_on {
+                        playing = false; // the device went away
+                    }
+                }
+            } else if stream_on {
+                let since = *idle_since.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() > Duration::from_secs(3) && stream.pause().is_ok() {
+                    stream_on = false;
+                }
+            }
+        }
         // produce audio while there's room in the ring
         enum Act {
             None,

@@ -8,11 +8,15 @@ mod downloader;
 #[cfg(windows)]
 mod install;
 mod library;
+mod lyricsrc;
 mod net;
 mod player;
+mod recognize;
 mod share;
 mod single;
 mod sources;
+#[cfg(windows)]
+mod taskbar;
 mod spotify_auth;
 mod store;
 mod system;

@@ -97,7 +97,6 @@ fn install(me: &Path) -> Result<PathBuf, String> {
     if same_path(me, &exe) {
         return Ok(exe);
     }
-    let fresh = !exe.exists();
 
     // the old version is quitting so it can be replaced; give it a moment, then make sure
     close_running(&t.dir, Duration::from_secs(20));
@@ -112,10 +111,12 @@ fn install(me: &Path) -> Result<PathBuf, String> {
     std::fs::copy(me, &exe).map_err(|e| format!("Couldn't copy DK.FM to {}: {e}", t.dir.display()))?;
 
     register(&t, &exe);
-    shortcut(&t.start_menu.join("DK.FM.lnk"), &exe);
-    let desk = t.desktop.join("DK.FM.lnk");
-    if fresh || desk.exists() {
-        shortcut(&desk, &exe);
+    // shortcuts are only refreshed where they already are: a fresh install asks first (in the
+    // welcome screens, see `add_shortcuts`)
+    for lnk in [t.start_menu.join("DK.FM.lnk"), t.desktop.join("DK.FM.lnk")] {
+        if lnk.exists() {
+            shortcut(&lnk, &exe);
+        }
     }
     // the Electron version's start-at-login entry points at a program that no longer exists
     if !t.test && reg_get(RUN_KEY, ELECTRON_RUN_VALUE).is_some() {
@@ -124,6 +125,18 @@ fn install(me: &Path) -> Result<PathBuf, String> {
         let _ = crate::system::set_start_at_login_for(&exe, true);
     }
     Ok(exe)
+}
+
+/// Start menu and/or desktop shortcuts to the running DK.FM, once the user said yes.
+pub fn add_shortcuts(start_menu: bool, desktop: bool) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let t = Target::detect();
+    if start_menu {
+        shortcut(&t.start_menu.join("DK.FM.lnk"), &exe);
+    }
+    if desktop {
+        shortcut(&t.desktop.join("DK.FM.lnk"), &exe);
+    }
 }
 
 fn uninstall(me: &Path, silent: bool) {

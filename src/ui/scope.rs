@@ -40,6 +40,13 @@ impl ScopeState {
     pub fn invalidate(&mut self) {
         self.w = 0;
     }
+    /// Drop the texture and pixel buffers (rebuilt when it's on screen again).
+    pub fn release(&mut self) {
+        self.tex = None;
+        self.buf = Vec::new();
+        self.glow = Vec::new();
+        self.w = 0;
+    }
     pub fn cycle(&mut self, player: &Player) {
         let i = MODES.iter().position(|m| m.0 == self.mode).unwrap_or(0);
         self.mode = MODES[(i + 1) % MODES.len()].0.into();
@@ -99,8 +106,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if let Some(t) = &s.tex {
         ui.painter().image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
     }
-    // mode buttons on hover
-    if resp.hovered() {
+    // mode buttons while the mouse is over the visualizer. Not `resp.hovered()`: the buttons
+    // take the hover from it, so they'd vanish under the mouse every other frame (flicker).
+    if ui.rect_contains_pointer(outer) {
         let mut x = r.right() - 4.0;
         for (id, label) in MODES.iter().rev() {
             let g = ui.painter().layout_no_wrap(label.to_string(), px(5.0), pal.text);
@@ -334,7 +342,7 @@ fn spectro(s: &mut ScopeState, c: &Cols, sr: f32) {
 
 /// A small radix-2 FFT. The visualizer only ever needs one fixed size, so this replaces a
 /// general-purpose FFT library (~800 KB of code) with precomputed tables.
-struct Fft {
+pub(crate) struct Fft {
     n: usize,
     rev: Vec<u32>,
     twiddle: Vec<(f32, f32)>,
@@ -343,7 +351,7 @@ struct Fft {
 }
 
 impl Fft {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         let bits = n.trailing_zeros();
         let tau = 2.0 * std::f32::consts::PI;
         Fft {
@@ -355,7 +363,7 @@ impl Fft {
     }
 
     /// In-place forward transform of (re, im).
-    fn process(&self, re: &mut [f32], im: &mut [f32]) {
+    pub(crate) fn process(&self, re: &mut [f32], im: &mut [f32]) {
         let n = self.n;
         for i in 0..n {
             let j = self.rev[i] as usize;

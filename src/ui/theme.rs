@@ -225,8 +225,10 @@ pub fn apply(ctx: &egui::Context, p: &Pal) {
     v.code_bg_color = p.bg;
     v.override_text_color = Some(p.text);
     v.hyperlink_color = p.accent2;
-    v.selection.bg_fill = p.accent;
-    v.selection.stroke = Stroke::new(1.0_f32, p.ink);
+    // selected options (dropdown entries, selected text) are outlined with a faint tint, not
+    // filled solid: a solid accent fill hid the label in themes whose accent is close to the text
+    v.selection.bg_fill = Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), 60);
+    v.selection.stroke = Stroke::new(2.0_f32, p.accent);
     v.window_stroke = Stroke::new(2.0_f32, p.accent);
     v.window_corner_radius = egui::CornerRadius::ZERO;
     v.menu_corner_radius = egui::CornerRadius::ZERO;

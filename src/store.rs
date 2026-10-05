@@ -71,7 +71,7 @@ pub fn save_json<T: Serialize>(path: &Path, v: &T) {
 
 fn d_true() -> bool { true }
 fn d_theme() -> String { "red-retro".into() }
-fn d_format() -> String { "m4a".into() }
+fn d_format() -> String { "high".into() }
 fn d_conc() -> u32 { 3 }
 fn d_sync() -> u32 { 6 }
 fn d_vol() -> f32 { 0.8 }
@@ -82,6 +82,8 @@ fn d_one() -> f32 { 1.0 }
 fn d_songs() -> String { "songs".into() }
 fn d_ten() -> u32 { 10 }
 fn d_five() -> u32 { 5 }
+fn d_three() -> u32 { 3 }
+fn d_template() -> String { "template".into() }
 fn d_sources() -> Vec<String> { ["library", "songs", "youtube"].map(String::from).to_vec() }
 fn d_normal() -> String { "normal".into() }
 fn d_pixel() -> String { "pixel".into() }
@@ -89,7 +91,9 @@ fn d_comfy() -> String { "comfortable".into() }
 fn d_all() -> String { "all".into() }
 fn d_daily() -> String { "daily".into() }
 fn d_custom() -> String { "custom".into() }
-pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "album", "time", "plays"].map(String::from).to_vec() }
+/// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)
+fn d_hidden_tabs() -> Vec<String> { ["recent", "top"].map(String::from).to_vec() }
+pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "time"].map(String::from).to_vec() }
 pub const DEFAULT_PATTERN: &str = "{folder}/{artist} - {title}";
 fn d_pattern() -> String { DEFAULT_PATTERN.into() }
 
@@ -146,7 +150,7 @@ pub struct Session {
 pub struct Settings {
     #[serde(default = "d_theme")] pub theme: String,
     #[serde(default)] pub accent: Option<String>,
-    #[serde(default = "d_true")] pub scanlines: bool,
+    #[serde(default)] pub scanlines: bool,
     #[serde(default = "d_true")] pub glow: bool,
     #[serde(default)] pub music_folders: Vec<String>,
     #[serde(default)] pub download_dir: String,
@@ -159,7 +163,10 @@ pub struct Settings {
     #[serde(default)] pub spotify_refresh_token: String,
     #[serde(default)] pub spotify_user: String,
     #[serde(default = "d_true")] pub auto_update: bool,
-    #[serde(default = "d_true")] pub close_to_tray: bool,
+    #[serde(default)] pub close_to_tray: bool,
+    /// the window's X button: "playing" (keep playing in the tray while music plays, else quit),
+    /// "tray" (always to the tray) or "quit". Empty (never chosen) = quit: tray is opt-in.
+    #[serde(default)] pub close_mode: String,
     #[serde(default)] pub start_at_login: bool,
     #[serde(default)] pub tray_hint_shown: bool,
     #[serde(default)] pub player: PlayerOpts,
@@ -170,6 +177,9 @@ pub struct Settings {
     /// "find new songs" in a playlist: "songs" (YouTube Music) or "youtube", and how many results
     #[serde(default = "d_songs")] pub search_source: String,
     #[serde(default = "d_ten")] pub search_results: u32,
+    /// FIND SONGS (web search): how many versions to show, and where ("songs" | "youtube")
+    #[serde(default = "d_three")] pub web_results: u32,
+    #[serde(default = "d_songs")] pub web_source: String,
     /// playlist songs were last added to (listed first in Ctrl+K's playlist picker)
     #[serde(default)] pub last_playlist: String,
     /// where "add songs" looks, in order: library, songs (YouTube Music), youtube, soundcloud
@@ -185,6 +195,10 @@ pub struct Settings {
     #[serde(default = "d_one")] pub zoom: f32,
     /// track list rows: "compact" | "comfortable"
     #[serde(default = "d_comfy")] pub density: String,
+    /// lyrics text size on top of fitting the panel (Ctrl+scroll over the lyrics)
+    #[serde(default = "d_one")] pub lyrics_zoom: f32,
+    /// album covers next to song titles in lists
+    #[serde(default = "d_true")] pub list_covers: bool,
     #[serde(default)] pub custom_themes: Vec<CustomTheme>,
     /// visualizer colours: none = follow the theme, else [low, mid, peak] hex
     #[serde(default)] pub vis_colors: Option<[String; 3]>,
@@ -192,12 +206,16 @@ pub struct Settings {
     #[serde(default)] pub vis_bars: u32,
     // ---- layouts, lists, sidebar
     #[serde(default)] pub layouts: Vec<NamedLayout>,
+    /// "template" (docked panels that snap together) or "free" (every panel at a pixel position)
+    #[serde(default = "d_template")] pub layout_mode: String,
+    /// free layout: panel -> [x, y, width, height] in pixels from the top-left of the panel area
+    #[serde(default)] pub free_panels: std::collections::BTreeMap<String, [f32; 4]>,
     #[serde(default = "d_columns")] pub columns: Vec<String>,
     /// default sort per screen ("all", "liked", ...) -> "artist" / "-plays" ("-" = descending, "" = list order)
     #[serde(default)] pub sorts: std::collections::BTreeMap<String, String>,
     #[serde(default = "d_all")] pub start_view: String,
     #[serde(default)] pub sidebar_order: Vec<String>,
-    #[serde(default)] pub sidebar_hidden: Vec<String>,
+    #[serde(default = "d_hidden_tabs")] pub sidebar_hidden: Vec<String>,
     // ---- downloads
     /// file name pattern under the download folder ("/" makes folders)
     #[serde(default = "d_pattern")] pub name_pattern: String,
@@ -221,6 +239,13 @@ pub struct Settings {
     /// Home: new releases from your top artists (checked online at most once a day)
     #[serde(default = "d_true")] pub new_releases: bool,
     #[serde(default = "d_ten")] pub release_artists: u32,
+    // ---- welcome screens
+    /// the first-run welcome was finished (settings from before it existed count as done)
+    #[serde(default = "d_true")] pub onboarded: bool,
+    /// the "what's new" notice last shown (see ui::welcome::WHATS_NEW)
+    #[serde(default)] pub whats_new_seen: String,
+    /// no settings file yet when DK.FM started: a fresh install
+    #[serde(skip)] pub fresh: bool,
     /// keep any keys this version doesn't know about
     #[serde(flatten)] pub extra: Map<String, Value>,
 }
@@ -230,8 +255,20 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn close_mode(&self) -> &str {
+        match self.close_mode.as_str() {
+            "" => "quit",
+            m => m,
+        }
+    }
     pub fn load() -> Self {
-        let mut s: Settings = load_json(&data_dir().join("settings.json"));
+        let path = data_dir().join("settings.json");
+        let fresh = !path.exists();
+        let mut s: Settings = load_json(&path);
+        s.fresh = fresh;
+        if fresh {
+            s.onboarded = false;
+        }
         let music = dirs::audio_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Music"));
         if s.music_folders.is_empty() && !s.extra.contains_key("musicFoldersSet") {
             s.music_folders = vec![music.to_string_lossy().into_owned()];

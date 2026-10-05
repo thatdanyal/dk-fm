@@ -57,7 +57,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tray-icon = "0.19"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Com"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
@@ -92,3 +92,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# eframe 0.31.1 with one fix (see vendor/eframe/DKFM-PATCH.md): a hidden window (DK.FM in the
+# tray) no longer spins the event loop at 100% of a CPU core
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }

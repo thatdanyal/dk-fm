@@ -28,6 +28,10 @@ pub enum View {
     Import,
     Downloads,
     Duplicates,
+    /// new music picked from what you play
+    Discover,
+    /// FIND SONGS: search YouTube for versions of a song to download
+    Web,
 }
 
 /// Songs being dragged (to reorder a playlist, or onto a sidebar playlist).
@@ -103,8 +107,8 @@ pub const COLUMNS: [Col; 11] = [
 /// Screens in the tab strip above the library (the sidebar lists only playlists):
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
-pub const NAV: [(&str, &str, &str, &str, &str); 11] = [
-    ("home", "tab", "🏠", "HOME", "Home"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
+pub const NAV: [(&str, &str, &str, &str, &str); 13] = [
+    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🧭", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND SONGS", "Find songs online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
     ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
@@ -133,6 +137,8 @@ fn nav_of(v: &View) -> Option<&'static str> {
         View::Import => "import",
         View::Downloads => "downloads",
         View::Duplicates => "dupes",
+        View::Web => "web",
+        View::Discover => "discover",
         View::Liked | View::Playlist(_) => return None,
     })
 }
@@ -153,6 +159,8 @@ pub fn view_for(key: &str) -> Option<View> {
         "dupes" => View::Duplicates,
         "import" => View::Import,
         "downloads" => View::Downloads,
+        "web" => View::Web,
+        "discover" => View::Discover,
         _ => return None,
     })
 }
@@ -171,13 +179,14 @@ pub struct BrowserState {
     artists: Vec<(String, String, Option<String>, usize)>,
     pub dupes: super::dupes::DupeState,
     pub add: super::addsongs::AddBox,
+    pub web: super::websearch::WebState,
     side_key: Option<(u64, u64, String)>,
     side_rows: Vec<SideRow>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), side_key: None, side_rows: Vec::new() }
+        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new() }
     }
 }
 
@@ -220,6 +229,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             View::Import => super::import::show(app, ui),
             View::Downloads => super::import::downloads(app, ui),
             View::Duplicates => super::dupes::show(app, ui),
+            View::Web => super::websearch::show(app, ui),
+            View::Discover => super::explore::show(app, ui),
             _ => tracks_view(app, ui),
         }
     });
@@ -1012,7 +1023,11 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     // ---- columns (Settings > Lists: which, in what order; flexible ones share the free space)
     let w = ui.available_width();
     let narrow = w < 640.0;
-    let (chosen, row_h) = { let s = app.settings.lock(); (s.columns.clone(), if s.density == "compact" { 22.0 } else { 28.0 }) };
+    let (chosen, row_h, covers) = {
+        let s = app.settings.lock();
+        let compact = s.density == "compact";
+        (s.columns.clone(), match (compact, s.list_covers) { (true, false) => 22.0, (false, false) => 28.0, (true, true) => 28.0, (false, true) => 40.0 }, s.list_covers)
+    };
     let shown: Vec<&Col> = chosen.iter().filter_map(|c| COLUMNS.iter().find(|x| x.id == c)).filter(|c| !narrow || c.narrow).collect();
     let shown: Vec<&Col> = if shown.iter().any(|c| c.share > 0.0) { shown } else { COLUMNS.iter().filter(|c| c.id == "title").chain(shown).collect() };
     let fixed: f32 = shown.iter().map(|c| c.width).sum::<f32>() + 16.0;
@@ -1095,6 +1110,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     let cr = Rect::from_min_max(Pos2::new(x, r.top()), Pos2::new(x + cw, r.bottom()));
                     let clip = p.with_clip_rect(cr);
                     let (txt, color): (String, Color32) = match c.id {
+                        // hovering a row: ▶ here plays it with one click
+                        "num" if resp.hovered() => ("▶".into(), pal.accent),
                         "num" => (if is_cur { "▶".into() } else if num_mode && t.track.is_some() { t.track.unwrap().to_string() } else { (i + 1).to_string() }, if is_cur { pal.accent } else { pal.dim }),
                         "like" => ("♥".into(), if st.liked { pal.accent } else { pal.faint }),
                         "title" => (if st.hidden { format!("🚫 {}", t.title) } else { t.title.clone() }, if is_cur { pal.accent } else { dim(pal.text) }),
@@ -1109,9 +1126,29 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     };
                     let like = c.id == "like";
                     let color = if c.id == "title" || like { color } else { dim(color) };
+                    // album cover before the title, like Spotify
+                    let cr = if c.id == "title" && covers {
+                        let side = row_h - 8.0;
+                        let tr = Rect::from_min_size(Pos2::new(cr.left(), cy - side / 2.0), Vec2::splat(side));
+                        fill(&clip, tr, pal.bg);
+                        if let Some(cv) = t.thumb.as_ref().or(t.cover.as_ref()) {
+                            if let Some(tex) = app.covers.get(ui.ctx(), app.lib.cover_path(cv), cv, 64) {
+                                clip.image(tex, tr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), if st.hidden { with_alpha(Color32::WHITE, 90) } else { Color32::WHITE });
+                            }
+                        } else {
+                            clip.text(tr.center(), Align2::CENTER_CENTER, "♫", vt(side * 0.6), pal.faint);
+                        }
+                        Rect::from_min_max(Pos2::new(cr.left() + side + 8.0, cr.top()), cr.max)
+                    } else {
+                        cr
+                    };
+                    let clip = p.with_clip_rect(cr);
                     clip.text(if right { Pos2::new(cr.right(), cy) } else if like { Pos2::new(cr.center().x, cy) } else { Pos2::new(cr.left(), cy) }, if right { Align2::RIGHT_CENTER } else if like { Align2::CENTER_CENTER } else { Align2::LEFT_CENTER }, txt, vt(19.0), color);
                     if like && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
                         act = Some(RowAct::Like(id.clone()));
+                    }
+                    if c.id == "num" && resp.clicked() && resp.interact_pointer_pos().map(|pp| cr.contains(pp)).unwrap_or(false) {
+                        act = Some(RowAct::Play(i));
                     }
                     x += cw + 8.0;
                 }

@@ -160,6 +160,16 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
                 None => false,
             }
         }
+        Modal::Welcome { step, start_menu, desktop } => {
+            app.modal = super::welcome::show_welcome(app, ctx, step, start_menu, desktop);
+            false
+        }
+        Modal::WhatsNew => {
+            if super::welcome::show_whats_new(app, ctx) {
+                app.modal = Some(Modal::WhatsNew);
+            }
+            false
+        }
         Modal::Update => {
             let st = app.update.lock().clone();
             let mut close = false;
@@ -443,6 +453,10 @@ fn look(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.density = d);
         }
     });
+    let mut lc = s.list_covers;
+    if switch(ui, &pal, &mut lc, "ALBUM COVERS NEXT TO SONG TITLES") {
+        app.edit_settings(|s| s.list_covers = lc);
+    }
     spacer(ui);
     caption(ui, &pal, "CRT EFFECTS");
     let (mut sc, mut gl) = (s.scanlines, s.glow);
@@ -643,6 +657,15 @@ fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
 
 fn layouts(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
+    caption(ui, &pal, "LAYOUT STYLE");
+    let mode = app.settings.lock().layout_mode.clone();
+    row(ui, &pal, "Panels", |ui| {
+        if let Some(m) = choice(ui, &pal, &mode, &[("template".to_string(), "TEMPLATE"), ("free".to_string(), "FREE (PER PIXEL)")]) {
+            app.edit_settings(|s| s.layout_mode = m);
+        }
+    });
+    dim(ui, &pal, if mode == "free" { "Free: put every panel exactly where you want it, any size, even overlapping. Ctrl+E, then drag a title bar to move and the corner to resize." } else { "Template: panels snap together side by side and fill the window. Ctrl+E, then drag tabs to move and the gaps to resize." });
+    spacer(ui);
     caption(ui, &pal, "PANEL LAYOUT");
     dim(ui, &pal, "Arrange the panels (LAYOUT in the title bar, or Ctrl+E), then save the arrangement here. Switch any time — also from Ctrl+K: type \"layout\".");
     ui.horizontal(|ui| {
@@ -914,6 +937,14 @@ const SOURCE_NAMES: [(&str, &str); 4] = [("library", "Your library"), ("songs", 
 fn search(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let s = app.settings.lock().clone();
+    caption(ui, &pal, "FIND SONGS ONLINE");
+    dim(ui, &pal, "The FIND SONGS tab searches YouTube and lists versions to pick from (clean, explicit, live...).");
+    row(ui, &pal, "Versions per search", |ui| {
+        if let Some(n) = choice(ui, &pal, &s.web_results, &[(1, "1"), (3, "3"), (5, "5"), (10, "10")]) {
+            app.edit_settings(|s| s.web_results = n);
+        }
+    });
+    spacer(ui);
     caption(ui, &pal, "ADD SONGS SEARCH");
     dim(ui, &pal, "The ADD SONGS box in a playlist searches your library and finds new songs online.");
     row(ui, &pal, "Results per search", |ui| {
@@ -1052,19 +1083,29 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         }
     });
     ui.add_space(14.0);
-    caption(ui, &pal, "FORMAT");
-    let mut fmt = app.settings.lock().download_format.clone();
-    let before = fmt.clone();
-    row(ui, &pal, "Audio format", |ui| {
-        egui::ComboBox::from_id_salt("fmt").selected_text(match fmt.as_str() { "mp3-320" => "MP3 · 320 kbps", "mp3-v0" => "MP3 · V0", _ => "M4A · AAC original" }).width(330.0).show_ui(ui, |ui| {
-            ui.selectable_value(&mut fmt, "m4a".to_string(), "M4A · AAC original (recommended: smallest, no quality loss)");
-            ui.selectable_value(&mut fmt, "mp3-v0".to_string(), "MP3 · V0 VBR (~245 kbps)");
-            ui.selectable_value(&mut fmt, "mp3-320".to_string(), "MP3 · 320 kbps (largest, for old devices)");
-        });
+    caption(ui, &pal, "SOUND QUALITY");
+    let fmt = app.settings.lock().download_format.clone();
+    // older settings saved "m4a", which is HIGH now
+    let cur = if matches!(fmt.as_str(), "standard" | "lossless" | "mp3-320" | "mp3-v0") { fmt.clone() } else { "high".to_string() };
+    row(ui, &pal, "Downloads", |ui| {
+        if let Some(f) = choice(ui, &pal, &cur, &[("standard".to_string(), "STANDARD"), ("high".to_string(), "HIGH"), ("lossless".to_string(), "LOSSLESS")]) {
+            app.edit_settings(|s| s.download_format = f);
+        }
     });
-    if fmt != before {
-        app.edit_settings(|s| s.download_format = fmt);
-    }
+    dim(ui, &pal, match cur.as_str() {
+        "standard" => "YouTube's AAC stream as it is (about 128 kbps). Smallest files, about 4 MB a song.",
+        "lossless" => "The best stream YouTube has, saved as FLAC so nothing more is lost on the way. YouTube itself has no lossless audio, so it sounds like HIGH but files are about 5x bigger (25-40 MB a song).",
+        "mp3-320" | "mp3-v0" => "MP3, for old devices and car stereos. Slightly lower quality than HIGH.",
+        _ => "The best stream YouTube has (Opus, about 160 kbps), kept as 256 kbps AAC. Recommended: the best sound for its size, about 8 MB a song.",
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(4.0);
+        let mut mp3 = cur.starts_with("mp3");
+        if switch(ui, &pal, &mut mp3, "SAVE AS MP3 INSTEAD (OLD DEVICES)") {
+            app.edit_settings(|s| s.download_format = if mp3 { "mp3-320".into() } else { "high".into() });
+        }
+    });
+    dim(ui, &pal, "Only new downloads use this; songs you already have stay as they are.");
     let mut conc = app.settings.lock().download_concurrency;
     row(ui, &pal, "Parallel downloads", |ui| {
         if ui.add(egui::Slider::new(&mut conc, 1..=6)).changed() {
@@ -1210,7 +1251,7 @@ fn playback(app: &mut App, ui: &mut Ui) {
     ui.add_space(8.0);
     row(ui, &pal, "Visualizer FPS", |ui| {
         for f in [15u32, 30, 60] {
-            if ui.selectable_label(o.vis_fps == f, format!("{f}")).clicked() {
+            if super::widgets::outline_button(ui, &pal, &format!("{f}"), o.vis_fps == f).clicked() {
                 let m = o.visualizer.clone();
                 app.player.set_visualizer(&m, f);
             }
@@ -1224,10 +1265,17 @@ fn system_tab(app: &mut App, ui: &mut Ui) {
     if cfg!(target_os = "linux") {
         dim(ui, &pal, "The tray icon isn't available on Linux; closing the window quits DK.FM.");
     } else {
-        let mut t = app.settings.lock().close_to_tray;
-        if switch(ui, &pal, &mut t, "CLOSE BUTTON KEEPS MUSIC PLAYING IN THE TRAY") {
-            app.edit_settings(|s| s.close_to_tray = t);
-        }
+        let mode = app.settings.lock().close_mode().to_string();
+        row(ui, &pal, "The X button", |ui| {
+            if let Some(m) = choice(ui, &pal, &mode, &[("playing".to_string(), "TRAY WHILE PLAYING"), ("tray".to_string(), "ALWAYS TRAY"), ("quit".to_string(), "QUITS")]) {
+                app.edit_settings(|s| s.close_mode = m);
+            }
+        });
+        dim(ui, &pal, match mode.as_str() {
+            "tray" => "Closing the window keeps DK.FM running in the tray, even when paused.",
+            "quit" => "Closing the window quits DK.FM (music stops).",
+            _ => "Closing the window while music plays keeps it playing in the tray; with nothing playing, DK.FM quits completely.",
+        });
         dim(ui, &pal, "Right-click the tray icon for play/pause, next and Quit.");
     }
     ui.add_space(10.0);
@@ -1303,7 +1351,7 @@ fn naming(app: &mut App, ui: &mut Ui) {
     if pat != before {
         app.edit_settings(|s| s.name_pattern = pat.clone());
     }
-    let ext = if app.settings.lock().download_format.starts_with("mp3") { "mp3" } else { "m4a" };
+    let ext = crate::downloader::fmt_args(&app.settings.lock().download_format).0;
     let ex = |folder: &str, album: &str, track: Option<u32>| render_name(&pat, &NameParts { artist: "Daft Punk", album, title: "One More Time", track, year: Some(2001), folder }).display().to_string();
     ui.label(egui::RichText::new(format!("Example: {}.{ext}", ex("Party Mix", "Discovery", Some(1)))).color(pal.accent2));
     dim(ui, &pal, &format!("A single song: {}.{ext}", ex("Singles", "", None)));

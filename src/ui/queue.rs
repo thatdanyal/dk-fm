@@ -34,6 +34,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let from = (index - 3).max(0) as usize;
     let to = (index as usize + 150).min(queue.len());
     let mut action: Option<Box<dyn FnOnce(&App)>> = None;
+    let dragging = egui::DragAndDrop::payload::<QueueDrag>(ui.ctx()).map(|d| d.0);
+    // a drop moves the dragged song to just before `slot`
+    let mut drop_at: Option<(usize, usize)> = None;
+    let area = ui.available_rect_before_wrap();
     egui::ScrollArea::vertical().auto_shrink([false; 2]).id_salt("queue").show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for i in from..to {
@@ -44,13 +48,17 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click_and_drag());
             let p = ui.painter();
             let current = i as isize == index;
-            if current {
+            let moving = dragging == Some(i);
+            if moving {
+                fill(p, r, pal.bg2);
+            } else if current {
                 fill(p, r, pal.sel);
                 fill(p, Rect::from_min_size(r.min, Vec2::new(3.0, r.height())), pal.accent);
-            } else if resp.hovered() {
+            } else if resp.hovered() && dragging.is_none() {
                 fill(p, r, pal.panel_hi);
             }
-            let alpha = if (i as isize) < index { 100 } else { 255 };
+            let alpha = if moving { 70 } else if (i as isize) < index { 100 } else { 255 };
+            // cover: hovering shows a play button, one click plays the song
             let thumb = Rect::from_min_size(r.min + Vec2::new(8.0, 6.0), Vec2::splat(30.0));
             fill(p, thumb, pal.bg);
             if let Some(c) = t.thumb.clone().or(t.cover.clone()) {
@@ -59,15 +67,35 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
             }
             frame_rect(ui.painter(), thumb, 1.0, pal.line_hi);
+            if resp.hovered() && dragging.is_none() {
+                let presp = ui.interact(thumb, ui.id().with(("qplay", i)), Sense::click());
+                let over = presp.hovered();
+                fill(ui.painter(), thumb, super::widgets::with_alpha(if over { pal.accent } else { pal.bg }, if over { 235 } else { 170 }));
+                ui.painter().text(thumb.center(), Align2::CENTER_CENTER, if current && app.player.status().playing { "⏸" } else { "▶" }, vt(22.0), if over { pal.ink } else { pal.text });
+                if over {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if presp.on_hover_text(if current { "Play / pause" } else { "Play" }).clicked() {
+                    action = Some(if current { Box::new(|a: &App| a.player.toggle()) } else { Box::new(move |a: &App| a.player.play_index(i)) });
+                }
+            }
             let clip = ui.painter().with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 26.0, r.bottom())));
             clip.text(r.min + Vec2::new(46.0, 5.0), Align2::LEFT_TOP, &t.title, vt(18.0), super::widgets::with_alpha(if current { pal.accent } else { pal.text }, alpha));
             clip.text(r.min + Vec2::new(46.0, 22.0), Align2::LEFT_TOP, &t.artist, vt(16.0), super::widgets::with_alpha(pal.dim, alpha));
-            if resp.hovered() {
+            if resp.hovered() && dragging.is_none() {
+                // grip: drag to move
+                let gx = r.right() - 34.0;
+                for k in 0..3 {
+                    fill(ui.painter(), Rect::from_min_size(Pos2::new(gx - 8.0, r.center().y - 5.0 + k as f32 * 4.0), Vec2::new(8.0, 2.0)), pal.faint);
+                }
                 let xr = Rect::from_min_size(Pos2::new(r.right() - 24.0, r.top() + 11.0), Vec2::splat(20.0));
                 let xresp = ui.interact(xr, ui.id().with(("qx", i)), Sense::click());
                 ui.painter().text(xr.center(), Align2::CENTER_CENTER, "×", vt(20.0), if xresp.hovered() { pal.accent } else { pal.dim });
-                if xresp.clicked() {
+                if xresp.on_hover_text("Remove from queue").clicked() {
                     action = Some(Box::new(move |a: &App| a.player.remove_at(i)));
+                }
+                if !thumb.contains(ui.ctx().pointer_hover_pos().unwrap_or_default()) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
                 }
             }
             if resp.double_clicked() {
@@ -75,16 +103,18 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
             // drag to reorder
             if resp.drag_started() {
-                ui.memory_mut(|m| m.data.insert_temp(egui::Id::new("qdrag"), i));
+                resp.dnd_set_drag_payload(QueueDrag(i));
             }
-            let dragging: Option<usize> = ui.memory(|m| m.data.get_temp(egui::Id::new("qdrag")));
             if let (Some(from_i), Some(pos)) = (dragging, ui.ctx().pointer_hover_pos()) {
-                if r.contains(pos) && from_i != i {
-                    ui.painter().hline(r.x_range(), r.top() + 1.0, egui::Stroke::new(3.0_f32, pal.accent2));
-                    if ui.input(|inp| inp.pointer.any_released()) {
-                        let to_i = if from_i < i { i - 1 } else { i };
-                        action = Some(Box::new(move |a: &App| a.player.move_item(from_i, to_i)));
-                        ui.memory_mut(|m| m.data.remove::<usize>(egui::Id::new("qdrag")));
+                if r.contains(pos) {
+                    let below = pos.y > r.center().y;
+                    let slot = if below { i + 1 } else { i };
+                    if slot != from_i && slot != from_i + 1 {
+                        let y = if below { r.bottom() - 1.0 } else { r.top() + 1.0 };
+                        ui.painter().hline(r.x_range(), y, egui::Stroke::new(3.0_f32, pal.accent));
+                    }
+                    if resp.dnd_release_payload::<QueueDrag>().is_some() {
+                        drop_at = Some((from_i, slot));
                     }
                 }
             }
@@ -96,6 +126,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 if ui.add_enabled((i as isize) > index + 1, egui::Button::new("Move to next")).clicked() {
                     let to_i = (index + 1) as usize;
                     action = Some(Box::new(move |a: &App| a.player.move_item(i, to_i)));
+                    ui.close_menu();
+                }
+                if ui.add_enabled(i > 0 && (i as isize - 1) > index, egui::Button::new("Move up")).clicked() {
+                    action = Some(Box::new(move |a: &App| a.player.move_item(i, i - 1)));
+                    ui.close_menu();
+                }
+                if ui.add_enabled(i + 1 < queue.len() && (i as isize) > index, egui::Button::new("Move down")).clicked() {
+                    action = Some(Box::new(move |a: &App| a.player.move_item(i, i + 1)));
+                    ui.close_menu();
+                }
+                if ui.add_enabled(i + 1 < queue.len(), egui::Button::new("Move to the end")).clicked() {
+                    let last = queue.len() - 1;
+                    action = Some(Box::new(move |a: &App| a.player.move_item(i, last)));
                     ui.close_menu();
                 }
                 if ui.button("Remove from queue").clicked() {
@@ -111,14 +154,51 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         if to < queue.len() {
             ui.label(egui::RichText::new(format!("  + {} MORE", queue.len() - to)).font(px(5.0)).color(pal.dim));
         }
+        // below the last song: drop here to move it to the end of what's shown
+        let h = ui.available_height().max(30.0);
+        let (zr, zresp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+        if let Some(from_i) = dragging {
+            if zresp.dnd_hover_payload::<QueueDrag>().is_some() && from_i + 1 != to {
+                ui.painter().hline(zr.x_range(), zr.top() + 1.0, egui::Stroke::new(3.0_f32, pal.accent));
+            }
+            if zresp.dnd_release_payload::<QueueDrag>().is_some() {
+                drop_at = Some((from_i, to));
+            }
+        }
+        // near the top / bottom edge while dragging: scroll
+        if let (Some(_), Some(pos)) = (dragging, ui.ctx().pointer_hover_pos()) {
+            let edge = 28.0;
+            let dy = if pos.y < area.top() + edge && pos.y > area.top() - 10.0 { 6.0 } else if pos.y > area.bottom() - edge && pos.y < area.bottom() + 10.0 { -6.0 } else { 0.0 };
+            if dy != 0.0 && area.x_range().contains(pos.x) {
+                ui.scroll_with_delta(Vec2::new(0.0, dy));
+                ui.ctx().request_repaint();
+            }
+        }
     });
-    if ui.input(|i| i.pointer.any_released()) {
-        ui.memory_mut(|m| m.data.remove::<usize>(egui::Id::new("qdrag")));
+    // the song being dragged follows the pointer
+    if let (Some(i), Some(pos)) = (dragging, ui.ctx().pointer_hover_pos()) {
+        if let Some(t) = queue.get(i).and_then(|id| app.lib.track(id)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("drag-queue")));
+            let g = p.layout_no_wrap(format!("♪ {}", t.title), vt(19.0), pal.ink);
+            let gr = Rect::from_min_size(pos + Vec2::new(14.0, 6.0), g.size() + Vec2::new(14.0, 6.0));
+            fill(&p, gr, pal.accent);
+            p.galley(gr.min + Vec2::new(7.0, 3.0), g, pal.ink);
+        }
+    }
+    if let Some((from_i, slot)) = drop_at {
+        if slot != from_i && slot != from_i + 1 {
+            let to_i = if from_i < slot { slot - 1 } else { slot };
+            action = Some(Box::new(move |a: &App| a.player.move_item(from_i, to_i)));
+        }
     }
     if let Some(a) = action {
         a(app);
     }
 }
+
+/// A queue row being dragged (its index).
+struct QueueDrag(usize);
 
 /// Open the file's folder with the file selected.
 pub fn reveal(path: &str) {

@@ -161,8 +161,8 @@ pub fn keep_bar(app: &mut App, ui: &mut Ui, w: f32, h: f32) -> bool {
         ui.spacing_mut().item_spacing.x = 6.0;
         let bw = ((w - 6.0) / 2.0).max(40.0);
         let keep = super::deck::tbtn(ui, &pal, if kept { "✔ KEEPING" } else { "⬇ KEEP" }, Vec2::new(bw, h), kept, !kept);
-        if !kept && keep.on_hover_text("Like it? Download it to your library (in your sound quality)").clicked() {
-            self::keep(app, &t);
+        if !kept && keep.on_hover_text("Like it? Download it: you pick where it goes (library, Liked or a playlist)").clicked() {
+            self::keep(app, ui.ctx(), &t);
         }
         if super::deck::tbtn(ui, &pal, "× DISCARD", Vec2::new(bw, h), false, false).on_hover_text("Not for you: skip it and delete it. Nothing is saved").clicked() {
             discard(app, &t);
@@ -171,12 +171,17 @@ pub fn keep_bar(app: &mut App, ui: &mut Ui, w: f32, h: f32) -> bool {
     true
 }
 
-/// KEEP: download the song to the library for real.
-pub fn keep(app: &mut App, t: &ITrack) {
-    let id = id_of(t);
-    if app.previews.kept.insert(id) {
-        super::addsongs::get(app, t, None);
+/// KEEP: asks where it should go (library, Liked, a playlist), then downloads it for real.
+pub fn keep(app: &mut App, ctx: &egui::Context, t: &ITrack) {
+    if !app.previews.kept.contains(&id_of(t)) {
+        let pos = ctx.pointer_latest_pos().unwrap_or(ctx.screen_rect().center());
+        super::dest::open(app, t, pos, true);
     }
+}
+
+/// A place was picked for a kept preview: it's downloading (the button says KEEPING).
+pub fn mark_kept(app: &mut App, t: &ITrack) {
+    app.previews.kept.insert(id_of(t));
 }
 
 /// KEEP was pressed for this song's preview.

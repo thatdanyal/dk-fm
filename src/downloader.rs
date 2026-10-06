@@ -365,22 +365,59 @@ impl Downloader {
     /// Make these FLACs smaller (the sound quality set now), each replacing its file: playlists,
     /// likes and plays stay; the FLAC goes to the Recycle Bin.
     pub fn shrink(&self, ids: &[String]) -> String {
-        self.rework("shrink-quality", "shrink", ids, |fmt, n| format!("Making {n} songs smaller ({})", quality_label(fmt)))
+        self.rework("shrink-quality", "shrink", ids, None, |fmt, n| format!("Making {n} songs smaller ({})", quality_label(fmt)))
+    }
+
+    /// The sound quality a song is in now: "lossless" (FLAC), "high" or "standard".
+    pub fn quality_of(t: &store::Track) -> &'static str {
+        if t.path.to_lowercase().ends_with(".flac") {
+            "lossless"
+        } else if below(t, "high") {
+            "standard"
+        } else {
+            "high"
+        }
+    }
+
+    /// Can this song's sound quality be changed? (only songs DK.FM downloaded, in its folder)
+    pub fn requalifiable(&self, t: &store::Track) -> bool {
+        t.youtube_id.is_some() && in_folder(&t.path, &self.settings.lock().download_dir)
+    }
+
+    /// Put just these songs in sound quality `fmt` (whatever is set for everything else):
+    /// downloaded again for a better one, made smaller here for a smaller one. Returns how many
+    /// will change.
+    pub fn set_quality(&self, ids: &[String], fmt: &str) -> usize {
+        let (up, small): (Vec<String>, Vec<String>) = {
+            let d = self.lib.data.read();
+            let ok: Vec<&store::Track> = ids.iter().filter_map(|id| d.tracks.get(id)).filter(|t| self.requalifiable(t)).collect();
+            let up = ok.iter().filter(|t| below(t, fmt)).map(|t| t.id.clone()).collect();
+            let small = ok.iter().filter(|t| fmt != "lossless" && t.path.to_lowercase().ends_with(".flac")).map(|t| t.id.clone()).collect();
+            (up, small)
+        };
+        let tag = ids.first().map(|i| i.chars().take(12).collect::<String>()).unwrap_or_default();
+        if !up.is_empty() {
+            self.rework(&format!("q-up-{fmt}-{tag}"), "upgrade", &up, Some(fmt), |f, n| if n == 1 { format!("Sound quality: one song to {}", quality_label(f)) } else { format!("Sound quality: {n} songs to {}", quality_label(f)) });
+        }
+        if !small.is_empty() {
+            self.rework(&format!("q-down-{fmt}-{tag}"), "shrink", &small, Some(fmt), |f, n| if n == 1 { format!("Sound quality: one song to {}", quality_label(f)) } else { format!("Sound quality: {n} songs to {}", quality_label(f)) });
+        }
+        up.len() + small.len()
     }
 
     /// Download these songs again in the sound quality set now, each replacing its old file
     /// (playlists, likes and plays stay; an old file of another type goes to the Recycle Bin).
     pub fn upgrade(&self, ids: &[String]) -> String {
-        self.rework("upgrade-quality", "upgrade", ids, |fmt, n| format!("Sound quality upgrade to {} ({n} songs)", quality_label(fmt)))
+        self.rework("upgrade-quality", "upgrade", ids, None, |fmt, n| format!("Sound quality upgrade to {} ({n} songs)", quality_label(fmt)))
     }
 
     /// A job that redoes library songs' files (`kind`: "upgrade" downloads them again, "shrink"
-    /// converts them here).
-    fn rework(&self, job_id: &str, kind: &str, ids: &[String], name: impl Fn(&str, usize) -> String) -> String {
+    /// converts them here) in sound quality `fmt` (None: the one set now).
+    fn rework(&self, job_id: &str, kind: &str, ids: &[String], fmt: Option<&str>, name: impl Fn(&str, usize) -> String) -> String {
         let job_id = job_id.to_string();
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
-        let (dir, fmt) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone()) };
+        let (dir, fmt) = { let s = self.settings.lock(); (s.download_dir.clone(), fmt.map(String::from).unwrap_or_else(|| s.download_format.clone())) };
         let lib = self.lib.data.read();
         let tracks: Vec<JTrack> = ids
             .iter()

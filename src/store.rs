@@ -254,6 +254,8 @@ pub struct Settings {
     // ---- welcome screens
     /// the first-run welcome was finished (settings from before it existed count as done)
     #[serde(default = "d_true")] pub onboarded: bool,
+    /// a new install finished the welcome: ask for sound quality, EQ and so on (once, after any tour)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub setup_pending: bool,
     /// the "what's new" notice last shown (see ui::welcome::WHATS_NEW)
     #[serde(default)] pub whats_new_seen: String,
     /// the DK.FM version that last ran (a different one = just updated: say what changed)

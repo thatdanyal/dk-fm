@@ -1560,6 +1560,7 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
         }
         ui.close_menu();
     }
+    quality_menu(app, ui, &sel);
     ui.separator();
     if let Some(p) = playlist {
         if ui.button(format!("Remove from \"{}\"", p.name)).clicked() {
@@ -1571,6 +1572,35 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
         delete_songs(app, &sel);
         ui.close_menu();
     }
+}
+
+/// Sound quality for just these songs (Settings > Downloads sets it for everything): a row of
+/// STANDARD / HIGH / LOSSLESS in the song menu, the one they're in now ticked.
+pub(super) fn quality_menu(app: &mut App, ui: &mut Ui, sel: &[String]) {
+    let tracks: Vec<crate::store::Track> = sel.iter().filter_map(|id| app.lib.track(id)).filter(|t| app.dl.requalifiable(t)).collect();
+    if tracks.is_empty() {
+        ui.add_enabled(false, egui::Label::new("Sound quality")).on_disabled_hover_text("Only songs DK.FM downloaded can change sound quality (your own files stay as they are)");
+        return;
+    }
+    let now: Vec<&str> = tracks.iter().map(crate::downloader::Downloader::quality_of).collect();
+    ui.label(egui::RichText::new(if tracks.len() == 1 { "Sound quality of this song:" } else { "Sound quality of these songs:" }).weak());
+    ui.horizontal(|ui| {
+        for (f, label, tip) in [("standard", "STANDARD", "Smallest (only LOSSLESS songs can be made smaller)"), ("high", "HIGH", "Recommended: the best sound for its size"), ("lossless", "LOSSLESS", "FLAC: about 5x bigger, same sound (YouTube's audio isn't lossless)")] {
+            let all = now.iter().all(|q| *q == f);
+            if ui.selectable_label(all, label).on_hover_text(tip).clicked() && !all {
+                let playing = app.player.current_id();
+                let ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).filter(|id| Some(id) != playing.as_ref()).collect();
+                let n = app.dl.set_quality(&ids, f);
+                let busy = tracks.len() > ids.len();
+                app.toast(match n {
+                    0 if busy => "That song is playing: skip to another song first, then change it".to_string(),
+                    0 => "Only LOSSLESS (FLAC) songs can be made smaller: this one stays as it is".to_string(),
+                    n => format!("Changing {} to {}: see DOWNLOADS for progress. Playlists, likes and plays stay{}", plural(n), crate::downloader::quality_label(f), if busy { " (not the one playing now)" } else { "" }),
+                });
+                ui.close_menu();
+            }
+        }
+    });
 }
 
 /// "Delete from library & PC": out of the library and every playlist, files to the Recycle Bin.

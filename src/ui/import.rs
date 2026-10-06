@@ -24,6 +24,9 @@ pub struct ImportState {
     keys: Option<(u64, Arc<HashSet<String>>)>,
     /// "Songs like this": how many are listed (SHOW MORE adds more)
     shown: usize,
+    /// single songs / picks from a list: where they go (None: just the library; a playlist id;
+    /// downloader::LIKED)
+    dest: Option<String>,
 }
 
 impl ImportState {
@@ -181,6 +184,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             app.modal = Some(Modal::Settings(super::settings::SetTab::Spotify));
         }
         ui.add_space(4.0);
+        // SoundCloud: a profile link lists its likes, playlists and uploads to tick
+        if ui.add(egui::Label::new(egui::RichText::new("Bring over your SoundCloud (likes, playlists, uploads): paste your profile link, like soundcloud.com/yourname >").color(pal.accent2)).sense(Sense::click())).on_hover_text("Click, then type your SoundCloud name after the / and press Enter").clicked() && !app.import.input.contains("soundcloud.com/") {
+            app.import.input = "https://soundcloud.com/".into();
+            app.toast("Type your SoundCloud name after the / and press Enter (your profile must be public)");
+        }
+        ui.add_space(4.0);
         if ui.add(egui::Label::new(egui::RichText::new("Got a playlist file from a friend? Open .dkfm file >").color(pal.accent2)).sense(Sense::click())).clicked() {
             super::sharing::pick_file(app);
         }
@@ -243,10 +252,40 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
                 app.import.selected.clear();
             }
             let n = app.import.selected.len();
+            // a playlist or album becomes a playlist of its own; songs pick where they go
+            let loose = !matches!(c.kind.as_str(), "playlist" | "album");
+            if loose {
+                let pls: Vec<(String, String)> = {
+                    let d = app.lib.data.read();
+                    crate::library::sorted_playlists(&d, "custom").into_iter().map(|p| (p.id.clone(), p.name.clone())).collect()
+                };
+                let name = |d: &Option<String>| match d.as_deref() {
+                    None => "Library only".to_string(),
+                    Some(crate::downloader::LIKED) => "♥ Liked".to_string(),
+                    Some(id) => pls.iter().find(|p| p.0 == id).map(|p| p.1.clone()).unwrap_or_else(|| "Library only".into()),
+                };
+                ui.label(egui::RichText::new("SAVE TO").font(px(6.0)).color(pal.dim));
+                let mut d = app.import.dest.clone().filter(|id| id == crate::downloader::LIKED || pls.iter().any(|p| p.0 == *id));
+                egui::ComboBox::from_id_salt("import-dest").selected_text(name(&d)).width(180.0).show_ui(ui, |ui| {
+                    ui.selectable_value(&mut d, None, "Library only");
+                    ui.selectable_value(&mut d, Some(crate::downloader::LIKED.to_string()), "♥ Liked");
+                    for (id, n) in &pls {
+                        ui.selectable_value(&mut d, Some(id.clone()), n);
+                    }
+                });
+                app.import.dest = d;
+            }
             if button(ui, &pal, &format!("DOWNLOAD {n} AS {fmt}"), true, n > 0).clicked() {
                 let mut sel: Vec<usize> = app.import.selected.iter().copied().collect();
                 sel.sort();
-                app.dl.start(c.clone(), Some(sel));
+                if loose {
+                    if let Some(id) = app.import.dest.clone().filter(|id| id != crate::downloader::LIKED) {
+                        app.edit_settings(|s| s.last_playlist = id);
+                    }
+                    app.dl.start_to(c.clone(), Some(sel), app.import.dest.clone());
+                } else {
+                    app.dl.start(c.clone(), Some(sel));
+                }
                 app.browser.set_view(View::Downloads);
             }
         });
@@ -317,7 +356,7 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                 ui.label(egui::RichText::new(name).font(px(11.0)).color(pal.text));
                 let count = |k: &str| playlists.iter().filter(|p| p.kind == k).count();
                 let songs: u64 = playlists.iter().map(|p| p.total).sum();
-                ui.label(egui::RichText::new(format!("{} PLAYLISTS · {} ALBUMS{} · {songs} SONGS", count("PLAYLIST"), count("ALBUM"), if count("LIKED") > 0 { " · LIKED SONGS" } else { "" })).color(pal.dim));
+                ui.label(egui::RichText::new(format!("{} PLAYLISTS{}{}{}", count("PLAYLIST"), if count("ALBUM") > 0 { format!(" · {} ALBUMS", count("ALBUM")) } else { String::new() }, if count("LIKED") > 0 { " · LIKES" } else { "" }, if songs > 0 { format!(" · {songs} SONGS") } else { String::new() })).color(pal.dim));
                 ui.label(egui::RichText::new("Songs you already have are skipped. Everything keeps syncing: new likes and playlist additions download by themselves.").color(pal.dim));
             });
         });
@@ -361,7 +400,7 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                 }
                 ui.label(egui::RichText::new(&p.kind).font(px(6.0)).color(if p.kind == "LIKED" { pal.accent } else { pal.dim }));
                 ui.label(egui::RichText::new(&p.name).color(pal.text));
-                ui.label(egui::RichText::new(format!("{} ♪ · {}", p.total, p.owner)).color(pal.dim));
+                ui.label(egui::RichText::new(if p.total > 0 { format!("{} ♪ · {}", p.total, p.owner) } else { p.owner.clone() }).color(pal.dim));
                 if !p.note.is_empty() {
                     ui.label(egui::RichText::new(format!("⚠ {}", p.note)).color(pal.accent2));
                 }

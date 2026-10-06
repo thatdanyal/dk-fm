@@ -245,7 +245,8 @@ pub fn run(args: &[&str], mut on_line: Option<&mut dyn FnMut(&str)>, cancel: Opt
     if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
         return Err("Cancelled".into());
     }
-    if status.success() {
+    // --ignore-errors: some entries failed (DRM, removed…) but the listing came out
+    if status.success() || (args.contains(&"--ignore-errors") && out.trim_start().starts_with('{')) {
         Ok(out)
     } else {
         let msg = err.lines().rfind(|l| l.starts_with("ERROR")).or_else(|| err.lines().last()).unwrap_or("yt-dlp failed").trim_start_matches("ERROR: ").to_string();

@@ -1,7 +1,9 @@
-//! Finding lyrics for a song, in order: what was found before (saved in the data folder), lyrics
-//! inside the music file's tags, LRCLIB (synced lyrics), then the captions of the song's video on
-//! YouTube (its own video when it was downloaded from YouTube, else the best match). What's found
-//! is saved, so each song is looked up once; "nothing found" is remembered for a week.
+//! Finding lyrics for a song: what was found before (saved in the data folder), else lyrics that
+//! light up line by line if there are any — synced lyrics in the file's tags, LRCLIB's synced
+//! lyrics, then the captions of the song's video on YouTube (its own video first: the same audio,
+//! so the timing matches exactly; a cover or a small artist's song usually only has those) —
+//! and only then plain lyrics. What's found is saved, so each song is looked up once; "nothing
+//! found" is remembered for a week.
 use crate::store::{data_dir, now_secs, Track};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -51,6 +53,9 @@ struct Saved {
     source: Source,
     #[serde(default)]
     at: i64,
+    /// 2: looked for synced lyrics everywhere before settling for plain ones
+    #[serde(default)]
+    v: u32,
 }
 
 fn cache_path(id: &str) -> std::path::PathBuf {
@@ -61,7 +66,8 @@ fn load(id: &str) -> Option<(Lyr, Source)> {
     let s: Saved = serde_json::from_slice(&std::fs::read(cache_path(id)).ok()?).ok()?;
     let l = match s.kind.as_str() {
         "synced" if !s.lines.is_empty() => Lyr::Synced(s.lines),
-        "plain" if !s.text.is_empty() => Lyr::Plain(s.text),
+        // (plain lyrics saved before captions were tried for them: look again, once)
+        "plain" if !s.text.is_empty() && s.v >= 2 => Lyr::Plain(s.text),
         "instrumental" => Lyr::Instrumental,
         // looked for lately and found nothing: try again after a week
         "none" if now_secs() - s.at < 7 * 86400 => Lyr::None,
@@ -71,7 +77,7 @@ fn load(id: &str) -> Option<(Lyr, Source)> {
 }
 
 fn save(id: &str, l: &Lyr, source: Source) {
-    let mut s = Saved { source, at: now_secs(), ..Default::default() };
+    let mut s = Saved { source, at: now_secs(), v: 2, ..Default::default() };
     match l {
         Lyr::Synced(v) => (s.kind, s.lines) = ("synced".into(), v.clone()),
         Lyr::Plain(t) => (s.kind, s.text) = ("plain".into(), t.clone()),
@@ -109,10 +115,29 @@ pub fn find(t: &Track) -> (Lyr, Source) {
     if let Some(hit) = load(&t.id) {
         return hit;
     }
-    let found = from_file(t).map(|l| (l, Source::File)).or_else(|| lrclib(t).map(|l| (l, Source::Lrclib))).or_else(|| youtube(t));
-    let (l, src) = found.unwrap_or((Lyr::None, Source::Lrclib));
+    let (l, src) = look(t);
     save(&t.id, &l, src);
     (l, src)
+}
+
+/// Synced lyrics from anywhere beat plain ones (from the file or LRCLIB).
+fn look(t: &Track) -> (Lyr, Source) {
+    let file = from_file(t);
+    if matches!(file, Some(Lyr::Synced(_))) {
+        return (file.unwrap(), Source::File);
+    }
+    let lrc = lrclib(t);
+    if matches!(lrc, Some(Lyr::Synced(_) | Lyr::Instrumental)) {
+        return (lrc.unwrap(), Source::Lrclib);
+    }
+    if let Some(yt) = youtube(t) {
+        return yt;
+    }
+    match (lrc, file) {
+        (Some(l), _) => (l, Source::Lrclib),
+        (None, Some(l)) => (l, Source::File),
+        (None, None) => (Lyr::None, Source::Lrclib),
+    }
 }
 
 /// Lyrics saved in the file's tags (plain, or LRC-style synced).
@@ -138,10 +163,15 @@ fn lrclib(t: &Track) -> Option<Lyr> {
 
 // ------------------------------------------------------------------------------- YouTube captions
 
-/// Captions of the song's YouTube video: its own (downloaded from YouTube) first, else the top
-/// search results with about the right length. Uploaded captions win over automatic ones.
+/// Captions of the song's YouTube video: its own (downloaded from YouTube: exactly the same
+/// audio, so in time) first, else the top search results with about the right length. Uploaded
+/// captions win over automatic ones, except that the song's own automatic captions win over
+/// another video's (which may be another recording, with other timing).
 fn youtube(t: &Track) -> Option<(Lyr, Source)> {
     crate::ytdlp::ensure().ok()?;
+    if let Some((lines, uploaded)) = t.youtube_id.as_deref().and_then(captions) {
+        return Some((Lyr::Synced(lines), if uploaded { Source::YouTube } else { Source::YouTubeAuto }));
+    }
     let mut ids: Vec<String> = t.youtube_id.iter().cloned().collect();
     let q = format!("{} - {}", crate::library::main_artist(&t.artist), RE_FEAT.replace_all(&t.title, ""));
     if let Ok(found) = crate::sources::search(&q, "youtube", 5) {
@@ -157,7 +187,7 @@ fn youtube(t: &Track) -> Option<(Lyr, Source)> {
         }
     }
     let mut auto: Option<Vec<(f64, String)>> = None;
-    for id in ids.iter().take(4) {
+    for id in ids.iter().filter(|i| Some(*i) != t.youtube_id.as_ref()).take(4) {
         let Some((lines, uploaded)) = captions(id) else { continue };
         if uploaded {
             return Some((Lyr::Synced(lines), Source::YouTube));
@@ -303,5 +333,10 @@ mod tests {
         assert_eq!(load("t2").map(|x| x.0), Some(Lyr::None));
         forget("t1");
         assert!(load("t1").is_none());
+        // plain lyrics saved before synced ones were looked for everywhere: looked up again
+        save("t3", &Lyr::Plain("words".into()), Source::Lrclib);
+        assert_eq!(load("t3").map(|x| x.0), Some(Lyr::Plain("words".into())));
+        crate::store::save_json(&cache_path("t4"), &serde_json::json!({ "kind": "plain", "text": "old", "at": now_secs() }));
+        assert!(load("t4").is_none());
     }
 }

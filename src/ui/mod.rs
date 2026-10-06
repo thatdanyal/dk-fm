@@ -6,6 +6,7 @@ pub mod browser;
 pub mod cjk;
 pub mod covertheme;
 pub mod deck;
+pub mod dest;
 pub mod dupes;
 pub mod eqpanel;
 pub mod explore;
@@ -84,6 +85,8 @@ pub enum Modal {
     Welcome { step: usize, start_menu: bool, desktop: bool },
     /// the once-only notice after an update
     WhatsNew,
+    /// a new install's sound setup (after the welcome and any tour): quality, EQ, folder, X button
+    Setup { quality: String, eq: String, close: String },
 }
 
 #[derive(Clone)]
@@ -96,6 +99,8 @@ pub enum PromptAction {
     NewFolder(Option<String>),
     RenameFolder(String),
     PasteYoutube(String, usize),
+    /// a new playlist for a song about to be downloaded (and whether it's a preview being kept)
+    NewPlaylistGet(Box<crate::sources::ITrack>, bool),
 }
 
 pub struct App {
@@ -122,6 +127,8 @@ pub struct App {
     pub palette: Option<palette::PaletteState>,
     /// "Add to playlist" checklist opened from a song's right-click menu
     pub pick: Option<plpick::Popup>,
+    /// "SAVE TO" for a song being downloaded (+ GET, KEEP)
+    pub dest: Option<dest::Dest>,
     pub update: Arc<Mutex<UpdState>>,
     update_dismissed: Option<String>,
     tray: Option<Tray>,
@@ -480,6 +487,7 @@ impl App {
             modal: None,
             palette: None,
             pick: None,
+            dest: None,
             update,
             update_dismissed: None,
             tray,
@@ -1499,7 +1507,10 @@ impl App {
         if !ctx.wants_keyboard_input() {
             let pasted = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None }));
             if let Some(t) = pasted {
-                sharing::receive(self, &t);
+                // a friend's code, or a link to music: its songs in FIND MUSIC, to listen to and + GET
+                if !sharing::receive(self, &t) && crate::sources::detect(t.trim()).is_some() {
+                    websearch::search_for(self, t.trim().to_string(), "all");
+                }
             }
         }
         self.handle_drops(ctx);
@@ -1587,13 +1598,19 @@ impl App {
 
         // overlays: palette, modal, update popup
         plpick::show_popup(self, ctx);
+        dest::show(self, ctx);
         if self.palette.is_some() {
             palette::show(self, ctx);
+        }
+        if self.modal.is_none() && self.tour.is_none() && self.incoming.is_none() {
+            if let Some(m) = welcome::setup_modal(self) {
+                self.modal = Some(m);
+            }
         }
         settings::show_modal(self, ctx);
         sharing::show(self, ctx);
         if let UpdState::Available(u) = self.update.lock().clone() {
-            if self.update_dismissed.as_deref() != Some(&u.version) && self.modal.is_none() && self.tour.is_none() {
+            if self.update_dismissed.as_deref() != Some(&u.version) && self.modal.is_none() && self.tour.is_none() && !self.settings.lock().setup_pending {
                 self.modal = Some(Modal::Update);
                 self.update_dismissed = Some(u.version.clone());
             }

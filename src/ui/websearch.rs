@@ -205,6 +205,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             intro(app, ui);
             return;
         }
+        // a pasted link: what it points to, to listen to and + GET
+        if sources::is_link(&q) {
+            link_results(app, ui, &q);
+            return;
+        }
         // search after a short pause in typing, or right away on Enter
         let key = format!("s|{cat}|{q}");
         let idle = app.browser.web.edited.map(|t| t.elapsed() >= Duration::from_millis(700)).unwrap_or(true);
@@ -229,6 +234,33 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     });
 }
 
+/// The songs a pasted link points to (a video, a song, a playlist…).
+fn link_results(app: &mut App, ui: &mut Ui, url: &str) {
+    let key = format!("url|{url}");
+    if !app.browser.web.res.contains_key(&key) {
+        let (u, creds) = (url.to_string(), app.dl.creds());
+        fetch(app, ui.ctx(), key.clone(), false, move |_| sources::link_songs(&u, &creds));
+    }
+    let res = app.browser.web.res.get(&key).cloned().unwrap_or(Res { busy: true, ..Default::default() });
+    ui.label(egui::RichText::new("FROM THE LINK YOU PASTED").font(px(8.0)).color(app.pal.accent2));
+    if res.hits.len() > 1 {
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("{} songs. Pick some below, or bring them all in as a playlist (kept in sync):", res.hits.len())).color(app.pal.dim));
+            if button(ui, &app.pal, "IMPORT ALL", true, true).clicked() {
+                app.browser.set_view(super::browser::View::Import);
+                super::import::fetch_link(app, ui.ctx(), url.to_string());
+            }
+        });
+    }
+    ui.add_space(4.0);
+    egui::ScrollArea::vertical().id_salt(("web-link", url)).auto_shrink([false; 2]).show(ui, |ui| {
+        if !status(app, ui, &res) {
+            let songs: Vec<Hit> = res.hits.iter().filter(|h| h.track.is_some()).cloned().collect();
+            song_rows(app, ui, &songs, &key);
+        }
+    });
+}
+
 /// Before searching: what this tab does, and how DK.FM gets the best sound.
 fn intro(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
@@ -236,6 +268,8 @@ fn intro(app: &mut App, ui: &mut Ui) {
     ui.label(egui::RichText::new("Search all of YouTube Music: pick a category above, open an artist to see their songs and albums, and click ▶ to listen before you + GET anything.").color(pal.dim));
     ui.add_space(6.0);
     ui.label(egui::RichText::new(format!("Sound: every download takes the best audio YouTube has for that song (sound quality: {quality}, change it in Settings > Downloads). Results from YouTube Music's SONGS are the studio versions, the best source; videos can be quieter or have extra sounds.")).color(pal.dim));
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Can't find a cover, remix, instrumental or a small artist? YOUTUBE and SOUNDCLOUD above search everything uploaded there. You can also paste a link to a song or playlist into the search bar.").color(pal.dim));
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Hear a song on your PC or around you? Press SHAZAM on the deck.").color(pal.dim));
 }
@@ -266,6 +300,16 @@ fn all_results(app: &mut App, ui: &mut Ui, res: &Res, key: &str) {
         }
         ui.add_space(10.0);
     }
+    // covers, remixes and small artists aren't in YouTube Music's catalogue
+    ui.horizontal_wrapped(|ui| {
+        ui.label(egui::RichText::new("Not here? Covers, remixes, instrumentals and small artists:").color(app.pal.dim));
+        if tb_button(ui, &app.pal, "SEARCH YOUTUBE ›", false).clicked() {
+            app.browser.web.cat = "youtube".into();
+        }
+        if tb_button(ui, &app.pal, "SEARCH SOUNDCLOUD ›", false).clicked() {
+            app.browser.web.cat = "soundcloud".into();
+        }
+    });
 }
 
 /// One category's results.
@@ -616,8 +660,8 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             let kept = super::preview::kept(app, &t);
-                            if button(ui, &pal, if kept { "✔ KEEPING" } else { "⬇ KEEP" }, !kept, !kept).on_hover_text("Download it to your library (in your sound quality)").clicked() {
-                                super::preview::keep(app, &t);
+                            if button(ui, &pal, if kept { "✔ KEEPING" } else { "⬇ KEEP" }, !kept, !kept).on_hover_text("Download it: you pick where it goes (library, Liked or a playlist)").clicked() {
+                                super::preview::keep(app, ctx, &t);
                             }
                             if button(ui, &pal, "× DISCARD", false, true).on_hover_text("Not for you: stop it and delete it").clicked() {
                                 super::preview::discard(app, &t);

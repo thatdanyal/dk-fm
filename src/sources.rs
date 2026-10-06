@@ -113,9 +113,51 @@ pub fn fetch_any(url: &str, creds: &Creds) -> Result<Fetched, String> {
         Some("spotify-liked") => liked(creds).map(Fetched::Collection),
         Some("spotify-profile") => spotify_profile(url, creds),
         Some("spotify") => spotify(url, creds).map(Fetched::Collection),
+        Some("soundcloud") if sc_profile(url).is_some() => soundcloud_profile(&sc_profile(url).unwrap()),
         Some(_) => generic(url, None, None, 500).map(Fetched::Collection),
         None => Err("Paste a Spotify, YouTube, YouTube Music or SoundCloud link.".into()),
     }
+}
+
+// ------------------------------------------------------------------------------- SoundCloud
+
+/// A SoundCloud profile link (soundcloud.com/name, or its /sets page): the name.
+pub fn sc_profile(url: &str) -> Option<String> {
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(?:https?://)?(?:www\.|m\.)?soundcloud\.com/([A-Za-z0-9_-]+)/?(sets/?)?(?:[?#].*)?$").unwrap());
+    let c = RE.captures(url.trim())?;
+    let user = c[1].to_string();
+    // (pages that aren't people)
+    (!matches!(user.as_str(), "discover" | "search" | "you" | "charts" | "stream" | "upload" | "pages" | "terms-of-use")).then_some(user)
+}
+
+/// Everything on a SoundCloud profile to bring over: its likes, its playlists and its uploads.
+fn soundcloud_profile(user: &str) -> Result<Fetched, String> {
+    ytdlp::ensure()?;
+    let base = format!("https://soundcloud.com/{user}");
+    let list = |path: &str, n: usize| -> Result<Value, String> {
+        let raw = ytdlp::run_with(&["--flat-playlist".into(), "-J".into(), "--playlist-end".into(), n.to_string(), format!("{base}/{path}")], None, None)?;
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    };
+    let sets = list("sets", 200);
+    if let Err(e) = &sets {
+        if e.contains("403") || e.contains("429") {
+            return Err("SoundCloud is limiting requests right now: try again in a few minutes.".into());
+        }
+    }
+    let (sets, uploads) = (sets.ok(), list("tracks", 1).ok());
+    let name = sets.as_ref().and_then(|j| j["title"].as_str()).map(|t| t.trim_end_matches(" (Sets)").to_string()).unwrap_or_else(|| user.to_string());
+    let mut playlists = vec![ProfilePlaylist { name: "Likes".into(), total: 0, owner: name.clone(), url: format!("{base}/likes"), kind: "LIKED".into(), note: String::new() }];
+    for e in sets.as_ref().and_then(|j| j["entries"].as_array()).map(|a| a.as_slice()).unwrap_or(&[]) {
+        let (Some(url), Some(title)) = (e["url"].as_str(), e["title"].as_str()) else { continue };
+        playlists.push(ProfilePlaylist { name: title.into(), total: 0, owner: name.clone(), url: url.into(), kind: "PLAYLIST".into(), note: String::new() });
+    }
+    if uploads.as_ref().and_then(|j| j["entries"].as_array()).is_some_and(|a| !a.is_empty()) {
+        playlists.push(ProfilePlaylist { name: format!("Uploads by {name}"), total: 0, owner: name.clone(), url: format!("{base}/tracks"), kind: "UPLOADS".into(), note: String::new() });
+    }
+    if sets.is_none() && uploads.is_none() {
+        return Err("Couldn't open that SoundCloud profile: check the link (soundcloud.com/yourname) and that it's public.".into());
+    }
+    Ok(Fetched::Profile { name: format!("{name} · SoundCloud"), cover: None, playlists })
 }
 
 // ------------------------------------------------------------------------------- Spotify
@@ -488,6 +530,9 @@ pub fn generic(url: &str, name: Option<String>, kind: Option<&str>, limit: usize
     let mut args: Vec<String> = Vec::new();
     if !is_sc {
         args.push("--flat-playlist".into());
+    } else {
+        // one DRM-protected or removed track mustn't sink the whole list
+        args.push("--ignore-errors".into());
     }
     args.extend(["-J".into(), "--playlist-end".into(), limit.to_string(), url.to_string()]);
     let raw = ytdlp::run_with(&args, None, None)?;
@@ -495,7 +540,9 @@ pub fn generic(url: &str, name: Option<String>, kind: Option<&str>, limit: usize
     let single = j.get("entries").is_none();
     let entries: Vec<Value> = if single { vec![j.clone()] } else { j["entries"].as_array().cloned().unwrap_or_default() };
     let mut tracks = Vec::new();
-    for e in entries.iter().filter(|e| e["id"].is_string() || e["url"].is_string()) {
+    // SoundCloud likes also hold liked playlists: not songs (import them from the profile)
+    let nested = entries.iter().filter(|e| e["_type"] == "playlist" || e.get("entries").is_some()).count();
+    for e in entries.iter().filter(|e| (e["id"].is_string() || e["url"].is_string()) && e["_type"] != "playlist" && e.get("entries").is_none()) {
         let channel = e["channel"].as_str().or(e["uploader"].as_str()).or(j["uploader"].as_str()).unwrap_or("");
         let (artist, title) = match (e["artist"].as_str(), e["track"].as_str()) {
             (Some(a), Some(t)) => (a.to_string(), t.to_string()),
@@ -527,6 +574,8 @@ pub fn generic(url: &str, name: Option<String>, kind: Option<&str>, limit: usize
         }
     }
     let kind = kind.map(String::from).unwrap_or_else(|| if single { "track".into() } else if rel.is_some() { "album".into() } else { "playlist".into() });
+    let sc_likes = is_sc && url.trim_end_matches('/').ends_with("/likes");
+    let name = name.or_else(|| sc_likes.then(|| "SoundCloud Likes".to_string()));
     Ok(Collection {
         kind,
         id: format!("{}{}", if is_sc { "sc" } else { "yt" }, short_hash(url)),
@@ -538,7 +587,7 @@ pub fn generic(url: &str, name: Option<String>, kind: Option<&str>, limit: usize
         via: if is_sc { "soundcloud".into() } else { "youtube".into() },
         source: if is_sc { "soundcloud".into() } else { "youtube".into() },
         url: url.into(),
-        warning: None,
+        warning: (nested > 0).then(|| format!("{nested} liked playlist{} left out: paste your profile link (soundcloud.com/yourname) to bring over playlists", if nested == 1 { " is" } else { "s are" })),
     })
 }
 
@@ -727,7 +776,40 @@ fn parse_len(d: &str) -> Option<f64> {
 // ------------------------------------------------------------------------------- online catalog (FIND MUSIC)
 
 /// What FIND MUSIC searches: (id, tab label).
-pub const CATEGORIES: [(&str, &str); 8] = [("all", "ALL"), ("songs", "SONGS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
+pub const CATEGORIES: [(&str, &str); 10] = [("all", "ALL"), ("songs", "SONGS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("youtube", "YOUTUBE"), ("soundcloud", "SOUNDCLOUD"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
+
+/// A YouTube video's picture, for songs that only have a video (no album cover).
+pub fn video_thumb(id: &str) -> String {
+    format!("https://i.ytimg.com/vi/{id}/hqdefault.jpg")
+}
+
+/// A link pasted where you'd search: everything it points to, as songs (Spotify, YouTube,
+/// YouTube Music, SoundCloud; one song or a whole list).
+pub fn link_songs(url: &str, creds: &Creds) -> Result<HitPage, String> {
+    let tracks = match fetch_any(url, creds)? {
+        Fetched::Collection(c) => c.tracks,
+        Fetched::Profile { .. } => return Err("That's a profile: paste it in + IMPORT to bring over its playlists.".into()),
+    };
+    let hits: Vec<Hit> = tracks
+        .into_iter()
+        .map(|mut t| {
+            if t.cover.is_none() {
+                t.cover = t.youtube_id.as_deref().map(video_thumb);
+            }
+            Hit::of_track(t)
+        })
+        .collect();
+    if hits.is_empty() {
+        return Err("Nothing playable found at that link.".into());
+    }
+    Ok(HitPage { hits, more: None })
+}
+
+/// Does this look like a link (rather than words to search for)?
+pub fn is_link(q: &str) -> bool {
+    let q = q.trim();
+    !q.contains(' ') && (q.starts_with("http://") || q.starts_with("https://") || detect(q).is_some() || q.starts_with("youtu.be/") || q.starts_with("www."))
+}
 
 /// YouTube Music's search filters.
 fn category_params(cat: &str) -> Option<&'static str> {
@@ -845,6 +927,27 @@ pub fn catalog(q: &str, cat: &str, more: Option<&str>) -> Result<HitPage, String
                 return Err(err.unwrap_or_else(|| "No results".into()));
             }
             Ok(HitPage { hits, more: None })
+        }
+        "youtube" | "soundcloud" => {
+            // everything uploaded there, not just the official catalogue: covers, remixes,
+            // instrumentals, small artists (`more` = how many so far)
+            let have: usize = more.and_then(|m| m.parse().ok()).unwrap_or(0);
+            let want = have + 20;
+            let found = search(q, cat, want)?;
+            let full = found.len() >= want;
+            Ok(HitPage {
+                hits: found
+                    .into_iter()
+                    .skip(have)
+                    .map(|mut t| {
+                        if t.cover.is_none() {
+                            t.cover = t.youtube_id.as_deref().map(video_thumb);
+                        }
+                        Hit::of_track(t)
+                    })
+                    .collect(),
+                more: full.then(|| want.to_string()),
+            })
         }
         "audiobooks" => {
             // YouTube Music has no audiobooks: long YouTube videos of them (`more` = how many so far)
@@ -1156,6 +1259,49 @@ pub fn rank(cands: Vec<Cand>, t: &ITrack) -> Vec<Cand> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn links_and_profiles() {
+        assert!(super::is_link("https://youtu.be/abcdefghijk"));
+        assert!(super::is_link("soundcloud.com/someone/a-cover"));
+        assert!(!super::is_link("cry cas cover"));
+        assert_eq!(super::sc_profile("https://soundcloud.com/octobersveryown").as_deref(), Some("octobersveryown"));
+        assert_eq!(super::sc_profile("soundcloud.com/octobersveryown/sets/").as_deref(), Some("octobersveryown"));
+        assert_eq!(super::sc_profile("https://soundcloud.com/octobersveryown/likes"), None);
+        assert_eq!(super::sc_profile("https://soundcloud.com/octobersveryown/a-song"), None);
+        assert_eq!(super::sc_profile("https://soundcloud.com/discover"), None);
+    }
+
+    // network: cargo test soundcloud_and_youtube -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn soundcloud_and_youtube() {
+        let creds = super::Creds { id: String::new(), secret: String::new(), refresh: String::new(), on_refresh: None };
+        match super::fetch_any("https://soundcloud.com/octobersveryown", &creds).unwrap() {
+            super::Fetched::Profile { name, playlists, .. } => {
+                eprintln!("{name}: {}", playlists.iter().map(|p| format!("{} [{}]", p.name, p.kind)).collect::<Vec<_>>().join(", "));
+                assert!(playlists[0].kind == "LIKED" && playlists.len() > 2);
+            }
+            _ => panic!("not a profile"),
+        }
+        let likes = super::generic("https://soundcloud.com/octobersveryown/likes", None, None, 25).unwrap();
+        eprintln!("likes: {} {:?} {:?}", likes.name, likes.warning, likes.tracks.iter().map(|t| (&t.title, t.duration_ms)).collect::<Vec<_>>());
+        assert!(likes.name == "SoundCloud Likes" && !likes.tracks.is_empty() && likes.warning.is_some());
+    }
+
+    // network: cargo test youtube_tab -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn youtube_tab() {
+        let creds = super::Creds { id: String::new(), secret: String::new(), refresh: String::new(), on_refresh: None };
+        let yt = super::catalog("cry cas cover", "youtube", None).unwrap();
+        eprintln!("youtube: {:?}", yt.hits.iter().take(5).map(|h| (&h.title, &h.sub)).collect::<Vec<_>>());
+        assert!(yt.hits.len() >= 10 && yt.more.is_some() && yt.hits.iter().all(|h| h.thumb.is_some()));
+        let sc = super::catalog("cry cas cover", "soundcloud", None);
+        eprintln!("soundcloud: {:?}", sc.map(|p| p.hits.iter().take(5).map(|h| (h.title.clone(), h.sub.clone())).collect::<Vec<_>>()));
+        let link = super::link_songs(&format!("https://www.youtube.com/watch?v={}", yt.hits[0].track.as_ref().unwrap().youtube_id.as_ref().unwrap()), &creds).unwrap();
+        assert_eq!(link.hits.len(), 1);
+    }
+
     // network: cargo test catalog -- --ignored --nocapture
     #[test]
     #[ignore]

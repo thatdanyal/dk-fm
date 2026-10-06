@@ -327,7 +327,12 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
                     app.lib.playlist_add(&pl.id, &[id]);
                 }
                 (Some(_), None) => {}
-                (None, _) => get(app, t, pl),
+                (None, Some(pl)) => get(app, t, Some(pl)),
+                // where should it go? library, Liked or a playlist
+                (None, None) => {
+                    let pos = ui.ctx().pointer_latest_pos().unwrap_or(full.right_center());
+                    super::dest::open(app, t, pos, false);
+                }
             }
         }
     }
@@ -336,10 +341,16 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
 
 /// Download an online song to the library (and into `pl`, if given).
 pub fn get(app: &mut App, t: &ITrack, pl: Option<&Playlist>) {
+    get_to(app, t, pl.map(|p| p.id.clone()), pl.map(|p| p.name.clone()));
+}
+
+/// Download an online song into `target` (a playlist id, `downloader::LIKED`, or None: just the
+/// library); `name` is the target's name, for the message.
+pub fn get_to(app: &mut App, t: &ITrack, target: Option<String>, name: Option<String>) {
     let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
     let col = Collection { kind: "track".into(), id: col_id(t), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
-    app.dl.start_to(col, None, pl.map(|p| p.id.clone()));
-    app.toast(match pl { Some(p) => format!("Downloading \"{}\" into \"{}\"", t.title, p.name), None => format!("Downloading \"{}\"", t.title) });
+    app.dl.start_to(col, None, target);
+    app.toast(match name { Some(n) => format!("Downloading \"{}\" into \"{n}\"", t.title), None => format!("Downloading \"{}\" to your library", t.title) });
 }
 
 /// Download job id for a result ("yt" + video id, or "sc" + SoundCloud id).

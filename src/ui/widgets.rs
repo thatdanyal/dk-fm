@@ -121,6 +121,30 @@ pub fn dim(ui: &mut Ui, pal: &Pal, text: &str) -> Response {
     ui.label(egui::RichText::new(text).font(vt(17.0)).color(pal.dim))
 }
 
+/// Something to paste elsewhere (a link, a name): shown in a box, with COPY next to it (it says
+/// COPIED for a moment after). `label` goes in front, if any.
+pub fn copy_field(ui: &mut Ui, pal: &Pal, label: &str, text: &str) {
+    ui.horizontal(|ui| {
+        if !label.is_empty() {
+            ui.label(egui::RichText::new(label).font(vt(18.0)).color(pal.text));
+        }
+        egui::Frame::new().fill(pal.lcd_bg).stroke(Stroke::new(1.0_f32, pal.line_hi)).inner_margin(egui::Margin::symmetric(8, 3)).show(ui, |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(text).font(vt(18.0)).color(pal.accent2)).selectable(true));
+        });
+        let id = ui.id().with(("copied", text));
+        let at: Option<f64> = ui.ctx().data(|d| d.get_temp(id));
+        let now = ui.input(|i| i.time);
+        let fresh = at.is_some_and(|t| now - t < 2.0);
+        if fresh {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        if button(ui, pal, if fresh { "COPIED ✔" } else { "COPY" }, !fresh, true).on_hover_text("Copy it, then paste it with Ctrl+V").clicked() {
+            ui.ctx().copy_text(text.to_string());
+            ui.ctx().data_mut(|d| d.insert_temp(id, now));
+        }
+    });
+}
+
 // ------------------------------------------------------------------------------- cover textures
 
 /// Loads cover art on a background thread at the size it's shown, with a small LRU so memory

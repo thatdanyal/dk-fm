@@ -177,6 +177,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
         }
         app.edit_settings(|s| {
             s.onboarded = true;
+            s.setup_pending = true;
             s.tour_seen = super::tour::TOUR_VERSION;
         });
         if tour {
@@ -186,6 +187,116 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
     }
     let step = if next { step + 1 } else if back { step.saturating_sub(1) } else { step };
     Some(Modal::Welcome { step, start_menu, desktop })
+}
+
+/// The sound setup, if a new install hasn't done it yet (shown once the welcome and tour are done).
+pub fn setup_modal(app: &App) -> Option<Modal> {
+    let s = app.settings.lock();
+    if !s.setup_pending {
+        return None;
+    }
+    let quality = if s.download_format == "lossless" || s.download_format == "standard" { s.download_format.clone() } else { "high".into() };
+    let eq = { let e = app.player.st.lock().eq.clone(); if e.enabled { e.preset } else { "Flat".into() } };
+    Some(Modal::Setup { quality, eq, close: s.close_mode().to_string() })
+}
+
+/// "SET UP YOUR SOUND": sound quality for every download, the EQ, where songs are saved and what
+/// the X button does. SAVE applies them; KEEP DEFAULTS changes nothing. Either way it's done.
+pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut eq: String, mut close: String) -> Option<Modal> {
+    let pal = app.pal;
+    let (mut save, mut skip) = (false, false);
+    let dir = app.settings.lock().download_dir.clone();
+    let mut change_dir = false;
+    let open = window(pal, ctx, "SET UP YOUR SOUND", Vec2::new(560.0, 470.0), false, |ui| {
+        dim(ui, &pal, "Pick these once: they apply to everything you download from now on. You can change them any time in Settings.");
+        ui.add_space(10.0);
+        caption(ui, &pal, "1. SOUND QUALITY OF YOUR DOWNLOADS");
+        ui.horizontal(|ui| {
+            for (f, label) in [("standard", "STANDARD"), ("high", "HIGH (RECOMMENDED)"), ("lossless", "LOSSLESS")] {
+                if button(ui, &pal, label, quality == f, true).clicked() {
+                    quality = f.into();
+                }
+            }
+        });
+        match quality.as_str() {
+            "standard" => {
+                dim(ui, &pal, "About 128 kbps, about 4 MB a song. Smallest files; fine for earbuds.");
+            }
+            "lossless" => {
+                ui.label(egui::RichText::new("⚠ LOSSLESS uses a LOT of storage: 25-40 MB a song, about 5x HIGH (1,000 songs ≈ 30 GB). YouTube's audio isn't lossless, so it sounds the same as HIGH. Only pick it if space doesn't matter to you.").font(vt(18.0)).color(pal.accent));
+            }
+            _ => {
+                dim(ui, &pal, "The best sound YouTube has, about 8 MB a song. Best sound for its size.");
+            }
+        }
+        ui.add_space(10.0);
+        caption(ui, &pal, "2. EQUALIZER");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("setup-eq").selected_text(if eq == "Flat" { "Flat (off: songs as they were made)".to_string() } else { eq.clone() }).width(260.0).show_ui(ui, |ui| {
+                for (name, _) in super::eqpanel::PRESETS {
+                    ui.selectable_value(&mut eq, name.to_string(), *name);
+                }
+            });
+        });
+        dim(ui, &pal, "Bass Boost for headphones that sound thin, Vocal for podcasts, Late Night for quiet listening. The EQ panel fine-tunes it.");
+        ui.add_space(10.0);
+        caption(ui, &pal, "3. WHERE YOUR SONGS ARE SAVED");
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(&dir).color(pal.text));
+            if button(ui, &pal, "CHANGE", false, true).clicked() {
+                change_dir = true;
+            }
+        });
+        if !cfg!(target_os = "linux") {
+            ui.add_space(10.0);
+            caption(ui, &pal, "4. THE X BUTTON");
+            ui.horizontal(|ui| {
+                for (m, label) in [("quit", "QUITS DK.FM"), ("playing", "KEEPS MUSIC PLAYING (TRAY)")] {
+                    if button(ui, &pal, label, close == m, true).clicked() {
+                        close = m.into();
+                    }
+                }
+            });
+            dim(ui, &pal, if close == "quit" { "Closing the window stops the music." } else { "Closing the window while music plays keeps it playing from the tray icon." });
+        }
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            if button(ui, &pal, "SAVE", true, true).clicked() {
+                save = true;
+            }
+            if button(ui, &pal, "KEEP DEFAULTS", false, true).clicked() {
+                skip = true;
+            }
+        });
+    });
+    if change_dir {
+        if let Some(f) = rfd::FileDialog::new().pick_folder() {
+            app.edit_settings(|s| s.download_dir = f.to_string_lossy().into_owned());
+            app.rescan();
+        }
+    }
+    if save {
+        app.edit_settings(|s| {
+            s.download_format = quality.clone();
+            if !cfg!(target_os = "linux") {
+                s.close_mode = close.clone();
+            }
+        });
+        if let Some((name, g)) = super::eqpanel::PRESETS.iter().find(|p| p.0 == eq) {
+            let mut e = app.player.st.lock().eq.clone();
+            e.preset = name.to_string();
+            e.gains = g.to_vec();
+            e.preamp = -(g.iter().cloned().fold(0.0, f32::max) - 2.0).max(0.0);
+            e.enabled = eq != "Flat";
+            app.player.set_eq(e);
+        }
+        app.toast(format!("Saved: {} downloads, EQ {}. Change them any time in Settings.", crate::downloader::quality_label(&quality), if eq == "Flat" { "off".to_string() } else { eq.clone() }));
+    }
+    if save || skip || !open {
+        app.edit_settings(|s| s.setup_pending = false);
+        return None;
+    }
+    Some(Modal::Setup { quality, eq, close })
 }
 
 /// The tour steps this person was last offered (from before this was remembered: the first

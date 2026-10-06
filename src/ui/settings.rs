@@ -2,7 +2,7 @@
 use super::browser::{self, COLUMNS, NAV, SCREENS, SORTS, START};
 use super::keys::{self, Combo};
 use super::theme::{self, px, vt, Pal};
-use super::widgets::{button, caption, dim, fill, frame_rect, switch, tb_button};
+use super::widgets::{button, caption, copy_field, dim, fill, frame_rect, switch, tb_button};
 use super::{App, Modal, PromptAction};
 use crate::backup;
 use crate::system::{self, UpdState};
@@ -177,6 +177,10 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
             }
             false
         }
+        Modal::Setup { quality, eq, close } => {
+            app.modal = super::welcome::show_setup(app, ctx, quality, eq, close);
+            false
+        }
         Modal::Update => {
             let st = app.update.lock().clone();
             let mut close = false;
@@ -243,6 +247,10 @@ fn run_prompt(app: &mut App, action: PromptAction, text: String) {
             }
             app.toast(if n > 0 { format!("Saved \"{text}\" ({n} songs)") } else { format!("Created \"{text}\"") });
         }
+        PromptAction::NewPlaylistGet(t, preview) => {
+            let id = app.lib.new_playlist(&text, vec![]);
+            super::dest::get(app, &t, Some(id), preview);
+        }
         PromptAction::RenamePlaylist(id) => app.lib.edit_playlist(&id, |p| p.name = text),
         PromptAction::Describe(id) => app.lib.edit_playlist(&id, |p| p.description = text),
         PromptAction::NewFolder(pid) => {
@@ -302,6 +310,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Library, "Music folders", "scan local files add folder"),
     (SetTab::Downloads, "Download folder", "where saved location path"),
     (SetTab::Downloads, "Sound quality", "lossless flac high standard bitrate audio better quality mp3 upgrade smaller shrink space convert"),
+    (SetTab::Downloads, "Sound quality: one song", "single song track lossless flac high per song one"),
     (SetTab::Downloads, "Parallel downloads", "speed faster at once"),
     (SetTab::Downloads, "Auto-sync imported playlists", "spotify update check hours"),
     (SetTab::Downloads, "File names", "pattern rename"),
@@ -1201,7 +1210,7 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         }
     });
     ui.add_space(14.0);
-    caption(ui, &pal, "SOUND QUALITY");
+    caption(ui, &pal, "SOUND QUALITY: ALL SONGS + FUTURE DOWNLOADS");
     let fmt = app.settings.lock().download_format.clone();
     // older settings saved "m4a", which is HIGH now
     let cur = if matches!(fmt.as_str(), "standard" | "lossless" | "mp3-320" | "mp3-v0") { fmt.clone() } else { "high".to_string() };
@@ -1263,6 +1272,9 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         });
         dim(ui, &pal, "Converted on this PC, nothing downloaded, and they sound the same (YouTube's audio isn't lossless).");
     }
+    ui.add_space(14.0);
+    one_song_quality(app, ui);
+    ui.add_space(14.0);
     let mut conc = app.settings.lock().download_concurrency;
     row(ui, &pal, "Parallel downloads", |ui| {
         if ui.add(egui::Slider::new(&mut conc, 1..=6)).changed() {
@@ -1291,6 +1303,70 @@ fn downloads(app: &mut App, ui: &mut Ui) {
     caption(ui, &pal, "ENGINE");
     let st = crate::ytdlp::STATUS.lock().clone();
     dim(ui, &pal, &if st.version.is_empty() { "Download tools are fetched the first time you import (yt-dlp, ffmpeg, QuickJS) and yt-dlp is updated daily.".into() } else { format!("yt-dlp {} · updated daily", st.version) });
+}
+
+/// SOUND QUALITY: ONE SONG — find a song, then STANDARD / HIGH / LOSSLESS just for it.
+fn one_song_quality(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    caption(ui, &pal, "SOUND QUALITY: ONE SONG");
+    dim(ui, &pal, "Change just one song, whatever is set above (also: right-click a song > Sound quality).");
+    let qid = ui.id().with("one-song-q");
+    let pid = ui.id().with("one-song-pick");
+    let mut q: String = ui.ctx().data(|d| d.get_temp(qid)).unwrap_or_default();
+    let mut pick: Option<String> = ui.ctx().data(|d| d.get_temp(pid)).flatten();
+    if ui.add(egui::TextEdit::singleline(&mut q).hint_text("Type a song or artist…").desired_width(320.0)).changed() {
+        pick = None;
+    }
+    let toks: Vec<String> = q.to_lowercase().split_whitespace().map(String::from).collect();
+    if pick.is_none() && !toks.is_empty() {
+        let found: Vec<crate::store::Track> = {
+            let d = app.lib.data.read();
+            let mut v: Vec<crate::store::Track> = d.tracks.values().filter(|t| app.dl.requalifiable(t)).filter(|t| {
+                let hay = format!("{} {}", t.title, t.artist).to_lowercase();
+                toks.iter().all(|k| hay.contains(k))
+            }).cloned().collect();
+            v.sort_by_cached_key(|t| t.title.to_lowercase());
+            v.truncate(6);
+            v
+        };
+        if found.is_empty() {
+            dim(ui, &pal, "No song DK.FM downloaded matches that (your own files keep their quality).");
+        }
+        for t in found {
+            let label = format!("{} · {}   [{}]", t.title, t.artist, crate::downloader::quality_label(crate::downloader::Downloader::quality_of(&t)));
+            if ui.selectable_label(false, egui::RichText::new(label).color(pal.text)).clicked() {
+                q = format!("{} · {}", t.title, t.artist);
+                pick = Some(t.id.clone());
+            }
+        }
+    }
+    if let Some(t) = pick.as_ref().and_then(|id| app.lib.track(id)) {
+        let now = crate::downloader::Downloader::quality_of(&t);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("Now {}. Make it:", crate::downloader::quality_label(now))).color(pal.text));
+            for (f, label) in [("standard", "STANDARD"), ("high", "HIGH"), ("lossless", "LOSSLESS")] {
+                // smaller only works from FLAC (nothing to download: converted here)
+                let can = f == now || now == "lossless" || f != "standard";
+                if button(ui, &pal, label, f == now, can).clicked() && f != now {
+                    if app.player.current_id().as_deref() == Some(t.id.as_str()) {
+                        app.toast("That song is playing: skip to another song first, then change it");
+                    } else {
+                        app.dl.set_quality(std::slice::from_ref(&t.id), f);
+                        app.toast(format!("Changing \"{}\" to {}: see DOWNLOADS for progress", t.title, crate::downloader::quality_label(f)));
+                        pick = None;
+                        q.clear();
+                    }
+                }
+            }
+        });
+        if now != "lossless" {
+            dim(ui, &pal, "LOSSLESS downloads it again as FLAC: about 5x the space (25-40 MB) for the same sound, since YouTube's audio isn't lossless.");
+        }
+    }
+    ui.ctx().data_mut(|d| {
+        d.insert_temp(qid, q);
+        d.insert_temp(pid, pick);
+    });
 }
 
 /// Set from inside the settings body to close the window after this frame.
@@ -1361,11 +1437,23 @@ fn spotify(app: &mut App, ui: &mut Ui) {
     dim(ui, &pal, "Only the Client ID is needed. Without connecting, DK.FM still reads public links (the first 100 songs of a playlist).");
     ui.add_space(14.0);
     caption(ui, &pal, "HOW TO SET UP (2 MINUTES, FREE)");
-    if ui.link("1. Open developer.spotify.com/dashboard and log in.").clicked() {
-        let _ = open::that("https://developer.spotify.com/dashboard");
-    }
-    ui.label(format!("2. Create app: any name; Redirect URI {}; tick \"Web API\".", crate::spotify_auth::REDIRECT));
-    ui.label("3. Copy the Client ID into the box above, then click CONNECT SPOTIFY.");
+    dim(ui, &pal, "Nothing to type: copy each line below and paste it into Spotify's form.");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("1.");
+        if button(ui, &pal, "OPEN SPOTIFY'S DASHBOARD", true, true).clicked() {
+            let _ = open::that("https://developer.spotify.com/dashboard");
+        }
+        ui.label("and log in, then click Create app.");
+    });
+    ui.add_space(4.0);
+    ui.label("2. Fill in the form:");
+    copy_field(ui, &pal, "    App name", "DK.FM");
+    copy_field(ui, &pal, "    App description", "My DK.FM music player");
+    copy_field(ui, &pal, "    Redirect URI", crate::spotify_auth::REDIRECT);
+    ui.label("    (after pasting the Redirect URI, click Add), tick \"Web API\", agree and Save.");
+    ui.add_space(4.0);
+    ui.label("3. On your new app's page, copy the Client ID into the box above, then click CONNECT SPOTIFY.");
     dim(ui, &pal, "The API costs nothing, but Spotify requires the app's owner to have Premium, and allows up to 5 accounts per app (add others under User Management).");
 }
 
@@ -1772,10 +1860,10 @@ mod tests {
     #[test]
     fn settings_search_finds_by_everyday_words() {
         let tabs = |q: &str| find(q).into_iter().map(|(t, _)| TABS.iter().find(|x| x.0 == t).unwrap().1).collect::<Vec<_>>();
-        assert_eq!(tabs("lossless"), ["Downloads"]);
+        assert!(!tabs("lossless").is_empty() && tabs("lossless").iter().all(|t| *t == "Downloads"));
         assert!(tabs("dark").contains(&"Look"));
         assert!(tabs("spotify").contains(&"Spotify"));
-        assert_eq!(tabs("sound QUALITY"), ["Downloads"]);
+        assert!(!tabs("sound QUALITY").is_empty() && tabs("sound QUALITY").iter().all(|t| *t == "Downloads"));
         assert!(tabs("zzzz").is_empty());
     }
 }

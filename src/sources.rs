@@ -9,6 +9,8 @@ use std::sync::LazyLock;
 
 #[derive(Clone, Debug, Default)]
 pub struct ITrack {
+    /// when it was added to the list (ms; Spotify's Liked Songs: when you liked it)
+    pub added_at: Option<f64>,
     pub title: String,
     pub artists: Vec<String>,
     pub album: String,
@@ -263,7 +265,9 @@ fn page_items(page: &Value, col: &mut Collection) {
         // playlist items are `item` since Feb 2026 (was `track`); saved tracks are `track`
         let t = if it["item"].is_object() { &it["item"] } else { &it["track"] };
         if t["type"].as_str().unwrap_or("track") == "track" && t["id"].is_string() && !it["is_local"].as_bool().unwrap_or(false) {
-            col.tracks.push(api_track(t, None));
+            let mut x = api_track(t, None);
+            x.added_at = it["added_at"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis() as f64);
+            col.tracks.push(x);
         }
     }
 }

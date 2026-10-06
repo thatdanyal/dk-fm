@@ -974,7 +974,8 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
 
 // ------------------------------------------------------------------------------- song lists
 
-fn sort_ids(app: &App, ids: &mut Vec<String>, s: Option<(SortKey, bool)>) {
+/// `liked`: the Liked screen, where "date added" is when you liked the song (like Spotify).
+fn sort_ids(app: &App, ids: &mut Vec<String>, s: Option<(SortKey, bool)>, liked: bool) {
     let Some((k, asc)) = s else { return };
     let d = app.lib.data.read();
     let key = |id: &String| -> (String, f64) {
@@ -987,6 +988,9 @@ fn sort_ids(app: &App, ids: &mut Vec<String>, s: Option<(SortKey, bool)>) {
             SortKey::TrackNo => (format!("{:04}{}", t.track.unwrap_or(999), t.title.to_lowercase()), 0.0),
             SortKey::Duration => (String::new(), t.duration),
             SortKey::Plays => (String::new(), st.plays as f64),
+            SortKey::Added if liked && st.liked_at > 0.0 => (String::new(), st.liked_at),
+            // liked before DK.FM remembered when: after the ones it knows, newest download first
+            SortKey::Added if liked => (String::new(), t.added_at / 1e6),
             SortKey::Added => (String::new(), t.added_at),
             SortKey::Year => (String::new(), t.year.unwrap_or(0) as f64),
             SortKey::Genre => (t.genre.to_lowercase(), 0.0),
@@ -1095,7 +1099,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 })
                 .collect();
             drop(d);
-            sort_ids(app, &mut ids, key.2);
+            sort_ids(app, &mut ids, key.2, key.0 == View::Liked);
             app.browser.list = ids;
             app.browser.list_key = Some(key);
         }

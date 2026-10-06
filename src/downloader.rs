@@ -237,6 +237,8 @@ impl Downloader {
         }
         let ds = d.clone();
         std::thread::Builder::new().name("sync".into()).spawn(move || ds.sync_loop()).ok();
+        let dir = d.settings.lock().download_dir.clone();
+        std::thread::Builder::new().name("dl-tidy".into()).spawn(move || tidy_unfinished(Path::new(&dir))).ok();
         d
     }
 
@@ -340,15 +342,42 @@ impl Downloader {
     }
 
     /// Songs DK.FM downloaded in a lower quality than `fmt` (they can be downloaded again in it).
+    /// Only songs in the download folder: files you had before (even ones yt-dlp named with
+    /// their YouTube id) are never replaced.
     pub fn upgradable(&self, fmt: &str) -> Vec<String> {
-        let playing = self.lib.data.read();
-        playing.tracks.values().filter(|t| t.youtube_id.is_some() && below(t, fmt)).map(|t| t.id.clone()).collect()
+        let dir = self.settings.lock().download_dir.clone();
+        let d = self.lib.data.read();
+        d.tracks.values().filter(|t| t.youtube_id.is_some() && in_folder(&t.path, &dir) && below(t, fmt)).map(|t| t.id.clone()).collect()
+    }
+
+    /// FLACs DK.FM downloaded, while a smaller sound quality is set: they can become files of
+    /// that quality on this PC, nothing downloaded. They sound the same: YouTube's audio was
+    /// never lossless, so the FLAC holds exactly what HIGH would have saved.
+    pub fn shrinkable(&self, fmt: &str) -> Vec<String> {
+        if fmt == "lossless" {
+            return Vec::new();
+        }
+        let dir = self.settings.lock().download_dir.clone();
+        let d = self.lib.data.read();
+        d.tracks.values().filter(|t| t.youtube_id.is_some() && in_folder(&t.path, &dir) && t.path.to_lowercase().ends_with(".flac")).map(|t| t.id.clone()).collect()
+    }
+
+    /// Make these FLACs smaller (the sound quality set now), each replacing its file: playlists,
+    /// likes and plays stay; the FLAC goes to the Recycle Bin.
+    pub fn shrink(&self, ids: &[String]) -> String {
+        self.rework("shrink-quality", "shrink", ids, |fmt, n| format!("Making {n} songs smaller ({})", quality_label(fmt)))
     }
 
     /// Download these songs again in the sound quality set now, each replacing its old file
     /// (playlists, likes and plays stay; an old file of another type goes to the Recycle Bin).
     pub fn upgrade(&self, ids: &[String]) -> String {
-        let job_id = "upgrade-quality".to_string();
+        self.rework("upgrade-quality", "upgrade", ids, |fmt, n| format!("Sound quality upgrade to {} ({n} songs)", quality_label(fmt)))
+    }
+
+    /// A job that redoes library songs' files (`kind`: "upgrade" downloads them again, "shrink"
+    /// converts them here).
+    fn rework(&self, job_id: &str, kind: &str, ids: &[String], name: impl Fn(&str, usize) -> String) -> String {
+        let job_id = job_id.to_string();
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
         let (dir, fmt) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone()) };
@@ -377,7 +406,7 @@ impl Downloader {
             .collect();
         drop(lib);
         let n = tracks.len();
-        let col = Collection { kind: "upgrade".into(), id: "quality".into(), name: format!("Sound quality upgrade to {} ({n} songs)", quality_label(&fmt)), tracks: tracks.iter().map(|t| t.t.clone()).collect(), complete: true, ..Default::default() };
+        let col = Collection { kind: kind.into(), id: "quality".into(), name: name(&fmt, n), tracks: tracks.iter().map(|t| t.t.clone()).collect(), complete: true, ..Default::default() };
         self.queue.lock().extend((0..n).map(|i| (job_id.clone(), i)));
         self.jobs.lock().push(Job { id: job_id.clone(), col, folder: PathBuf::from(dir), fmt, target_playlist: None, cancel: Arc::new(AtomicBool::new(false)), tracks });
         self.touch();
@@ -469,6 +498,12 @@ impl Downloader {
             });
             return;
         }
+        if kind == "shrink" {
+            if let Some((old_id, old)) = &replacing {
+                self.shrink_one(job_id, idx, &cancel, &t, &fmt, old_id, old);
+            }
+            return;
+        }
         // a song you already have (from another list, or a file the scan found) isn't downloaded again
         if forced.is_none() {
             let kidx = self.lib.key_index();
@@ -555,7 +590,7 @@ impl Downloader {
             };
 
             // download: unknown-length candidates get a length filter inside the same yt-dlp call
-            let tmp = std::env::temp_dir().join(format!("dkfm-{}", fastrand::u64(..)));
+            let tmp = std::env::temp_dir().join(format!("{TMP_PREFIX}{}", fastrand::u64(..)));
             std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
             let result = (|| {
                 let mut picked: Option<(Cand, PathBuf)> = None;
@@ -624,15 +659,20 @@ impl Downloader {
                 if cancel.load(Ordering::Relaxed) {
                     return Err("Cancelled".into());
                 }
-                if std::fs::rename(&audio, &out_file).is_err() {
-                    std::fs::copy(&audio, &out_file).map_err(|e| e.to_string())?;
-                }
+                place(&audio, &out_file)?;
                 let yid = if pick.id.is_empty() { None } else { Some(pick.id.clone()) };
                 let ids = match &replacing {
                     // same type: the new file takes the old one's name, so it's the same song
-                    Some((_, old)) if same && std::fs::rename(&out_file, old).is_ok() => self.lib.add_files(std::slice::from_ref(old), |lt| apply_keys(lt, &t, yid.clone())),
-                    // FLAC for an M4A (or the old file is busy): the new song takes over the old
-                    // one's playlists, likes and plays, and the old file goes to the Recycle Bin
+                    Some((_, old)) if same => {
+                        if let Err(e) = std::fs::rename(&out_file, old) {
+                            // the old file is busy: it stays as it was (UPGRADE again later)
+                            let _ = std::fs::remove_file(&out_file);
+                            return Err(format!("Couldn't replace the old file: {e}"));
+                        }
+                        self.lib.add_files(std::slice::from_ref(old), |lt| apply_keys(lt, &t, yid.clone()))
+                    }
+                    // FLAC for an M4A: the new song takes over the old one's playlists, likes and
+                    // plays, and the old file goes to the Recycle Bin
                     Some((old_id, _)) => {
                         let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, yid.clone()));
                         if let Some(new_id) = ids.first().filter(|n| *n != old_id) {
@@ -670,11 +710,78 @@ impl Downloader {
 
     /// A finished song goes into the job's target playlist, if it has one. For a list of songs
     /// (a shared playlist) it goes in its place: after the nearest earlier song already there.
+    /// One song of a "shrink" job: its FLAC converted to `fmt` here (ffmpeg), tagged like a
+    /// download, put in place all at once, and the FLAC to the Recycle Bin.
+    #[allow(clippy::too_many_arguments)]
+    fn shrink_one(&self, job_id: &str, idx: usize, cancel: &Arc<AtomicBool>, t: &ITrack, fmt: &str, old_id: &str, old: &Path) {
+        self.with_track(job_id, cancel, idx, |jt| {
+            jt.status = TStatus::Tagging;
+            jt.progress = 50.0;
+        });
+        let tmp = std::env::temp_dir().join(format!("{TMP_PREFIX}{}", fastrand::u64(..)));
+        let r = (|| -> Result<Vec<String>, String> {
+            ytdlp::ensure()?;
+            let (ext, codec): (&str, &[&str]) = match fmt {
+                "standard" => ("m4a", &["-c:a", "aac", "-b:a", "128k"]),
+                "mp3-320" => ("mp3", &["-c:a", "libmp3lame", "-b:a", "320k"]),
+                "mp3-v0" => ("mp3", &["-c:a", "libmp3lame", "-q:a", "0"]),
+                _ => ("m4a", &["-c:a", "aac", "-b:a", "256k"]),
+            };
+            std::fs::create_dir_all(&tmp).map_err(|e| e.to_string())?;
+            let audio = tmp.join(format!("audio.{ext}"));
+            let out = ytdlp::command(&ytdlp::ffmpeg_path()).args(["-nostdin", "-loglevel", "error", "-y", "-i"]).arg(old).args(["-map", "0:a:0", "-vn"]).args(codec).arg(&audio).output().map_err(|e| format!("Couldn't start ffmpeg: {e}"))?;
+            if !out.status.success() || !audio.exists() {
+                return Err(format!("Converting failed: {}", String::from_utf8_lossy(&out.stderr).lines().last().unwrap_or("")));
+            }
+            if cancel.load(Ordering::Relaxed) {
+                return Err("Cancelled".into());
+            }
+            let lt = self.lib.track(old_id).ok_or("No longer in your library")?;
+            let cover = lt.cover.as_ref().and_then(|c| std::fs::read(self.lib.cover_path(c)).ok());
+            let yid = lt.youtube_id.clone();
+            let comment = format!("DK.FM · youtube:{}{}", yid.clone().unwrap_or_default(), lt.spotify_id.as_ref().map(|s| format!(" · spotify:{s}")).unwrap_or_default());
+            let album = if t.album.is_empty() { t.title.clone() } else { t.album.clone() };
+            write_tags(&audio, t, &album, &comment, yid.as_deref(), cover)?;
+            let dest = old.with_extension(ext);
+            if dest.exists() {
+                return Err(format!("{} is already there", dest.display()));
+            }
+            place(&audio, &dest)?;
+            let ids = self.lib.add_files(std::slice::from_ref(&dest), |x| apply_keys(x, t, yid.clone()));
+            if let Some(new_id) = ids.first().filter(|n| *n != old_id) {
+                for f in self.lib.merge_duplicates(new_id, &[old_id.to_string()]) {
+                    let _ = crate::system::trash(&f);
+                }
+            }
+            Ok(ids)
+        })();
+        let _ = std::fs::remove_dir_all(&tmp);
+        let cancelled = cancel.load(Ordering::Relaxed);
+        self.with_track(job_id, cancel, idx, |jt| match r {
+            Ok(ids) => {
+                jt.status = TStatus::Done;
+                jt.progress = 100.0;
+                jt.track_id = ids.first().cloned();
+            }
+            Err(e) => {
+                jt.status = if cancelled { TStatus::Cancelled } else { TStatus::Failed };
+                jt.error = Some(e);
+            }
+        });
+    }
+
     fn deliver(&self, job_id: &str, idx: usize, ids: &[String]) {
         let Some(id) = ids.first() else { return };
         let Some((pid, ordered)) = self.jobs.lock().iter().find(|j| j.id == job_id).and_then(|j| Some((j.target_playlist.clone()?, j.tracks.len() > 1))) else { return };
         if pid == LIKED {
-            self.lib.set_liked(&ids[..1], true);
+            // a Spotify like: as of when it was liked there, so Liked keeps Spotify's order
+            let at = self.jobs.lock().iter().find(|j| j.id == job_id).and_then(|j| j.tracks.get(idx)?.t.added_at);
+            match at {
+                Some(at) => {
+                    self.lib.set_liked_at(&[(id.clone(), at)]);
+                }
+                None => self.lib.set_liked(&ids[..1], true),
+            }
             return;
         }
         if !ordered {
@@ -707,12 +814,11 @@ impl Downloader {
         }
         let idx = self.lib.key_index();
         if col.url == sources::LIKED_URL {
-            // Liked Songs: the ones you have get ♥ (nothing is unliked here)
-            let ids: Vec<String> = col.tracks.iter().filter_map(|t| lookup(&idx, t).cloned()).collect();
-            let new: Vec<String> = { let d = self.lib.data.read(); ids.into_iter().filter(|id| !d.stats.get(id).is_some_and(|s| s.liked)).collect() };
-            if !new.is_empty() {
-                self.lib.set_liked(&new, true);
-            }
+            // Liked Songs: the ones you have get ♥ as of when you liked them on Spotify, so Liked
+            // has Spotify's order (nothing is unliked here)
+            let now = store::now_ms();
+            let likes: Vec<(String, f64)> = col.tracks.iter().enumerate().filter_map(|(n, t)| Some((lookup(&idx, t)?.clone(), t.added_at.unwrap_or(now - n as f64 * 1000.0)))).collect();
+            self.lib.set_liked_at(&likes);
             return;
         }
         let pid = format!("sp-{}-{}", col.kind, col.id);
@@ -805,6 +911,49 @@ impl Downloader {
             self.mirror(&col);
         }
         Ok(n)
+    }
+}
+
+/// Download work folders in the temp folder (`dkfm-<number>` before 2.0.34).
+const TMP_PREFIX: &str = "dkfm-dl-";
+
+/// `path` is inside the folder `dir`.
+fn in_folder(path: &str, dir: &str) -> bool {
+    let (p, d) = (path.replace('/', "\\").to_lowercase(), dir.replace('/', "\\").to_lowercase());
+    !d.is_empty() && p.starts_with(&format!("{}\\", d.trim_end_matches('\\')))
+}
+
+/// Puts a finished download at `dest` all at once: closing DK.FM (or a power cut) part way
+/// never leaves half a song there. Across drives it's copied next to `dest` first, under a name
+/// no music app reads, then renamed.
+fn place(src: &Path, dest: &Path) -> Result<(), String> {
+    if std::fs::rename(src, dest).is_ok() {
+        return Ok(());
+    }
+    let part = PathBuf::from(format!("{}.dkfm-part", dest.display()));
+    let r = std::fs::copy(src, &part).and_then(|_| std::fs::File::open(&part)?.sync_all()).and_then(|_| std::fs::rename(&part, dest));
+    if r.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    r.map_err(|e| e.to_string())
+}
+
+/// What a download closed part way left behind: copies not finished (`.dkfm-part`), upgrades
+/// not put in place (`.dkfm-new.`), and work folders in the temp folder.
+fn tidy_unfinished(dir: &Path) {
+    let old = |p: &Path| p.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|e| e.as_secs() > 3600);
+    for e in walkdir::WalkDir::new(dir).max_depth(12).into_iter().flatten() {
+        let n = e.file_name().to_string_lossy();
+        if e.file_type().is_file() && (n.ends_with(".dkfm-part") || n.contains(".dkfm-new.")) && old(e.path()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+    for e in std::fs::read_dir(std::env::temp_dir()).into_iter().flatten().flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        let ours = n.strip_prefix(TMP_PREFIX).or_else(|| n.strip_prefix("dkfm-")).is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()));
+        if ours && e.path().is_dir() && old(&e.path()) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
 }
 
@@ -1133,6 +1282,96 @@ mod tests {
         drop(d);
         lib.delete_playlist(&pid);
         lib.flush();
+    }
+
+    /// A real FLAC made smaller by ffmpeg, nothing downloaded: DKFM_TEST_FLAC=<a FLAC DK.FM
+    /// downloaded> and DKFM_TEST_BIN=<a DK.FM data folder's bin> (cargo test -- --ignored shrinks).
+    #[test]
+    #[ignore]
+    fn shrinks_a_flac_download_here() {
+        let (src, bin) = (PathBuf::from(std::env::var("DKFM_TEST_FLAC").unwrap()), PathBuf::from(std::env::var("DKFM_TEST_BIN").unwrap()));
+        let (_profile, dir) = crate::store::test_profile("shrinktest");
+        for e in walkdir::WalkDir::new(&bin).into_iter().flatten().filter(|e| e.file_type().is_file()) {
+            let to = dir.join("bin").join(e.path().strip_prefix(&bin).unwrap());
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(e.path(), to).unwrap();
+        }
+        let mix = dir.join("Music").join("Mix");
+        std::fs::create_dir_all(&mix).unwrap();
+        let flac = mix.join("Song.flac");
+        std::fs::copy(&src, &flac).unwrap();
+        let lib = Library::load();
+        let old = lib.add_files(std::slice::from_ref(&flac), |_| {}).remove(0);
+        assert!(lib.track(&old).unwrap().youtube_id.is_some(), "use a FLAC DK.FM downloaded");
+        lib.set_liked(std::slice::from_ref(&old), true);
+        let liked_at = lib.data.read().stats[&old].liked_at;
+        let pid = lib.new_playlist("Mine", vec![old.clone()]);
+        let settings = Arc::new(Mutex::new(Settings { download_dir: dir.join("Music").display().to_string(), download_format: "high".into(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        assert_eq!(dl.shrinkable("high"), vec![old.clone()]);
+        assert!(dl.shrinkable("lossless").is_empty());
+        let job = dl.shrink(std::slice::from_ref(&old));
+        let t0 = std::time::Instant::now();
+        while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(120) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let jt = dl.jobs.lock().iter().find(|j| j.id == job).unwrap().tracks[0].clone();
+        assert_eq!(jt.status, TStatus::Done, "{:?}", jt.error);
+        let new = jt.track_id.unwrap();
+        let d = lib.data.read();
+        let t = &d.tracks[&new];
+        assert!(t.path.ends_with("Song.m4a") && Path::new(&t.path).exists() && !flac.exists() && !d.tracks.contains_key(&old));
+        // the same song: its playlist, its like (and when), its YouTube id; a third of the size or less
+        assert_eq!(d.playlists.iter().find(|p| p.id == pid).unwrap().track_ids, vec![new.clone()]);
+        assert!(d.stats[&new].liked && d.stats[&new].liked_at == liked_at);
+        assert_eq!(t.youtube_id, lib_yid(&src));
+        let (a, b) = (std::fs::metadata(&src).unwrap().len(), std::fs::metadata(&t.path).unwrap().len());
+        assert!(b * 2 < a, "{a} -> {b}");
+        assert!(t.bitrate.is_some_and(|k| (200..=300).contains(&k)), "{:?}", t.bitrate);
+        eprintln!("{} KB -> {} KB, {:?} kbps", a / 1024, b / 1024, t.bitrate);
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn lib_yid(p: &Path) -> Option<String> {
+        use lofty::file::TaggedFileExt;
+        let f = lofty::read_from_path(p).ok()?;
+        crate::library::ids_from_tag(f.primary_tag().or_else(|| f.first_tag())?).1
+    }
+
+    #[test]
+    fn finished_downloads_arrive_whole_and_leftovers_are_tidied() {
+        let dir = std::env::temp_dir().join(format!("dkfm-place-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Mix")).unwrap();
+        let src = dir.join("audio.flac");
+        std::fs::write(&src, b"song").unwrap();
+        let dest = dir.join("Mix").join("Song.flac");
+        place(&src, &dest).unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), b"song");
+        assert!(!src.exists());
+        // half-finished files from a download that was closed: never read as songs, then removed
+        let part = dir.join("Mix").join("Other.flac.dkfm-part");
+        let new = dir.join("Mix").join("Old.dkfm-new.flac");
+        std::fs::write(&part, b"half").unwrap();
+        std::fs::write(&new, b"half").unwrap();
+        assert!(!crate::library::is_audio(&part) && !crate::library::is_audio(&new));
+        let hour_ago = std::time::SystemTime::now() - Duration::from_secs(7200);
+        for f in [&part, &new] {
+            std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
+        }
+        tidy_unfinished(&dir);
+        assert!(!part.exists() && !new.exists() && dest.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_songs_in_the_download_folder_are_upgraded() {
+        assert!(in_folder("C:\\Users\\A\\Music\\DK.FM\\OG\\a.m4a", "C:\\Users\\A\\Music\\DK.FM"));
+        assert!(in_folder("c:/users/a/music/dk.fm/a.m4a", "C:\\Users\\A\\Music\\DK.FM\\"));
+        assert!(!in_folder("C:\\Users\\A\\Music\\GOAT\\a [yFAjVaxORww].m4a", "C:\\Users\\A\\Music\\DK.FM"));
+        assert!(!in_folder("C:\\Users\\A\\Music\\DK.FM2\\a.m4a", "C:\\Users\\A\\Music\\DK.FM"));
+        assert!(!in_folder("C:\\a.m4a", ""));
     }
 
     #[test]

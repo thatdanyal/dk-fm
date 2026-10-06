@@ -90,6 +90,7 @@ fn d_pixel() -> String { "pixel".into() }
 fn d_comfy() -> String { "comfortable".into() }
 fn d_all() -> String { "all".into() }
 fn d_daily() -> String { "daily".into() }
+fn d_balanced() -> String { "balanced".into() }
 fn d_played() -> String { "played".into() }
 /// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)
 fn d_hidden_tabs() -> Vec<String> { ["recent", "top"].map(String::from).to_vec() }
@@ -150,6 +151,8 @@ pub struct Session {
 pub struct Settings {
     #[serde(default = "d_theme")] pub theme: String,
     #[serde(default)] pub accent: Option<String>,
+    /// THEME > Album Cover: how much the cover colours DK.FM ("subtle" | "balanced" | "bold")
+    #[serde(default = "d_balanced")] pub cover_strength: String,
     #[serde(default)] pub scanlines: bool,
     #[serde(default = "d_true")] pub glow: bool,
     #[serde(default)] pub music_folders: Vec<String>,
@@ -211,8 +214,6 @@ pub struct Settings {
     #[serde(default)] pub layouts: Vec<NamedLayout>,
     /// "template" (docked panels that snap together) or "free" (every panel at a pixel position)
     #[serde(default = "d_template")] pub layout_mode: String,
-    /// study mode's own layout (lyrics with the deck below, unless you arrange it differently)
-    #[serde(default)] pub study_dock: Option<Value>,
     /// free layout: panel -> [x, y, width, height] in pixels from the top-left of the panel area
     #[serde(default)] pub free_panels: std::collections::BTreeMap<String, [f32; 4]>,
     #[serde(default = "d_columns")] pub columns: Vec<String>,
@@ -396,6 +397,8 @@ impl Playlist {
 pub struct Stat {
     #[serde(default)] pub plays: u32,
     #[serde(default)] pub liked: bool,
+    /// when it was liked (ms; for Spotify's Liked Songs, when you liked it there): Liked's order
+    #[serde(default, skip_serializing_if = "is_zero")] pub liked_at: f64,
     #[serde(default)] pub last_played: f64,
     #[serde(default)] pub skips: u32,
     /// "Don't play this": skipped by shuffle, playlists and radio

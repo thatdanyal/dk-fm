@@ -9,10 +9,10 @@ use eframe::egui::{self, Align2, Id, LayerId, Order, Pos2, Rect};
 
 /// Bump with every update that adds steps: people who update are offered a tour of just the
 /// steps newer than the last tour they were offered.
-pub const TOUR_VERSION: u32 = 2;
+pub const TOUR_VERSION: u32 = 3;
 
 /// (what it points at, title, explanation, the TOUR_VERSION that added it)
-pub const STEPS: [(&str, &str, &str, u32); 15] = [
+pub const STEPS: [(&str, &str, &str, u32); 17] = [
     ("homepanel", "HOME", "Home, Discover, Songs, Albums, Artists, Recent, Top and Stats have their own HOME tab, next to LIBRARY (your playlists).", 2),
     ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
     ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
@@ -24,8 +24,10 @@ pub const STEPS: [(&str, &str, &str, u32); 15] = [
     ("stats", "STATS", "Your listening: top songs, artists and albums, how long you listened and when. Play counts live here, out of the way while you listen.", 1),
     ("scope", "VISUALIZER", "The scope: click it (or press V) to switch between bars, oscilloscope, VU meters and a waterfall. It starts off; pick a style to turn it on.", 1),
     ("eq", "EQUALIZER", "Shape the sound: pick a preset or drag the bands. Turn it on with the EQ switch (it starts flat and off).", 1),
-    ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. STUDY shows just the lyrics and the deck.", 1),
+    ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. FULL SCREEN shows the cover and the lyrics big.", 1),
     ("theme", "THEMES", "Change the colours here, or make your own in Settings > Look.", 1),
+    ("theme", "ALBUM COVER THEME", "THEME > Album Cover: DK.FM's colours follow the cover of the song playing, toned down so they always look good. Settings > Look sets how much.", 3),
+    ("fullscreen", "FULL SCREEN", "The cover, the lyrics and the controls, big (F11 also opens it; Esc leaves).", 3),
     ("refresh", "REFRESH", "↻ checks for a DK.FM update and syncs your Spotify playlists right now.", 2),
     ("settings", "SETTINGS", "Settings has a search box: type what you're looking for, like \"quality\" or \"spotify\".", 2),
 ];

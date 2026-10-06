@@ -275,6 +275,7 @@ fn row(ui: &mut Ui, pal: &theme::Pal, label: &str, f: impl FnOnce(&mut Ui)) {
 /// Everything Settings has, for its search box: (tab, setting, other words people might type).
 const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Look, "Theme", "colors colours dark light red retro skin"),
+    (SetTab::Look, "Album Cover theme: colours from the song playing", "adaptive artwork cover match dynamic influence"),
     (SetTab::Look, "Accent color", "colour highlight"),
     (SetTab::Look, "Font, text size and zoom", "pixel letters bigger smaller scale"),
     (SetTab::Look, "Song lists: compact or comfortable", "density rows spacing"),
@@ -284,7 +285,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Look, "Theme editor and your own themes", "custom make"),
     (SetTab::Layouts, "Layout style: template or free (per pixel)", "panels move arrange"),
     (SetTab::Layouts, "Panel layouts: save, switch, reset", "default"),
-    (SetTab::Layouts, "Study mode", "focus lyrics"),
+    (SetTab::Playback, "Full-screen now playing", "study focus lyrics big cover f11"),
     (SetTab::Lists, "Song list columns", "year genre bitrate added album"),
     (SetTab::Lists, "Default sort", "order"),
     (SetTab::Lists, "When DK.FM starts: open to", "start screen"),
@@ -300,7 +301,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Discover, "Recommended songs under each playlist", "suggestions"),
     (SetTab::Library, "Music folders", "scan local files add folder"),
     (SetTab::Downloads, "Download folder", "where saved location path"),
-    (SetTab::Downloads, "Sound quality", "lossless flac high standard bitrate audio better quality mp3 upgrade"),
+    (SetTab::Downloads, "Sound quality", "lossless flac high standard bitrate audio better quality mp3 upgrade smaller shrink space convert"),
     (SetTab::Downloads, "Parallel downloads", "speed faster at once"),
     (SetTab::Downloads, "Auto-sync imported playlists", "spotify update check hours"),
     (SetTab::Downloads, "File names", "pattern rename"),
@@ -481,6 +482,16 @@ fn look(app: &mut App, ui: &mut Ui) {
         app.setui.draft = None;
         app.edit_settings(|s| s.theme = k);
         app.set_theme(ui.ctx());
+    }
+    if s.theme == super::covertheme::KEY {
+        ui.add_space(6.0);
+        row(ui, &pal, "Cover influence", |ui| {
+            let opts: Vec<(String, &str)> = super::covertheme::STRENGTHS.iter().map(|x| (x.0.to_string(), x.1)).collect();
+            if let Some(v) = choice(ui, &pal, &s.cover_strength, &opts) {
+                app.edit_settings(|s| s.cover_strength = v);
+            }
+        });
+        dim(ui, &pal, "DK.FM takes its colours from the cover of the song playing, toned down so they always look good: accents follow the cover, backgrounds and text only take a tint. Grey and black-and-white covers keep Red Retro.");
     }
     ui.add_space(4.0);
     if button(ui, &pal, "SHARE CURRENT THEME…", false, true).on_hover_text("Copy a code for this theme (with your accent colour) to send to a friend").clicked() {
@@ -777,23 +788,6 @@ fn layouts(app: &mut App, ui: &mut Ui) {
         }
     });
     dim(ui, &pal, "In a small window (not maximized), panels that don't fit fold into tabs for the time being; the layout you set comes back at full size.");
-    spacer(ui);
-    caption(ui, &pal, "STUDY MODE");
-    dim(ui, &pal, "STUDY in the title bar (or Ctrl+Shift+S) shows only what helps you focus, with the deck along the bottom. Pick what it shows, or arrange it yourself with LAYOUT while it's on: DK.FM remembers it.");
-    ui.horizontal_wrapped(|ui| {
-        for (name, panels) in super::STUDY_PRESETS {
-            if button(ui, &pal, name, false, true).clicked() {
-                let d = super::study_preset(panels);
-                let v = serde_json::to_value(&d).ok();
-                app.edit_settings(|s| s.study_dock = v);
-                if app.study.is_some() {
-                    app.toggle_study();
-                }
-                app.toggle_study();
-                CLOSE.store(true, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    });
     spacer(ui);
     caption(ui, &pal, "SAVE THE CURRENT LAYOUT");
     ui.horizontal(|ui| {
@@ -1241,15 +1235,33 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         dim(ui, &pal, "Every song you downloaded is already in this quality (or better).");
     } else {
         let per = if fmt_now == "lossless" { 30.0 } else { 8.0 };
-        let gb = up.len() as f32 * per / 1024.0;
+        let size = gb_text(up.len() as f64 * per / 1024.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(format!("{} song{} you downloaded {} in a lower quality.", up.len(), if up.len() == 1 { "" } else { "s" }, if up.len() == 1 { "is" } else { "are" })).color(pal.text));
-            if button(ui, &pal, &format!("UPGRADE TO {}", crate::downloader::quality_label(&fmt_now)), true, true).on_hover_text(format!("Downloads them again in this quality, in the background (about {gb:.1} GB). Each keeps its playlists, likes and plays; old files go to the Recycle Bin.")).clicked() {
+            if button(ui, &pal, &format!("UPGRADE TO {}", crate::downloader::quality_label(&fmt_now)), true, true).on_hover_text(format!("Downloads them again in this quality, in the background (about {size}). Each keeps its playlists, likes and plays; old files go to the Recycle Bin.")).clicked() {
                 app.dl.upgrade(&up);
                 app.toast(format!("Upgrading {} songs: see DOWNLOADS for progress", up.len()));
             }
         });
-        dim(ui, &pal, &format!("About {gb:.1} GB, in the background. Songs that came from your own files (not downloaded by DK.FM) stay as they are."));
+        dim(ui, &pal, &format!("About {size}, in the background. Songs that came from your own files (not downloaded by DK.FM) stay as they are."));
+    }
+    // FLACs from LOSSLESS, now that a smaller quality is set: made smaller here, same sound
+    let small: Vec<String> = app.dl.shrinkable(&fmt_now).into_iter().filter(|id| Some(id) != cur.as_ref()).collect();
+    let shrinking = app.dl.jobs.lock().iter().any(|j| j.id == "shrink-quality" && j.tracks.iter().any(|t| t.status.active()));
+    if shrinking {
+        dim(ui, &pal, "Making your FLAC songs smaller: see DOWNLOADS for progress.");
+    } else if !small.is_empty() {
+        let kbps = match fmt_now.as_str() { "standard" => 128.0, "mp3-320" => 320.0, "mp3-v0" => 245.0, _ => 256.0 };
+        let freed: f64 = { let d = app.lib.data.read(); small.iter().filter_map(|id| d.tracks.get(id)).map(|t| t.duration * (t.bitrate.unwrap_or(900) as f64 - kbps).max(0.0) * 1000.0 / 8.0).sum::<f64>() / 1e9 };
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("{} song{} from LOSSLESS {} FLAC.", small.len(), if small.len() == 1 { "" } else { "s" }, if small.len() == 1 { "is" } else { "are" })).color(pal.text));
+            if button(ui, &pal, &format!("MAKE THEM {} (FREES ABOUT {})", crate::downloader::quality_label(&fmt_now), gb_text(freed).to_uppercase()), true, true).on_hover_text("Converted on this PC in a few minutes, nothing downloaded. They sound the same: YouTube's audio isn't lossless, so the FLAC holds exactly what this quality keeps. Playlists, likes and plays stay; the FLACs go to the Recycle Bin.").clicked() {
+                app.dl.shrink(&small);
+                app.toast(format!("Making {} songs smaller: see DOWNLOADS for progress", small.len()));
+            }
+        });
+        dim(ui, &pal, "Converted on this PC, nothing downloaded, and they sound the same (YouTube's audio isn't lossless).");
     }
     let mut conc = app.settings.lock().download_concurrency;
     row(ui, &pal, "Parallel downloads", |ui| {
@@ -1741,6 +1753,11 @@ fn about(app: &mut App, ui: &mut Ui) {
 }
 
 /// Left-aligned text in a fixed-width cell (cut off with … when too long).
+/// "7.4 GB", or "120 MB" under a gigabyte.
+fn gb_text(gb: f64) -> String {
+    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", (gb * 1024.0).max(1.0)) }
+}
+
 fn cell(ui: &mut Ui, w: f32, text: egui::RichText) {
     ui.allocate_ui_with_layout(Vec2::new(w, 24.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.set_min_width(w);

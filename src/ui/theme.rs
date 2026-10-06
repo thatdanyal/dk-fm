@@ -37,6 +37,7 @@ pub const THEMES: &[(&str, &str)] = &[
     ("ice", "Ice"),
     ("mono", "Mono"),
     ("paper", "Paper"),
+    (super::covertheme::KEY, "Album Cover"),
 ];
 
 pub fn palette(name: &str, accent: Option<&str>) -> Pal {
@@ -129,6 +130,10 @@ pub fn all_themes(s: &Settings) -> Vec<(String, String)> {
 }
 
 pub fn theme_pal(s: &Settings, key: &str) -> Pal {
+    // Album Cover changes with every song: shown with a sample cover's colours
+    if key == super::covertheme::KEY {
+        return super::covertheme::tint(&palette(key, None), (Color32::from_rgb(150, 70, 230), Some(Color32::from_rgb(40, 210, 190))), 0.65);
+    }
     match key.strip_prefix(CUSTOM).and_then(|n| s.custom_themes.iter().find(|c| c.name == n)) {
         Some(c) => Pal::from_custom(c),
         None => palette(key, None),

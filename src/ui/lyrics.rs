@@ -114,7 +114,8 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
             // (no fading, no greyed-out line left behind); LEAD seconds before that, the text
             // glides (eased) so the next line arrives centred exactly when it begins. Every line
             // is the same size: nothing jumps or re-wraps.
-            let pos = app.player.status().position;
+            let status = app.player.status();
+            let pos = status.position;
             let active = lines.iter().rposition(|(t, _)| *t <= pos);
             let next_at = lines.get(active.map(|a| a + 1).unwrap_or(0)).map(|l| l.0);
             let until = next_at.map(|n| n - pos).unwrap_or(f64::MAX);
@@ -151,8 +152,9 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                 }
             }
             // wake up in time for the next glide, and to light the next line the moment it starts
-            // (none after the last line: `until` is f64::MAX there, far too long for a timer)
-            if next_at.is_some() {
+            // (none after the last line: `until` is f64::MAX there, far too long for a timer; none
+            // while paused: the song isn't moving, so it would only wake up again and again)
+            if next_at.is_some() && status.playing {
                 let wait = if until > LEAD { until - LEAD } else { until };
                 ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait.clamp(0.01, 3600.0)));
             }

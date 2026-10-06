@@ -4,6 +4,7 @@
 pub mod addsongs;
 pub mod browser;
 pub mod cjk;
+pub mod covertheme;
 pub mod deck;
 pub mod dupes;
 pub mod eqpanel;
@@ -150,12 +151,12 @@ pub struct App {
     /// the newest undoable change
     layout_undo: Option<(DockState<Tab>, std::collections::BTreeMap<String, [f32; 4]>, String)>,
     undo_is_layout: bool,
-    /// study mode: your normal layout, kept while the study layout is shown
-    pub study: Option<DockState<Tab>>,
     /// the guided tour's step, and where the parts it points at were drawn this frame
     pub tour: Option<usize>,
     /// the tour shows only steps added after this tour version (0 = all of them)
     pub tour_from: u32,
+    /// THEME > Album Cover: colours from the song playing
+    pub album: covertheme::State,
     /// frames in a row that panicked (see `recover`)
     panics: u32,
     /// the title bar's ↻ is checking for updates and syncing
@@ -304,29 +305,6 @@ pub fn default_dock() -> DockState<Tab> {
     d
 }
 
-/// Study mode: the lyrics big, the deck along the bottom.
-pub fn study_dock() -> DockState<Tab> {
-    study_preset(&[Tab::Lyrics])
-}
-
-/// Study mode choices in Settings > Layouts: (name, panels above the deck).
-pub const STUDY_PRESETS: [(&str, &[Tab]); 4] = [("LYRICS", &[Tab::Lyrics]), ("LYRICS + QUEUE", &[Tab::Lyrics, Tab::Queue]), ("VISUALIZER", &[Tab::Scope]), ("JUST THE DECK", &[])];
-
-pub fn study_preset(panels: &[Tab]) -> DockState<Tab> {
-    match panels {
-        [] => DockState::new(vec![Tab::Deck]),
-        [first, rest @ ..] => {
-            let mut d = DockState::new(vec![*first]);
-            let s = d.main_surface_mut();
-            let [top, _deck] = s.split_below(NodeIndex::root(), 0.77, vec![Tab::Deck]);
-            let mut at = top;
-            for t in rest {
-                at = s.split_right(at, 0.6, vec![*t])[0];
-            }
-            d
-        }
-    }
-}
 
 /// Smallest comfortable size of a panel.
 fn min_size(tab: Tab) -> Vec2 {
@@ -522,11 +500,11 @@ impl App {
             previews: Default::default(),
             layout_undo: None,
             undo_is_layout: false,
-            study: None,
             tour: None,
             marks: Default::default(),
             panics: 0,
             tour_from: 0,
+            album: Default::default(),
             refreshing: Default::default(),
         };
         app.apply_look(&cc.egui_ctx);
@@ -606,11 +584,8 @@ impl App {
         }
     }
 
-    /// Use this layout (and save it), leaving study mode.
+    /// Use this layout (and save it).
     pub fn set_dock(&mut self, d: DockState<Tab>) {
-        if self.study.is_some() {
-            self.toggle_study();
-        }
         self.dock = d;
         self.save_dock();
     }
@@ -649,6 +624,7 @@ impl App {
         let (k, pal) = { let s = self.settings.lock(); (s.theme.clone(), theme::resolve(&s)) };
         self.theme_key = k;
         self.pal = pal;
+        self.album.reset();
         theme::apply(ctx, &self.pal);
         self.scope.invalidate();
         self.settings_dirty.store(true, Ordering::Relaxed);
@@ -725,9 +701,6 @@ impl App {
         let saved = self.settings.lock().layouts.iter().find(|l| l.name == name).and_then(|l| load_dock(&l.dock));
         match saved.or_else(|| Self::preset(name)) {
             Some(d) => {
-                if self.study.is_some() {
-                    self.toggle_study();
-                }
                 self.remember_layout(&format!("Switched to the \"{name}\" layout"), true);
                 self.dock = d;
                 self.save_dock();
@@ -828,11 +801,9 @@ impl App {
 
     pub fn reset_layout(&mut self) {
         self.remember_layout("Layout reset", true);
-        self.dock = if self.study.is_some() { study_dock() } else { default_dock() };
+        self.dock = default_dock();
         self.save_dock();
-        if self.study.is_none() {
-            self.edit_settings(|s| s.free_panels.clear());
-        }
+        self.edit_settings(|s| s.free_panels.clear());
     }
 
     /// LAYOUT (edit mode) on / off; turning it on keeps the layout for UNDO.
@@ -843,25 +814,6 @@ impl App {
         }
     }
 
-    /// Study mode: just the study layout (lyrics and the deck, unless you chose otherwise); your
-    /// normal layout comes back when you leave it.
-    pub fn toggle_study(&mut self) {
-        match self.study.take() {
-            Some(normal) => {
-                self.dock = normal;
-                self.toast("Study mode off");
-            }
-            None => {
-                self.nowplaying = false;
-                if let (true, Some(ctx)) = (self.mini, self.covers.ctx.clone()) {
-                    self.toggle_mini(&ctx);
-                }
-                let sd = self.settings.lock().study_dock.as_ref().and_then(load_dock).unwrap_or_else(study_dock);
-                self.study = Some(std::mem::replace(&mut self.dock, sd));
-                self.toast("Study mode: change what it shows with LAYOUT, or in Settings > Layouts");
-            }
-        }
-    }
 
     fn layout_banner(&mut self, ctx: &egui::Context, text: &str) {
         egui::Area::new(Id::new("layout-banner")).anchor(Align2::CENTER_BOTTOM, [0.0, -14.0]).order(Order::Foreground).show(ctx, |ui| {
@@ -884,12 +836,7 @@ impl App {
 
     fn save_dock(&self) {
         let v = serde_json::to_value(&self.dock).ok();
-        // in study mode the study layout is what you're arranging
-        if self.study.is_some() {
-            self.edit_settings(|s| s.study_dock = v);
-        } else {
-            self.edit_settings(|s| s.dock = v);
-        }
+        self.edit_settings(|s| s.dock = v);
     }
 
     pub fn toggle_mini(&mut self, ctx: &egui::Context) {
@@ -958,8 +905,12 @@ impl App {
                             self.toggle_layout_edit();
                         }
                     }
-                    if room(ui, 300.0 + later) && tb_button(ui, &pal, "STUDY", self.study.is_some()).on_hover_text("Study mode: just the lyrics and the deck (Ctrl+Shift+S)").clicked() {
-                        self.toggle_study();
+                    if room(ui, 300.0 + later) {
+                        let r = tb_button(ui, &pal, "FULL SCREEN", self.nowplaying);
+                        self.mark("fullscreen", r.rect);
+                        if r.on_hover_text("Full-screen now playing: the cover, the lyrics and the controls (F11; Esc leaves)").clicked() {
+                            self.nowplaying = !self.nowplaying && !self.mini;
+                        }
                     }
                     let r = tb_button(ui, &pal, "PANELS", false);
                     let pid = ui.make_persistent_id("panels-menu");
@@ -1138,7 +1089,6 @@ impl App {
             "palette" => self.palette = if self.palette.is_some() { None } else { Some(palette::PaletteState::default()) },
             "settings" => self.modal = Some(Modal::Settings(settings::SetTab::Look)),
             "layout" => self.toggle_layout_edit(),
-            "study" => self.toggle_study(),
             "mini" => self.toggle_mini(ctx),
             "search" => {
                 // filter the playlist open in LIBRARY
@@ -1502,6 +1452,7 @@ impl App {
         self.frames += 1;
         self.scope.drawn = false;
         self.check_alphabets(ctx);
+        covertheme::update(self, ctx);
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
         }
@@ -1562,7 +1513,7 @@ impl App {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.panel).inner_margin(egui::Margin::same(6))).show(ctx, |ui| deck::show_mini(self, ui));
         } else if self.nowplaying {
             egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg)).show(ctx, |ui| nowplaying::show(self, ui));
-        } else if self.settings.lock().layout_mode == "free" && self.study.is_none() {
+        } else if self.settings.lock().layout_mode == "free" {
             let area = egui::CentralPanel::default().frame(egui::Frame::new().fill(self.pal.bg).inner_margin(egui::Margin::same(4))).show(ctx, |ui| ui.max_rect()).inner;
             freelayout::show(self, ctx, area);
             if self.layout_edit {

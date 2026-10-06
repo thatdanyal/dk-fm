@@ -36,6 +36,10 @@ pub fn ids_from_tag(tag: &lofty::tag::Tag) -> (Option<String>, Option<String>) {
 }
 
 pub fn is_audio(p: &Path) -> bool {
+    // a quality upgrade that wasn't put in place yet (see downloader::place)
+    if p.file_name().is_some_and(|n| n.to_string_lossy().contains(".dkfm-new.")) {
+        return false;
+    }
     p.extension().and_then(|e| e.to_str()).map(|e| AUDIO_EXT.contains(&e.to_ascii_lowercase().as_str())).unwrap_or(false)
 }
 
@@ -658,11 +662,18 @@ impl Library {
                 k.spotify_id = k.spotify_id.take().or(t.spotify_id);
                 k.youtube_id = k.youtube_id.take().or(t.youtube_id);
                 k.source_key = k.source_key.take().or(t.source_key);
+                // a new file for the same song (a sound quality change) keeps the date it came
+                if t.added_at > 0.0 && (k.added_at == 0.0 || t.added_at < k.added_at) {
+                    k.added_at = t.added_at;
+                }
             }
             if let Some(s) = d.stats.remove(o) {
                 let k = d.stats.entry(keep.to_string()).or_default();
                 k.plays += s.plays;
                 k.skips += s.skips;
+                if s.liked && (!k.liked || k.liked_at == 0.0 || (s.liked_at > 0.0 && s.liked_at < k.liked_at)) {
+                    k.liked_at = s.liked_at;
+                }
                 k.liked |= s.liked;
                 k.last_played = k.last_played.max(s.last_played);
             }
@@ -693,7 +704,12 @@ impl Library {
             }
             pls.iter().flat_map(|p| p.track_ids.iter().cloned()).collect()
         };
-        self.set_liked(&ids, true);
+        // the playlist is newest first: one second apart keeps that order until the next sync
+        // brings the real dates
+        let now = store::now_ms();
+        let had: std::collections::HashSet<String> = { let d = self.data.read(); ids.iter().filter(|i| d.stats.get(*i).is_some_and(|s| s.liked)).cloned().collect() };
+        let at: Vec<(String, f64)> = ids.iter().enumerate().filter(|(_, i)| !had.contains(*i)).map(|(n, i)| (i.clone(), now - n as f64 * 1000.0)).collect();
+        self.set_liked_at(&at);
         self.data.write().playlists.retain(|p| !liked(p));
         self.changed();
         Some(ids.len())
@@ -701,11 +717,39 @@ impl Library {
 
     pub fn set_liked(&self, ids: &[String], liked: bool) {
         let mut d = self.data.write();
+        let now = store::now_ms();
         for id in ids {
-            d.stats.entry(id.clone()).or_default().liked = liked;
+            let s = d.stats.entry(id.clone()).or_default();
+            if liked && !s.liked {
+                s.liked_at = now;
+            }
+            s.liked = liked;
         }
         drop(d);
         self.changed();
+    }
+
+    /// Like these songs as of these times (Spotify's Liked Songs keep the order they have there).
+    /// Returns whether anything changed.
+    pub fn set_liked_at(&self, likes: &[(String, f64)]) -> bool {
+        let mut d = self.data.write();
+        let mut changed = false;
+        for (id, at) in likes {
+            if !d.tracks.contains_key(id) {
+                continue;
+            }
+            let s = d.stats.entry(id.clone()).or_default();
+            if !s.liked || (s.liked_at - at).abs() > 1000.0 {
+                s.liked = true;
+                s.liked_at = *at;
+                changed = true;
+            }
+        }
+        drop(d);
+        if changed {
+            self.changed();
+        }
+        changed
     }
 
     pub fn upsert_playlist(&self, pl: Playlist) -> String {
@@ -1030,9 +1074,15 @@ mod tests {
         assert_eq!(lib.merge_spotify_liked(), Some(2));
         let d = lib.data.read();
         assert!(d.stats["a"].liked && d.stats["b"].liked);
+        // Liked keeps Spotify's order (newest first): "a" was liked after "b"
+        assert!(d.stats["a"].liked_at > d.stats["b"].liked_at);
         assert_eq!(d.playlists.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["mine"]);
         drop(d);
         assert_eq!(lib.merge_spotify_liked(), None);
+        // a sync brings Spotify's real dates; songs you don't have are left alone
+        assert!(lib.set_liked_at(&[("b".into(), 2e12), ("zz".into(), 1e12)]));
+        assert!(!lib.set_liked_at(&[("b".into(), 2e12)]));
+        assert!(lib.data.read().stats["b"].liked_at == 2e12 && !lib.data.read().stats.contains_key("zz"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

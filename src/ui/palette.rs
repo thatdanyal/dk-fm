@@ -51,7 +51,6 @@ enum Act {
     ResetLayout,
     Panel(Tab),
     Tour,
-    Study,
 }
 
 struct Item {
@@ -100,7 +99,6 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         ("Shazam: name the song playing on this PC".into(), "shazam identify recognize listen what song is this whats playing", "♫", Act::Listen),
         ("Find music online (songs, artists, albums, podcasts…)".into(), "search youtube web download get new song artist album playlist podcast audiobook profile clean explicit live instrumental version", "🌐", Act::View(View::Web)),
         ("Take the tour".into(), "tutorial help guide how to features walkthrough instructions", "💡", Act::Tour),
-        (format!("Study mode: {}", if app.study.is_some() { "on > off" } else { "off > on" }), "focus study lyrics deck minimal", "📖", Act::Study),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
         ("Sync all imported playlists now".into(), "update refresh spotify", "🔄", Act::SyncAll),
         ("Open a playlist file from a friend (.dkfm)…".into(), "share shared import friend code", "📂", Act::OpenShare),
@@ -210,7 +208,6 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         Act::View(v) => app.browser.set_view(v),
         Act::Listen => super::websearch::listen(app, ctx),
         Act::Tour => super::tour::start(app),
-        Act::Study => app.toggle_study(),
         Act::Import(u) => {
             app.browser.set_view(View::Import);
             super::import::fetch_link(app, ctx, u);

@@ -370,7 +370,8 @@ pub fn fit_dock(dock: &DockState<Tab>, area: Vec2) -> Option<DockState<Tab>> {
 impl App {
     pub fn new(cc: &eframe::CreationContext, lib: Arc<Library>, player: Arc<Player>, dl: Arc<Downloader>, watcher: Arc<FolderWatcher>, settings: Arc<Mutex<Settings>>, settings_dirty: Arc<AtomicBool>, hidden: bool) -> Self {
         // (a background thread: deleting old previews mustn't slow the start)
-        std::thread::spawn(preview::clear_old);
+        let covers = lib.cover_path("");
+        std::thread::spawn(move || preview::clear_old(covers));
         let (tkey, pal, dock_json, start) = {
             let s = settings.lock();
             lib.private.store(s.private_listening && s.keep_private, Ordering::Relaxed);

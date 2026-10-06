@@ -344,7 +344,13 @@ impl Library {
             if let Some(mut t) = self.read_track(p) {
                 extra(&mut t);
                 ids.push(t.id.clone());
-                merge_track(&mut self.data.write().tracks, t);
+                let keys = keys_of(&t);
+                let mut d = self.data.write();
+                if !d.deleted.is_empty() || !d.unfound.is_empty() {
+                    d.deleted.retain(|k| !keys.contains(k));
+                    d.unfound.retain(|k, _| !keys.contains(k));
+                }
+                merge_track(&mut d.tracks, t);
             }
         }
         if !ids.is_empty() {
@@ -546,6 +552,49 @@ impl Library {
             h.events.drain(0..n - 100_000);
         }
         self.history_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// "Delete from library": like `remove_track`, and remembered so playlist sync doesn't bring
+    /// the songs back.
+    pub fn delete_tracks(&self, ids: &[String]) {
+        let mut d = self.data.write();
+        for id in ids {
+            let Some(t) = d.tracks.remove(id) else { continue };
+            for k in keys_of(&t) {
+                if !d.deleted.contains(&k) {
+                    d.deleted.push(k);
+                }
+            }
+            for p in d.playlists.iter_mut() {
+                p.track_ids.retain(|t| t != id);
+            }
+        }
+        let n = d.deleted.len();
+        if n > 5000 {
+            d.deleted.drain(0..n - 5000);
+        }
+        drop(d);
+        self.changed();
+    }
+
+    /// Sync skips this song: deleted, or it failed to download in the last 3 days.
+    pub fn sync_skips(&self, keys: &[String]) -> bool {
+        let d = self.data.read();
+        let recent = store::now_ms() - 3.0 * 86_400_000.0;
+        keys.iter().any(|k| d.deleted.contains(k) || d.unfound.get(k).is_some_and(|at| *at > recent))
+    }
+
+    /// A song couldn't be downloaded (see `sync_skips`).
+    pub fn note_unfound(&self, keys: &[String]) {
+        let mut d = self.data.write();
+        let now = store::now_ms();
+        let old = now - 30.0 * 86_400_000.0;
+        d.unfound.retain(|_, at| *at > old);
+        for k in keys {
+            d.unfound.insert(k.clone(), now);
+        }
+        drop(d);
+        self.changed();
     }
 
     pub fn remove_track(&self, id: &str) {
@@ -929,6 +978,8 @@ impl Library {
             }
         }
         for t in &u.tracks {
+            let keys = keys_of(t);
+            d.deleted.retain(|k| !keys.contains(k));
             d.tracks.insert(t.id.clone(), t.clone());
         }
         for (id, s) in &u.stats {
@@ -1150,11 +1201,20 @@ mod tests {
         lib.push_undo(u);
         lib.data.write().stats.insert("a".into(), Stat { plays: 3, ..Default::default() });
         let u = lib.snapshot("removed from library", &[], &["b".into()]);
-        lib.remove_track("b");
+        let bkeys = keys_of(&lib.track("b").unwrap());
+        assert!(!lib.sync_skips(&bkeys));
+        lib.delete_tracks(&["b".into()]);
         lib.push_undo(u);
         assert!(lib.track("b").is_none() && find("mine").track_ids.is_empty());
+        assert!(lib.sync_skips(&bkeys), "sync must not bring a deleted song back");
         assert_eq!(lib.undo().unwrap().label, "removed from library");
         assert!(lib.track("b").is_some() && lib.stat("b").hidden);
+        assert!(!lib.sync_skips(&bkeys), "undo un-deletes it for sync too");
+        // a song that failed to download is left alone by sync for a few days
+        lib.note_unfound(&["sp:gone".into()]);
+        assert!(lib.sync_skips(&["sp:gone".into()]));
+        lib.data.write().unfound.insert("sp:gone".into(), store::now_ms() - 4.0 * 86_400_000.0);
+        assert!(!lib.sync_skips(&["sp:gone".into()]));
         assert_eq!(find("mine").track_ids, ["b"]);
         assert_eq!(lib.undo().unwrap().label, "deleted Alpha");
         assert_eq!(order("custom"), ["new", "imp", "mine", "liked"]); // back in its place

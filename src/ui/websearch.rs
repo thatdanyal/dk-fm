@@ -593,19 +593,38 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
                     ui.label(egui::RichText::new(&h.title).font(vt(24.0)).color(pal.text));
                     ui.label(egui::RichText::new(if h.album.is_empty() { h.artist.clone() } else { format!("{} · {}", h.artist, h.album) }).color(pal.dim));
                     ui.add_space(4.0);
+                    let t = ITrack { title: h.title.clone(), artists: vec![h.artist.clone()], source_key: format!("shazam:{}:{}", h.artist, h.title), ..Default::default() };
+                    let (current, loading) = (super::preview::current(app, &t), super::preview::loading(app, &t));
+                    let playing = current && app.player.status().playing;
+                    if loading {
+                        ctx.request_repaint_after(Duration::from_millis(300));
+                    }
                     ui.horizontal(|ui| {
-                        if button(ui, &pal, "FIND IT", true, true).on_hover_text("Its versions in FIND MUSIC: listen, then + GET the one you want").clicked() {
+                        let label = if loading { "GETTING IT…" } else if playing { "⏸ PAUSE" } else if current { "▶ RESUME" } else { "▶ PLAY FULL SONG" };
+                        if button(ui, &pal, label, !current, !loading).on_hover_text("Listen to the whole song now, without saving it. Like it? KEEP it. If you don't, it's deleted when you play something else").clicked() {
+                            super::preview::toggle(app, &t);
+                        }
+                        if button(ui, &pal, "FIND IT", false, true).on_hover_text("Its versions in FIND MUSIC: listen, then + GET the one you want").clicked() {
                             search_for(app, format!("{} {}", h.title, h.artist), "songs");
                             close = true;
-                        }
-                        if button(ui, &pal, "▶ LISTEN", false, true).on_hover_text("Play a preview (not downloaded)").clicked() {
-                            let t = ITrack { title: h.title.clone(), artists: vec![h.artist.clone()], source_key: format!("shazam:{}:{}", h.artist, h.title), ..Default::default() };
-                            super::preview::toggle(app, &t);
                         }
                         if button(ui, &pal, "AGAIN", false, true).clicked() {
                             go = Some(ear);
                         }
                     });
+                    if current {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            let kept = super::preview::kept(app, &t);
+                            if button(ui, &pal, if kept { "✔ KEEPING" } else { "⬇ KEEP" }, !kept, !kept).on_hover_text("Download it to your library (in your sound quality)").clicked() {
+                                super::preview::keep(app, &t);
+                            }
+                            if button(ui, &pal, "× DISCARD", false, true).on_hover_text("Not for you: stop it and delete it").clicked() {
+                                super::preview::discard(app, &t);
+                            }
+                            ui.label(egui::RichText::new(if kept { "Downloading it to your library" } else { "Not saved yet" }).color(pal.dim));
+                        });
+                    }
                 }
                 Listen::NoMatch => {
                     ui.label(egui::RichText::new("Couldn't name that one. Try again during a clear part of the song.").color(pal.text));

@@ -1585,9 +1585,7 @@ pub(super) fn delete_songs(app: &mut App, sel: &[String]) {
     }
     let mut u = app.lib.snapshot(format!("Deleted {}", plural(sel.len())), &[], &sel);
     let files: Vec<std::path::PathBuf> = sel.iter().filter_map(|id| app.lib.track(id)).map(|t| std::path::PathBuf::from(&t.path)).collect();
-    for id in &sel {
-        app.lib.remove_track(id);
-    }
+    app.lib.delete_tracks(&sel);
     u.trashed = files.len();
     app.undoable(u);
     app.browser.selection.clear();

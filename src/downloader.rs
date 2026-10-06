@@ -705,6 +705,9 @@ impl Downloader {
                     jt.error = Some(e);
                 }
             });
+            if !cancel.load(Ordering::Relaxed) {
+                self.lib.note_unfound(&itrack_keys(&t));
+            }
         }
     }
 
@@ -902,10 +905,25 @@ impl Downloader {
         }
         let Fetched::Collection(col) = sources::fetch_any(url, &self.creds())? else { return Ok(0) };
         let idx = self.lib.key_index();
-        let missing: Vec<usize> = col.tracks.iter().enumerate().filter(|(_, t)| lookup(&idx, t).is_none() && !itrack_keys(t).iter().any(|k| p.removed.contains(k))).map(|(i, _)| i).collect();
+        let missing: Vec<usize> = col
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                let keys = itrack_keys(t);
+                lookup(&idx, t).is_none() && !keys.iter().any(|k| p.removed.contains(k)) && !self.lib.sync_skips(&keys)
+            })
+            .map(|(i, _)| i)
+            .collect();
         let n = missing.len();
         if n > 0 {
-            self.notices.lock().push(format!("Auto-sync: {n} new song{} from \"{}\"", if n == 1 { "" } else { "s" }, p.name));
+            self.notices.lock().push(match n {
+                1 => {
+                    let t = &col.tracks[missing[0]];
+                    format!("Auto-sync: \"{}\" by {} is new in \"{}\"", t.title, t.artists.join(", "), p.name)
+                }
+                n => format!("Auto-sync: {n} new songs from \"{}\"", p.name),
+            });
             self.start(col, Some(missing));
         } else {
             self.mirror(&col);

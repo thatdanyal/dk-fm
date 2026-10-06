@@ -413,6 +413,12 @@ pub struct LibraryData {
     #[serde(default, skip_serializing_if = "Vec::is_empty")] pub folders: Vec<Folder>,
     /// playlists were dragged into your own order (before that: Liked Songs, imported, then yours)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub custom_order: bool,
+    /// songs you deleted from DK.FM (song keys): syncing a playlist or Spotify's Liked Songs never
+    /// downloads them again (getting one yourself does)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub deleted: Vec<String>,
+    /// songs that couldn't be downloaded (song key -> when, ms): sync leaves them alone for a few
+    /// days instead of announcing them as new every time
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub unfound: HashMap<String, f64>,
 }
 
 /// History rows: [trackId, startedAt (unix s), listened (s), skipped (0/1)].

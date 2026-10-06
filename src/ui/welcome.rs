@@ -137,7 +137,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
                 title(ui, &pal, "YOU'RE ALL SET");
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     line(ui, &pal, "▶", "Space plays and pauses; Ctrl+← / Ctrl+→ skip.");
-                    line(ui, &pal, "📺", "F11: full-screen now playing with lyrics.");
+                    line(ui, &pal, "📺", "F11: THEATER, the song big with its lyrics.");
                     line(ui, &pal, "🔲", "Ctrl+E: move panels around. Ctrl+, : Settings.");
                 });
                 ui.add_space(6.0);

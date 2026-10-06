@@ -28,7 +28,7 @@ pub const ACTIONS: [(&str, &str, &str); 24] = [
     ("rescan", "Rescan library", ""),
     ("undo", "Undo the last removal / move / delete / merge", "Ctrl+Z"),
     ("private", "Private listening on / off", ""),
-    ("nowplaying", "Full-screen now playing (Esc leaves)", "F11"),
+    ("nowplaying", "THEATER: the song big, with its lyrics (Esc leaves)", "F11"),
 ];
 
 /// These work even while typing in a text box (they use Ctrl and don't edit text).

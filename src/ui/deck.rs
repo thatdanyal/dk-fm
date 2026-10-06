@@ -62,7 +62,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             if icon(ui, &pal, "PRV", private).on_hover_text(if private { "Private listening is on: plays and history aren't recorded" } else { "Private listening: don't record plays and history" }).clicked() {
                 app.set_private(!private);
             }
-            if icon(ui, &pal, "🗖", false).on_hover_text("Full-screen now playing (F11)").clicked() {
+            if icon(ui, &pal, "🗖", false).on_hover_text("THEATER: the song big, with its lyrics (F11)").clicked() {
                 app.nowplaying = true;
             }
             sleep_button(app, ui);

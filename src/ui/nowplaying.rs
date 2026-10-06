@@ -1,4 +1,4 @@
-//! Full-screen now playing: big cover, title / artist / album, seek bar, controls, and synced
+//! THEATER (full-screen now playing): big cover, title / artist / album, seek bar, controls, and synced
 //! lyrics beside it on wide windows. Esc (or F11) leaves. Nothing extra repaints: it redraws on
 //! the same playback tick as the deck.
 use super::deck::tbtn;

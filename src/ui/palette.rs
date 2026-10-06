@@ -94,7 +94,7 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         (format!("Repeat: {} > next mode", o.repeat), "loop toggle", "🔁", Act::CycleRepeat),
         (format!("Private listening: {}", if app.lib.private.load(std::sync::atomic::Ordering::Relaxed) { "on > off" } else { "off > on" }), "incognito stats history record secret", "🔒", Act::Private),
         ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
-        ("Now playing (full screen)".into(), "big cover lyrics fullscreen f11 karaoke", "🗖", Act::NowPlaying),
+        ("THEATER: the song big, with its lyrics".into(), "now playing full screen fullscreen big cover lyrics f11 karaoke", "🗖", Act::NowPlaying),
         ("Discover new music".into(), "discover new recommendations similar radio explore", "🔍", Act::View(View::Discover)),
         ("Shazam: name the song playing on this PC".into(), "shazam identify recognize listen what song is this whats playing", "♫", Act::Listen),
         ("Find music online (songs, artists, albums, podcasts…)".into(), "search youtube web download get new song artist album playlist podcast audiobook profile clean explicit live instrumental version", "🌐", Act::View(View::Web)),

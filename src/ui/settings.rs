@@ -285,7 +285,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Look, "Theme editor and your own themes", "custom make"),
     (SetTab::Layouts, "Layout style: template or free (per pixel)", "panels move arrange"),
     (SetTab::Layouts, "Panel layouts: save, switch, reset", "default"),
-    (SetTab::Playback, "Full-screen now playing", "study focus lyrics big cover f11"),
+    (SetTab::Playback, "THEATER: the song big, with its lyrics", "full screen fullscreen now playing study focus lyrics big cover f11"),
     (SetTab::Lists, "Song list columns", "year genre bitrate added album"),
     (SetTab::Lists, "Default sort", "order"),
     (SetTab::Lists, "When DK.FM starts: open to", "start screen"),

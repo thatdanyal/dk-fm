@@ -24,10 +24,10 @@ pub const STEPS: [(&str, &str, &str, u32); 17] = [
     ("stats", "STATS", "Your listening: top songs, artists and albums, how long you listened and when. Play counts live here, out of the way while you listen.", 1),
     ("scope", "VISUALIZER", "The scope: click it (or press V) to switch between bars, oscilloscope, VU meters and a waterfall. It starts off; pick a style to turn it on.", 1),
     ("eq", "EQUALIZER", "Shape the sound: pick a preset or drag the bands. Turn it on with the EQ switch (it starts flat and off).", 1),
-    ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. FULL SCREEN shows the cover and the lyrics big.", 1),
+    ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. THEATER shows the cover and the lyrics big.", 1),
     ("theme", "THEMES", "Change the colours here, or make your own in Settings > Look.", 1),
     ("theme", "ALBUM COVER THEME", "THEME > Album Cover: DK.FM's colours follow the cover of the song playing, toned down so they always look good. Settings > Look sets how much.", 3),
-    ("fullscreen", "FULL SCREEN", "The cover, the lyrics and the controls, big (F11 also opens it; Esc leaves).", 3),
+    ("theater", "THEATER", "The cover, the lyrics and the controls, big: the song takes the whole window (F11 also opens it; Esc leaves).", 3),
     ("refresh", "REFRESH", "↻ checks for a DK.FM update and syncs your Spotify playlists right now.", 2),
     ("settings", "SETTINGS", "Settings has a search box: type what you're looking for, like \"quality\" or \"spotify\".", 2),
 ];

@@ -141,7 +141,7 @@ pub struct App {
     pub home: home::HomeState,
     pub recs: recs::Recs,
     pub explore: explore::Explore,
-    /// full-screen now playing
+    /// THEATER (the song big: cover, lyrics, controls)
     pub nowplaying: bool,
     /// the library view last shown (`browser.nav`)
     seen_nav: u64,
@@ -906,9 +906,9 @@ impl App {
                         }
                     }
                     if room(ui, 300.0 + later) {
-                        let r = tb_button(ui, &pal, "FULL SCREEN", self.nowplaying);
-                        self.mark("fullscreen", r.rect);
-                        if r.on_hover_text("Full-screen now playing: the cover, the lyrics and the controls (F11; Esc leaves)").clicked() {
+                        let r = tb_button(ui, &pal, "THEATER", self.nowplaying);
+                        self.mark("theater", r.rect);
+                        if r.on_hover_text("THEATER: the cover, the lyrics and the controls, big (F11; Esc leaves)").clicked() {
                             self.nowplaying = !self.nowplaying && !self.mini;
                         }
                     }

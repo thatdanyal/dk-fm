@@ -43,7 +43,7 @@ fn initial(app: &App, tab: &Tab, area: Rect, i: usize) -> Rect {
         }
     }
     match tab {
-        Tab::Library => Rect::from_min_max(Pos2::new(area.left() + area.width() * 0.27, area.top()), area.max),
+        Tab::Library | Tab::Home => Rect::from_min_max(Pos2::new(area.left() + area.width() * 0.27, area.top()), area.max),
         Tab::Deck => Rect::from_min_size(area.min, Vec2::new(area.width() * 0.27, 300.0)),
         _ => Rect::from_min_size(area.min + Vec2::new(20.0 + 24.0 * i as f32, 320.0 + 24.0 * i as f32), Vec2::new(area.width() * 0.27, 260.0)),
     }
@@ -108,6 +108,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, area: Rect) {
                     Tab::Deck => super::deck::show(app, ui),
                     Tab::Scope => super::scope::show(app, ui),
                     Tab::Library => super::browser::show(app, ui),
+                    Tab::Home => super::browser::show_home(app, ui),
                     Tab::Queue => super::queue::show(app, ui),
                     Tab::Eq => super::eqpanel::show(app, ui),
                     Tab::Lyrics => super::lyrics::show(app, ui),

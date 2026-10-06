@@ -329,7 +329,8 @@ pub(super) fn get_button(app: &App, r: &Release, have: bool) -> (String, bool) {
         Some(Ok(None)) => ("FETCHING…".into(), false),
         Some(Ok(Some(job))) => {
             let jobs = app.dl.jobs.lock();
-            let Some(j) = jobs.iter().find(|j| j.id == job) else { return ("✔ GOT IT".into(), false) };
+            // dismissed from Downloads: what you have now decides (a cancelled one can be got again)
+            let Some(j) = jobs.iter().find(|j| j.id == job) else { return if have { ("✔ HAVE IT".into(), false) } else { ("+ GET".into(), true) } };
             let total = j.tracks.iter().filter(|t| t.status != TStatus::Skipped).count();
             let done = j.tracks.iter().filter(|t| t.status == TStatus::Done).count();
             if j.tracks.iter().any(|t| t.status.active()) {

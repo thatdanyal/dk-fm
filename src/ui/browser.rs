@@ -36,6 +36,33 @@ pub enum View {
     Web,
 }
 
+impl Default for View {
+    fn default() -> Self {
+        View::Home
+    }
+}
+
+/// Screens of the HOME panel (everything but a playlist, Liked and Downloads, which are LIBRARY's).
+pub fn is_home_view(v: &View) -> bool {
+    !matches!(v, View::Playlist(_) | View::Liked | View::Downloaded)
+}
+
+/// What one of the two browser panels shows: HOME (home, discover, find music, songs, albums,
+/// artists, stats...) or LIBRARY (your playlists, Liked and Downloads). Each keeps its own screen,
+/// search and selection; the panel being drawn has its page in `BrowserState`, the other one
+/// waits here.
+#[derive(Default)]
+pub struct Page {
+    view: View,
+    search: String,
+    sort: Option<(SortKey, bool)>,
+    selection: HashSet<String>,
+    anchor: Option<usize>,
+    list: Vec<String>,
+    list_key: Option<(View, String, Option<(SortKey, bool)>, u64)>,
+    focus_search: bool,
+}
+
 /// Songs being dragged (to reorder a playlist, or onto a sidebar playlist).
 pub struct DragSongs(pub Vec<String>);
 
@@ -188,18 +215,51 @@ pub struct BrowserState {
     pub web: super::websearch::WebState,
     side_key: Option<(u64, u64, String)>,
     side_rows: Vec<SideRow>,
-    /// counts view changes (the window shows the library panel when it changes)
+    /// counts view changes (the window shows the panel of the last one when it changes)
     pub nav: u64,
+    /// the last view change was a HOME screen (else LIBRARY's)
+    pub nav_home: bool,
+    /// the other panel's page (see `Page`), and whether the fields above are HOME's
+    parked: Page,
+    on_home: bool,
+    /// width of the playlists column while it's dragged (saved when let go)
+    side_w: Option<f32>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::All, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), copies: (u64::MAX, Default::default(), Vec::new()), downloaded: (u64::MAX, Default::default()), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0 }
+        Self { view: View::Liked, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), copies: (u64::MAX, Default::default(), Vec::new()), downloaded: (u64::MAX, Default::default()), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0, nav_home: true, parked: Page { view: View::Home, ..Default::default() }, on_home: false, side_w: None }
     }
 }
 
 impl BrowserState {
+    /// Make HOME's (`home`) or LIBRARY's page the current one.
+    pub fn use_page(&mut self, home: bool) {
+        if self.on_home == home {
+            return;
+        }
+        let p = &mut self.parked;
+        std::mem::swap(&mut self.view, &mut p.view);
+        std::mem::swap(&mut self.search, &mut p.search);
+        std::mem::swap(&mut self.sort, &mut p.sort);
+        std::mem::swap(&mut self.selection, &mut p.selection);
+        std::mem::swap(&mut self.anchor, &mut p.anchor);
+        std::mem::swap(&mut self.list, &mut p.list);
+        std::mem::swap(&mut self.list_key, &mut p.list_key);
+        std::mem::swap(&mut self.focus_search, &mut p.focus_search);
+        self.on_home = home;
+    }
+
+    /// The screen HOME is on (`home`) or LIBRARY is on.
+    pub fn view_of(&self, home: bool) -> &View {
+        if self.on_home == home { &self.view } else { &self.parked.view }
+    }
+
+    /// Open a screen, in the panel it belongs to (HOME or LIBRARY).
     pub fn set_view(&mut self, v: View) {
+        let home = is_home_view(&v);
+        self.use_page(home);
+        self.nav_home = home;
         self.view = v;
         self.nav += 1;
         self.search.clear();
@@ -216,15 +276,53 @@ pub fn artist_key(t: &Track) -> String {
     main_artist(&t.artist).to_lowercase()
 }
 
+/// LIBRARY: your playlists down the side (drag the line to make that column wider or
+/// narrower) and the one you picked.
 pub fn show(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
+    app.browser.use_page(false);
+    if is_home_view(&app.browser.view) {
+        app.browser.view = View::Liked;
+    }
     let full = ui.available_rect_before_wrap();
-    let side_w = (full.width() * 0.3).clamp(132.0, 184.0).round();
+    let max_w = (full.width() - 220.0).max(110.0);
+    let saved = app.settings.lock().sidebar_width;
+    let want = app.browser.side_w.unwrap_or(if saved > 0.0 { saved } else { (full.width() * 0.3).clamp(132.0, 184.0) });
+    let side_w = want.clamp(110.0, max_w).round();
     let side = Rect::from_min_size(full.min, Vec2::new(side_w, full.height()));
     let main = Rect::from_min_max(Pos2::new(full.left() + side_w, full.top()), full.max);
     fill(ui.painter(), side, pal.bg2);
-    ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(2.0_f32, pal.line));
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(side), |ui| sidebar(app, ui));
+    // the dividing line: drag it
+    let grip = Rect::from_center_size(Pos2::new(side.right(), side.center().y), Vec2::new(8.0, side.height()));
+    let g = ui.interact(grip, ui.id().with("side-split"), Sense::drag()).on_hover_text("Drag to make the playlists column wider or narrower");
+    if g.hovered() || g.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+    }
+    ui.painter().vline(side.right(), side.y_range(), egui::Stroke::new(2.0_f32, if g.hovered() || g.dragged() { pal.accent } else { pal.line }));
+    if g.dragged() {
+        app.browser.side_w = Some((side_w + g.drag_delta().x).clamp(110.0, max_w));
+    }
+    if g.drag_stopped() {
+        if let Some(w) = app.browser.side_w.take() {
+            app.edit_settings(|s| s.sidebar_width = w.round());
+        }
+    }
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(main.shrink2(Vec2::new(2.0, 0.0))), |ui| {
+        ui.set_clip_rect(main);
+        tracks_view(app, ui);
+    });
+}
+
+/// HOME: Home, Discover, the search bar (FIND MUSIC), Songs, Albums, Artists, Recent, Top and
+/// Stats along the top, with Import, Downloads and more at the right end.
+pub fn show_home(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    app.browser.use_page(true);
+    if !is_home_view(&app.browser.view) {
+        app.browser.view = View::Home;
+    }
+    let main = ui.available_rect_before_wrap();
     let strip_h = nav_strip(app, ui, Rect::from_min_max(Pos2::new(main.left() + 2.0, main.top()), main.max));
     let main = Rect::from_min_max(Pos2::new(main.left(), main.top() + strip_h), main.max);
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(main.shrink2(Vec2::new(2.0, 0.0))), |ui| {
@@ -257,13 +355,14 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     let cur = nav_of(&app.browser.view);
     let active_dl = app.dl.active_count();
     let (font, row_h, pad) = (px(7.0), 30.0, 6.0);
-    let text_w = |s: &str| ui.painter().layout_no_wrap(s.to_string(), font.clone(), pal.text).size().x;
+    let measure = ui.painter().clone();
+    let text_w = |s: &str| measure.layout_no_wrap(s.to_string(), font.clone(), pal.text).size().x;
     // right end: [+ IMPORT] [⬇ n] [⋯]
     let mut right: Vec<(&str, f32)> = Vec::new();
     for n in shown.iter().filter(|n| n.1 == "more") {
         match n.0 {
             "import" => right.push(("import", text_w(n.3) + 16.0)),
-            "downloads" => right.push(("downloads", 30.0 + if active_dl > 0 { text_w(&active_dl.to_string()) + 10.0 } else { 0.0 })),
+            "downloads" => right.push(("downloads", text_w("DOWNLOADS") + 16.0 + if active_dl > 0 { text_w(&active_dl.to_string()) + 12.0 } else { 0.0 })),
             _ => {}
         }
     }
@@ -274,7 +373,8 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     let (mut x, mut y) = (area.left() + pad, area.top() + 4.0);
     let mut limit = area.right() - pad - right_w - 6.0;
     for n in shown.iter().filter(|n| n.1 == "tab") {
-        let w = text_w(n.3) + 14.0;
+        // FIND MUSIC is a search bar
+        let w = if n.0 == "web" { (area.width() * 0.3).clamp(150.0, 240.0) } else { text_w(n.3) + 14.0 };
         if x + w > limit && x > area.left() + pad {
             (x, y, limit) = (area.left() + pad, y + row_h, area.right() - pad);
         }
@@ -287,6 +387,10 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     let mut go: Option<&str> = None;
     for (id, label, r) in &tabs {
         app.mark(id, *r);
+        if *id == "web" {
+            search_bar(app, ui, r.shrink2(Vec2::new(4.0, 3.0)), cur == Some("web"));
+            continue;
+        }
         let resp = ui.interact(*r, ui.id().with(("nav", *id)), Sense::click());
         let on = cur == Some(*id);
         if on {
@@ -324,9 +428,9 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
                 p.text(r.center(), Align2::CENTER_CENTER, "+ IMPORT", font.clone(), fg);
             }
             "downloads" => {
-                p.text(Pos2::new(r.left() + 15.0, r.center().y), Align2::CENTER_CENTER, "⬇", vt(18.0), fg);
+                p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, "DOWNLOADS", font.clone(), fg);
                 if active_dl > 0 {
-                    let b = Rect::from_min_max(Pos2::new(r.left() + 26.0, r.top() + 5.0), Pos2::new(r.right() - 5.0, r.bottom() - 5.0));
+                    let b = Rect::from_min_max(Pos2::new(r.left() + 8.0 + text_w("DOWNLOADS") + 6.0, r.top() + 5.0), Pos2::new(r.right() - 5.0, r.bottom() - 5.0));
                     fill(p, b, if on { pal.ink } else { pal.accent });
                     p.text(b.center(), Align2::CENTER_CENTER, active_dl.to_string(), px(6.0), if on { pal.accent } else { pal.ink });
                 }
@@ -388,6 +492,27 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
         None => {}
     }
     h
+}
+
+/// The search bar in HOME's tab strip: typing searches all of YouTube Music (FIND MUSIC).
+fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
+    let pal = app.pal;
+    fill(ui.painter(), r, pal.bg);
+    frame_rect(ui.painter(), r, 2.0, if on { pal.accent } else { pal.line_hi });
+    ui.painter().text(Pos2::new(r.left() + 12.0, r.center().y), Align2::CENTER_CENTER, "🔍", vt(14.0), pal.dim);
+    let field = Rect::from_min_max(Pos2::new(r.left() + 22.0, r.top() + 1.0), Pos2::new(r.right() - 4.0, r.bottom() - 1.0));
+    let w = &mut app.browser.web;
+    let resp = ui.put(field, egui::TextEdit::singleline(&mut w.query).hint_text("Search music").frame(false).font(vt(18.0)).vertical_align(egui::Align::Center));
+    if w.focus {
+        resp.request_focus();
+        w.focus = false;
+    }
+    let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    if resp.changed() || enter {
+        super::websearch::typed(app, enter);
+    } else if resp.gained_focus() && !w.query.trim().is_empty() && !on {
+        app.browser.set_view(View::Web);
+    }
 }
 
 // ------------------------------------------------------------------------------- sidebar
@@ -1056,8 +1181,19 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
         });
     });
-    // ⬇ Downloads: songs on their way
+    // ⬇ Downloads: delete what you don't want any more, and songs on their way
     if view == View::Downloaded {
+        let sel: Vec<String> = downloaded.iter().filter(|id| app.browser.selection.contains(*id)).cloned().collect();
+        egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 4)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let label = if sel.is_empty() { "DELETE".to_string() } else { format!("DELETE {}", plural(sel.len()).to_uppercase()) };
+                let r = ui.add_enabled_ui(!sel.is_empty(), |ui| button(ui, &pal, &label, !sel.is_empty(), true)).inner;
+                if r.on_hover_text("Delete the selected songs from DK.FM and your PC (the files go to the Recycle Bin; Ctrl+Z undoes it)").clicked() {
+                    delete_songs(app, &sel);
+                }
+                ui.label(egui::RichText::new(if sel.is_empty() { "Select songs (click, Shift+click, Ctrl+A), then DELETE or press the Delete key" } else { "or press the Delete key" }).color(pal.dim));
+            });
+        });
         let n = app.dl.active_count();
         if n > 0 {
             egui::Frame::new().fill(pal.panel_hi).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
@@ -1338,7 +1474,12 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 app.player.play_pick(ids.clone(), i, None);
             }
         }
-        if del {
+        if del && view == View::Downloaded {
+            let sel: Vec<String> = ids.iter().filter(|x| app.browser.selection.contains(*x)).cloned().collect();
+            if !sel.is_empty() {
+                delete_songs(app, &sel);
+            }
+        } else if del {
             if let Some(p) = &cfg.playlist {
                 let sel: Vec<String> = ids.iter().filter(|x| app.browser.selection.contains(*x)).cloned().collect();
                 if !sel.is_empty() {
@@ -1590,4 +1731,27 @@ fn artists_view(app: &mut App, ui: &mut Ui) {
     rebuild_groups(app);
     let items = app.browser.artists.iter().map(|a| (a.0.clone(), a.1.clone(), format!("{} TRACK{}", a.3, if a.3 == 1 { "" } else { "S" }), a.2.clone())).collect();
     grid(app, ui, "ARTISTS", items, View::Artist);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn home_and_library_keep_their_own_screens() {
+        let mut b = BrowserState::default();
+        b.set_view(View::Stats);
+        assert!(b.nav_home);
+        b.set_view(View::Playlist("p".into()));
+        assert!(!b.nav_home);
+        // each panel still shows its own screen
+        assert_eq!(b.view_of(true), &View::Stats);
+        assert_eq!(b.view_of(false), &View::Playlist("p".into()));
+        b.search = "abc".into();
+        b.use_page(true);
+        assert_eq!((&b.view, b.search.as_str()), (&View::Stats, ""));
+        b.use_page(false);
+        assert_eq!((&b.view, b.search.as_str()), (&View::Playlist("p".into()), "abc"));
+        assert!(is_home_view(&View::Web) && is_home_view(&View::Artist("x".into())) && !is_home_view(&View::Liked) && !is_home_view(&View::Downloaded));
+    }
 }

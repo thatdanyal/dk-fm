@@ -7,29 +7,57 @@ use super::widgets::{button, fill, frame_rect, with_alpha};
 use super::App;
 use eframe::egui::{self, Align2, Id, LayerId, Order, Pos2, Rect};
 
-/// (what it points at, title, explanation)
-pub const STEPS: [(&str, &str, &str); 10] = [
-    ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync)."),
-    ("web", "FIND MUSIC", "Search songs, artists, albums, playlists, profiles, podcasts and audiobooks, like on Spotify. ▶ plays a preview first; + GET downloads the version you want."),
-    ("shazam", "SHAZAM", "Hear a song in a video, a game or a browser tab? Press SHAZAM and DK.FM names it, then finds it for you."),
-    ("discover", "DISCOVER", "New music picked from the artists you play most and the songs you like, minus what you already have."),
-    ("library", "SONGS LIKE THIS", "Right-click any song (or click … at the end of its row) > Songs like this: similar songs to listen to first and download if you like them."),
-    ("stats", "STATS", "Your listening: top songs, artists and albums, how long you listened and when. Play counts live here, out of the way while you listen."),
-    ("scope", "VISUALIZER", "The scope: click it (or press V) to switch between bars, oscilloscope, VU meters and a waterfall. It starts off; pick a style to turn it on."),
-    ("eq", "EQUALIZER", "Shape the sound: pick a preset or drag the bands. Turn it on with the EQ switch (it starts flat and off)."),
-    ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. STUDY shows just the lyrics and the deck."),
-    ("theme", "THEMES", "Change the colours here, or make your own in Settings > Look."),
+/// Bump with every update that adds steps: people who update are offered a tour of just the
+/// steps newer than the last tour they were offered.
+pub const TOUR_VERSION: u32 = 2;
+
+/// (what it points at, title, explanation, the TOUR_VERSION that added it)
+pub const STEPS: [(&str, &str, &str, u32); 15] = [
+    ("homepanel", "HOME", "Home, Discover, Songs, Albums, Artists, Recent, Top and Stats have their own HOME tab, next to LIBRARY (your playlists).", 2),
+    ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
+    ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
+    ("downloads", "DOWNLOADS", "What's downloading right now. Cancel any time; CLEAR FINISHED tidies the list.", 2),
+    ("shazam", "SHAZAM", "Hear a song in a video, a game or a browser tab? Press SHAZAM and DK.FM names it, then finds it for you.", 1),
+    ("discover", "DISCOVER", "New music picked from the artists you play most and the songs you like, minus what you already have.", 1),
+    ("library", "LIBRARY", "Your playlists: the one you played last moves to the top. Drag the line beside them to make the column wider. ⬇ Downloads lists every song you downloaded; select some and press DELETE to remove them.", 2),
+    ("library", "SONGS LIKE THIS", "Right-click any song (or click … at the end of its row) > Songs like this: similar songs to listen to first and download if you like them.", 1),
+    ("stats", "STATS", "Your listening: top songs, artists and albums, how long you listened and when. Play counts live here, out of the way while you listen.", 1),
+    ("scope", "VISUALIZER", "The scope: click it (or press V) to switch between bars, oscilloscope, VU meters and a waterfall. It starts off; pick a style to turn it on.", 1),
+    ("eq", "EQUALIZER", "Shape the sound: pick a preset or drag the bands. Turn it on with the EQ switch (it starts flat and off).", 1),
+    ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. STUDY shows just the lyrics and the deck.", 1),
+    ("theme", "THEMES", "Change the colours here, or make your own in Settings > Look.", 1),
+    ("refresh", "REFRESH", "↻ checks for a DK.FM update and syncs your Spotify playlists right now.", 2),
+    ("settings", "SETTINGS", "Settings has a search box: type what you're looking for, like \"quality\" or \"spotify\".", 2),
 ];
+
+/// The steps of the tour that's on: all of them, or only those newer than `app.tour_from`.
+fn steps(app: &App) -> Vec<(&'static str, &'static str, &'static str, u32)> {
+    STEPS.iter().copied().filter(|s| s.3 > app.tour_from).collect()
+}
+
+/// Is there anything new to show someone who was last offered tour `seen`?
+pub fn has_new(seen: u32) -> bool {
+    STEPS.iter().any(|s| s.3 > seen)
+}
+
+/// A tour of just what's new since tour `seen`.
+pub fn start_new(app: &mut App, seen: u32) {
+    app.modal = None;
+    app.tour_from = seen;
+    app.tour = Some(0);
+}
 
 pub fn start(app: &mut App) {
     app.modal = None;
+    app.tour_from = 0;
     app.tour = Some(0);
 }
 
 /// Draws the current step over everything.
 pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(step) = app.tour else { return };
-    let Some((id, title, text)) = STEPS.get(step).copied() else {
+    let list = steps(app);
+    let Some((id, title, text, _)) = list.get(step).copied() else {
         app.tour = None;
         return;
     };
@@ -39,6 +67,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         "scope" => Some(super::Tab::Scope),
         "eq" => Some(super::Tab::Eq),
         "library" => Some(super::Tab::Library),
+        "homepanel" | "web" | "import" | "downloads" | "discover" | "stats" => Some(super::Tab::Home),
         _ => None,
     };
     if let Some(tab) = tab {
@@ -76,7 +105,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     egui::Area::new(Id::new("tour-card")).order(Order::Tooltip).pivot(anchor).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent2)).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
             ui.set_width(w - 28.0);
-            ui.label(egui::RichText::new(format!("{} / {}", step + 1, STEPS.len())).font(px(6.0)).color(pal.dim));
+            ui.label(egui::RichText::new(format!("{}{} / {}", if app.tour_from > 0 { "NEW · " } else { "" }, step + 1, list.len())).font(px(6.0)).color(pal.dim));
             ui.label(egui::RichText::new(title).font(px(10.0)).color(pal.accent));
             ui.add_space(4.0);
             ui.label(egui::RichText::new(text).font(vt(20.0)).color(pal.text));
@@ -89,7 +118,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     end = true;
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let last = step + 1 == STEPS.len();
+                    let last = step + 1 == list.len();
                     if button(ui, &pal, if last { "DONE" } else { "NEXT" }, true, true).clicked() {
                         next = true;
                     }
@@ -106,7 +135,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
         next = true;
     }
-    app.tour = if end || (next && step + 1 == STEPS.len()) {
+    app.tour = if end || (next && step + 1 == list.len()) {
         None
     } else if next {
         Some(step + 1)

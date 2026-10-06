@@ -202,6 +202,21 @@ pub fn run(args: &[&str], mut on_line: Option<&mut dyn FnMut(&str)>, cancel: Opt
     let mut cmd = command(&yt_path());
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("could not start yt-dlp: {e}"))?;
+    // cancelling stops it right away, even while it prints nothing (converting with ffmpeg)
+    let running = Arc::new(AtomicBool::new(true));
+    if let Some(c) = cancel.cloned() {
+        let (pid, running) = (child.id(), running.clone());
+        std::thread::spawn(move || {
+            while running.load(Ordering::Relaxed) {
+                if c.load(Ordering::Relaxed) {
+                    kill_tree(pid);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+    }
+    let _done = Done(running);
     let stderr = child.stderr.take();
     let err_thread = std::thread::spawn(move || {
         let mut s = String::new();
@@ -235,6 +250,28 @@ pub fn run(args: &[&str], mut on_line: Option<&mut dyn FnMut(&str)>, cancel: Opt
     } else {
         let msg = err.lines().rfind(|l| l.starts_with("ERROR")).or_else(|| err.lines().last()).unwrap_or("yt-dlp failed").trim_start_matches("ERROR: ").to_string();
         Err(msg)
+    }
+}
+
+/// Clears `running` when `run` returns, however it returns.
+struct Done(Arc<AtomicBool>);
+impl Drop for Done {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Stops a yt-dlp we started and what it started (ffmpeg), by process id.
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill").args(["/PID", &pid.to_string(), "/T", "/F"]).creation_flags(0x0800_0000).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("pkill").args(["-TERM", "-P", &pid.to_string()]).status();
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
     }
 }
 

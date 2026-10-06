@@ -655,7 +655,7 @@ mod tests {
         assert!(code.len() < 1000, "{}", code.len());
         let Share::Layout(l) = decode(&code).unwrap() else { panic!() };
         let back: egui_dock::DockState<crate::ui::Tab> = serde_json::from_value(l.dock.clone()).unwrap();
-        assert_eq!((l.name.as_str(), back.iter_all_tabs().count()), ("Focus", 6));
+        assert_eq!((l.name.as_str(), back.iter_all_tabs().count()), ("Focus", 7));
         // not a dock layout
         assert!(decode(&encode(&Share::Layout(NamedLayout { name: "x".into(), dock: serde_json::json!({"a": 1}) }))).is_err());
 

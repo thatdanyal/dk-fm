@@ -395,6 +395,12 @@ pub fn downloads(app: &mut App, ui: &mut Ui) {
                 if button(ui, &pal, "+ IMPORT", false, true).clicked() {
                     app.browser.set_view(View::Import);
                 }
+                let finished: Vec<String> = app.dl.jobs.lock().iter().filter(|j| !j.tracks.iter().any(|t| t.status.active())).map(|j| j.id.clone()).collect();
+                if !finished.is_empty() && button(ui, &pal, "CLEAR FINISHED", false, true).on_hover_text("Take finished and cancelled downloads off this list (the songs stay in your library)").clicked() {
+                    for id in finished {
+                        app.dl.clear(&id);
+                    }
+                }
             });
         });
     });

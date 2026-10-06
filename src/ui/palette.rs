@@ -207,10 +207,7 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         }
         Act::ToggleShuffle => app.player.toggle_shuffle(),
         Act::CycleRepeat => app.player.cycle_repeat(),
-        Act::View(v) => {
-            app.show_panel(Tab::Library);
-            app.browser.set_view(v);
-        }
+        Act::View(v) => app.browser.set_view(v),
         Act::Listen => super::websearch::listen(app, ctx),
         Act::Tour => super::tour::start(app),
         Act::Study => app.toggle_study(),

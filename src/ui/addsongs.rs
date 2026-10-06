@@ -302,6 +302,7 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
                 TStatus::Searching => Btn::Busy("STARTING".into()),
                 TStatus::Downloading => Btn::Busy(format!("{p:.0}%")),
                 TStatus::Tagging | TStatus::Done => Btn::Busy("SAVING".into()),
+                TStatus::Cancelled | TStatus::Skipped => Btn::Get,
                 _ => Btn::Retry,
             },
             (None, None) => Btn::Get,

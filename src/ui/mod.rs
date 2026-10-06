@@ -56,10 +56,12 @@ pub enum Tab {
     Queue,
     Eq,
     Lyrics,
+    /// Home, Discover, FIND MUSIC, Songs, Albums, Artists, Stats... (LIBRARY has the playlists)
+    Home,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::Deck, Tab::Scope, Tab::Library, Tab::Queue, Tab::Eq, Tab::Lyrics];
+    pub const ALL: [Tab; 7] = [Tab::Deck, Tab::Scope, Tab::Home, Tab::Library, Tab::Queue, Tab::Eq, Tab::Lyrics];
     pub fn name(&self) -> &'static str {
         match self {
             Tab::Deck => "DECK",
@@ -68,6 +70,7 @@ impl Tab {
             Tab::Queue => "QUEUE",
             Tab::Eq => "EQUALIZER",
             Tab::Lyrics => "LYRICS",
+            Tab::Home => "HOME",
         }
     }
 }
@@ -151,6 +154,12 @@ pub struct App {
     pub study: Option<DockState<Tab>>,
     /// the guided tour's step, and where the parts it points at were drawn this frame
     pub tour: Option<usize>,
+    /// the tour shows only steps added after this tour version (0 = all of them)
+    pub tour_from: u32,
+    /// frames in a row that panicked (see `recover`)
+    panics: u32,
+    /// the title bar's ↻ is checking for updates and syncing
+    refreshing: Arc<AtomicBool>,
     pub marks: std::collections::HashMap<&'static str, Rect>,
 }
 
@@ -267,10 +276,25 @@ pub fn keep_deck(dock: &mut DockState<Tab>) {
     }
 }
 
+/// A layout from before HOME had its own panel: HOME goes in front, next to LIBRARY.
+pub fn add_home_tab(dock: &mut DockState<Tab>) {
+    if dock.find_tab(&Tab::Home).is_some() {
+        return;
+    }
+    if let Some((s, n, _)) = dock.find_tab(&Tab::Library) {
+        if let Some(Node::Leaf { tabs, active, .. }) = dock.get_surface_mut(s).and_then(|x| x.node_tree_mut()).map(|tr| &mut tr[n]) {
+            tabs.insert(0, Tab::Home);
+            *active = egui_dock::TabIndex(0);
+            return;
+        }
+    }
+    reveal(dock, Tab::Home);
+}
+
 pub fn default_dock() -> DockState<Tab> {
     // the deck, equalizer and visualizer down the left; the library over the lyrics; the queue
     // on the right (the visualizer starts off and the equalizer flat and off)
-    let mut d = DockState::new(vec![Tab::Library]);
+    let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
     let s = d.main_surface_mut();
     let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
     let [deck, _scope] = s.split_below(left, 0.513, vec![Tab::Scope]);
@@ -307,7 +331,8 @@ pub fn study_preset(panels: &[Tab]) -> DockState<Tab> {
 /// Smallest comfortable size of a panel.
 fn min_size(tab: Tab) -> Vec2 {
     match tab {
-        Tab::Library => Vec2::new(560.0, 300.0),
+        Tab::Library => Vec2::new(420.0, 260.0),
+        Tab::Home => Vec2::new(520.0, 300.0),
         Tab::Deck => Vec2::new(300.0, 150.0),
         Tab::Eq => Vec2::new(300.0, 130.0),
         Tab::Queue => Vec2::new(240.0, 160.0),
@@ -340,18 +365,20 @@ pub fn fit_dock(dock: &DockState<Tab>, area: Vec2) -> Option<DockState<Tab>> {
     if need.x <= area.x + 1.0 && need.y <= area.y + 1.0 {
         return None;
     }
-    let open: Vec<Tab> = Tab::ALL.into_iter().filter(|t| *t != Tab::Deck && *t != Tab::Library && dock.find_tab(t).is_some()).collect();
-    let has_lib = dock.find_tab(&Tab::Library).is_some();
+    let big = [Tab::Home, Tab::Library];
+    let open: Vec<Tab> = Tab::ALL.into_iter().filter(|t| *t != Tab::Deck && !big.contains(t) && dock.find_tab(t).is_some()).collect();
+    let libs: Vec<Tab> = big.into_iter().filter(|t| dock.find_tab(t).is_some()).collect();
+    let has_lib = !libs.is_empty();
     let mut d;
     if area.x >= 860.0 && has_lib {
-        d = DockState::new(vec![Tab::Library]);
+        d = DockState::new(libs);
         let s = d.main_surface_mut();
         let [_lib, left] = s.split_left(NodeIndex::root(), (320.0 / area.x).clamp(0.25, 0.4), vec![Tab::Deck]);
         if !open.is_empty() {
             let _ = s.split_below(left, if area.y < 560.0 { 0.55 } else { 0.42 }, open);
         }
     } else {
-        let mut rest: Vec<Tab> = if has_lib { vec![Tab::Library] } else { Vec::new() };
+        let mut rest: Vec<Tab> = libs;
         rest.extend(open);
         if rest.is_empty() {
             return None;
@@ -407,7 +434,23 @@ impl App {
             _ => {}
         }));
 
-        let dock = dock_json.as_ref().and_then(load_dock).unwrap_or_else(default_dock);
+        let mut dock = dock_json.as_ref().and_then(load_dock).unwrap_or_else(default_dock);
+        {
+            let mut s = settings.lock();
+            if s.upgrade("home-tab") {
+                add_home_tab(&mut dock);
+            }
+            // the playlist you played last is at the top of the list (you can change it back)
+            if s.upgrade("played-sort") {
+                s.playlist_sort = "played".into();
+            }
+            // one Liked: Spotify's Liked Songs playlist becomes ♥ in DK.FM's own (also after
+            // restoring an old backup), and syncs there from now on
+            if lib.merge_spotify_liked().is_some() {
+                s.spotify_liked_sync = true;
+            }
+            settings_dirty.store(true, Ordering::Relaxed);
+        }
         let tray = Tray::new(player.clone(), lib.clone());
         let media = Some(Media::new(player.clone()));
         let update = Arc::new(Mutex::new(UpdState::Idle));
@@ -482,6 +525,9 @@ impl App {
             study: None,
             tour: None,
             marks: Default::default(),
+            panics: 0,
+            tour_from: 0,
+            refreshing: Default::default(),
         };
         app.apply_look(&cc.egui_ctx);
         app.modal = welcome::first_modal(&app);
@@ -656,13 +702,13 @@ impl App {
         match name {
             "Default" => Some(default_dock()),
             "Minimal" => {
-                let mut d = DockState::new(vec![Tab::Library]);
+                let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
                 let _ = d.main_surface_mut().split_left(NodeIndex::root(), 0.26, vec![Tab::Deck, Tab::Queue]);
                 Some(d)
             }
             "Everything" => {
                 // the older default: every panel open
-                let mut d = DockState::new(vec![Tab::Library]);
+                let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
                 let s = d.main_surface_mut();
                 let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
                 let _ = s.split_below(left, 0.46, vec![Tab::Scope, Tab::Eq]);
@@ -727,6 +773,31 @@ impl App {
         let f = self.music_folders();
         self.lib.scan(f.clone());
         self.watcher.watch(&f);
+    }
+
+    /// The title bar's ↻: look for an update and sync imported playlists (Spotify...) now.
+    pub fn refresh_all(&mut self, ctx: &egui::Context) {
+        self.refreshing.store(true, Ordering::Relaxed);
+        self.toast("Checking for updates and syncing your playlists…");
+        *self.update.lock() = UpdState::Checking;
+        let (slot, dl, busy, ctx) = (self.update.clone(), self.dl.clone(), self.refreshing.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let up = system::check_update();
+            let version = match &up {
+                Ok(Some(u)) => format!("v{} is available: click UPDATE in the title bar", u.version),
+                Ok(None) => "DK.FM is up to date".into(),
+                Err(_) => "couldn't check for updates".into(),
+            };
+            *slot.lock() = match up {
+                Ok(Some(u)) => UpdState::Available(u),
+                Ok(None) => UpdState::Latest,
+                Err(e) => UpdState::Error(e),
+            };
+            let n = dl.sync_all(true);
+            dl.notices.lock().push(format!("Refreshed: {version} · {}", match n { 0 => "playlists are in sync".to_string(), 1 => "1 new song from your playlists".into(), n => format!("{n} new songs from your playlists") }));
+            busy.store(false, Ordering::Relaxed);
+            ctx.request_repaint();
+        });
     }
 
     /// Puts a panel on screen however the layout was changed (also leaves the mini player and
@@ -937,8 +1008,20 @@ impl App {
                         self.edit_settings(|s| s.theme = k);
                         self.set_theme(ctx);
                     }
-                    if room(ui, 90.0 + later) && tb_button(ui, &pal, "SETTINGS", false).clicked() {
-                        self.modal = Some(Modal::Settings(settings::SetTab::Look));
+                    if room(ui, 90.0 + later) {
+                        let r = tb_button(ui, &pal, "SETTINGS", false);
+                        self.mark("settings", r.rect);
+                        if r.clicked() {
+                            self.modal = Some(Modal::Settings(settings::SetTab::Look));
+                        }
+                    }
+                    let busy = self.refreshing.load(Ordering::Relaxed);
+                    if room(ui, 40.0 + later) {
+                        let r = tb_button(ui, &pal, if busy { "↻ …" } else { "↻" }, busy);
+                        self.mark("refresh", r.rect);
+                        if r.on_hover_text("Refresh: check for a DK.FM update and sync your Spotify playlists now").clicked() && !busy {
+                            self.refresh_all(ctx);
+                        }
                     }
                     // the deck panel is closed: keep play / skip on screen
                     if no_deck && room(ui, 170.0) {
@@ -1058,7 +1141,9 @@ impl App {
             "study" => self.toggle_study(),
             "mini" => self.toggle_mini(ctx),
             "search" => {
+                // filter the playlist open in LIBRARY
                 self.show_panel(Tab::Library);
+                self.browser.use_page(false);
                 self.browser.focus_search = true;
             }
             "import" => self.browser.set_view(browser::View::Import),
@@ -1367,12 +1452,14 @@ impl egui_dock::TabViewer for Viewer<'_> {
             Tab::Scope => self.app.mark("scope", ui.max_rect()),
             Tab::Eq => self.app.mark("eq", ui.max_rect()),
             Tab::Library => self.app.mark("library", ui.max_rect()),
+            Tab::Home => self.app.mark("homepanel", ui.max_rect()),
             _ => {}
         }
         match tab {
             Tab::Deck => deck::show(self.app, ui),
             Tab::Scope => scope::show(self.app, ui),
             Tab::Library => browser::show(self.app, ui),
+            Tab::Home => browser::show_home(self.app, ui),
             Tab::Queue => queue::show(self.app, ui),
             Tab::Eq => eqpanel::show(self.app, ui),
             Tab::Lyrics => lyrics::show(self.app, ui),
@@ -1396,6 +1483,21 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // a bug while drawing a screen must not close DK.FM (and stop the music): it's written
+        // to crash.log, the screen it happened on is closed, and everything else keeps going
+        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.frame_ui(ctx, frame))).is_ok();
+        self.recover(ok, ctx);
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.player.shutdown();
+        self.lib.flush();
+        self.settings.lock().save();
+    }
+}
+
+impl App {
+    fn frame_ui(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         let t_update = Instant::now();
         self.frames += 1;
         self.scope.drawn = false;
@@ -1452,7 +1554,7 @@ impl eframe::App for App {
         // something opened a library view (Ctrl+K, Home, a link, a share…): make sure it's on screen
         if self.browser.nav != self.seen_nav {
             self.seen_nav = self.browser.nav;
-            self.show_panel(Tab::Library);
+            self.show_panel(if self.browser.nav_home { Tab::Home } else { Tab::Library });
         }
         self.titlebar(ctx);
 
@@ -1565,14 +1667,29 @@ impl eframe::App for App {
         profile(t_update.elapsed().as_secs_f32(), frame.info().cpu_usage.unwrap_or(0.0), ctx);
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        self.player.shutdown();
-        self.lib.flush();
-        self.settings.lock().save();
+    /// After a frame that panicked: close whatever was open over the main window (full-screen
+    /// now playing, a dialog, the tour, Ctrl+K) and say so once. If even the main window can't be
+    /// drawn any more, quit as before rather than show a frozen window.
+    fn recover(&mut self, ok: bool, ctx: &egui::Context) {
+        if ok {
+            self.panics = 0;
+            return;
+        }
+        self.panics += 1;
+        if self.panics > 30 {
+            self.lib.flush();
+            std::process::exit(1);
+        }
+        self.nowplaying = false;
+        self.modal = None;
+        self.tour = None;
+        self.palette = None;
+        if self.panics == 1 {
+            self.toast_err("Something went wrong on that screen, so DK.FM closed it (details are in crash.log)");
+        }
+        ctx.request_repaint();
     }
-}
 
-impl App {
     /// Tray menu text and the OS media overlay (title, cover, play state). Returns the status.
     fn sync_os(&mut self) -> crate::audio::Status {
         let st = self.player.status();

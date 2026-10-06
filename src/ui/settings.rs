@@ -69,6 +69,8 @@ pub struct SetUi {
     confirm: Option<Confirm>,
     /// backup list, re-read after changes or every few seconds
     backups: Option<(std::time::Instant, Vec<backup::Entry>)>,
+    /// the search box above the tabs
+    query: String,
 }
 
 enum Confirm {
@@ -270,11 +272,78 @@ fn row(ui: &mut Ui, pal: &theme::Pal, label: &str, f: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// Everything Settings has, for its search box: (tab, setting, other words people might type).
+const FIND: &[(SetTab, &str, &str)] = &[
+    (SetTab::Look, "Theme", "colors colours dark light red retro skin"),
+    (SetTab::Look, "Accent color", "colour highlight"),
+    (SetTab::Look, "Font, text size and zoom", "pixel letters bigger smaller scale"),
+    (SetTab::Look, "Song lists: compact or comfortable", "density rows spacing"),
+    (SetTab::Look, "Album covers next to song titles", "art pictures"),
+    (SetTab::Look, "CRT effects: scanlines and phosphor glow", "retro tv"),
+    (SetTab::Look, "Visualizer style, bars and colours", "scope spectrum oscilloscope"),
+    (SetTab::Look, "Theme editor and your own themes", "custom make"),
+    (SetTab::Layouts, "Layout style: template or free (per pixel)", "panels move arrange"),
+    (SetTab::Layouts, "Panel layouts: save, switch, reset", "default"),
+    (SetTab::Layouts, "Study mode", "focus lyrics"),
+    (SetTab::Lists, "Song list columns", "year genre bitrate added album"),
+    (SetTab::Lists, "Default sort", "order"),
+    (SetTab::Lists, "When DK.FM starts: open to", "start screen"),
+    (SetTab::Sidebar, "Tabs along the top of HOME", "order hide nav"),
+    (SetTab::Sidebar, "Sort playlists by", "recently played name added custom order"),
+    (SetTab::Sidebar, "Playlist covers in the sidebar", "pictures"),
+    (SetTab::Search, "FIND MUSIC: versions per search", "results youtube music"),
+    (SetTab::Search, "Songs like this: how many", "similar recommendations count"),
+    (SetTab::Search, "Add songs search: results and sources", "soundcloud youtube"),
+    (SetTab::Search, "Import matching strictness", "accuracy wrong songs"),
+    (SetTab::Search, "Hide explicit songs", "clean swearing"),
+    (SetTab::Discover, "Home: new releases from your artists", "albums singles"),
+    (SetTab::Discover, "Recommended songs under each playlist", "suggestions"),
+    (SetTab::Library, "Music folders", "scan local files add folder"),
+    (SetTab::Downloads, "Download folder", "where saved location path"),
+    (SetTab::Downloads, "Sound quality", "lossless flac high standard bitrate audio better quality mp3 upgrade"),
+    (SetTab::Downloads, "Parallel downloads", "speed faster at once"),
+    (SetTab::Downloads, "Auto-sync imported playlists", "spotify update check hours"),
+    (SetTab::Downloads, "File names", "pattern rename"),
+    (SetTab::Downloads, "Download engine (yt-dlp)", "update tools"),
+    (SetTab::Spotify, "Connect Spotify", "account login import whole library liked songs"),
+    (SetTab::Spotify, "Spotify app: Client ID", "developer setup"),
+    (SetTab::Playback, "Crossfade", "gapless fade between songs"),
+    (SetTab::Playback, "Visualizer FPS", "frames smooth cpu"),
+    (SetTab::Playback, "Smart shuffle", "random artists skipped"),
+    (SetTab::Playback, "Volume matching", "loudness normalize replaygain"),
+    (SetTab::Playback, "Leveler", "compressor quiet loud"),
+    (SetTab::Playback, "Private listening", "history stats incognito"),
+    (SetTab::Keys, "Keyboard shortcuts", "hotkeys keys bindings"),
+    (SetTab::Backup, "Automatic backups", "restore save"),
+    (SetTab::Backup, "Your backups: restore, export, import", "undo recover"),
+    (SetTab::Backup, "Move to a new PC / give a friend your DK.FM", "transfer copy whole"),
+    (SetTab::Backup, "Share your setup with a friend", "code theme layout"),
+    (SetTab::System, "The X button: quit or keep playing in the tray", "close minimize background"),
+    (SetTab::System, "Start with your computer", "startup login boot"),
+    (SetTab::Updates, "Automatic updates", "new version check"),
+    (SetTab::About, "About DK.FM", "version made by credits"),
+];
+
+/// Settings matching `q` (every word somewhere in the name, its tab or its keywords).
+fn find(q: &str) -> Vec<(SetTab, &'static str)> {
+    let words: Vec<String> = q.to_lowercase().split_whitespace().map(String::from).collect();
+    FIND.iter()
+        .filter(|(t, name, kw)| {
+            let tab = TABS.iter().find(|x| x.0 == *t).map(|x| x.1).unwrap_or("");
+            let hay = format!("{name} {tab} {kw}").to_lowercase();
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .map(|(t, name, _)| (*t, *name))
+        .collect()
+}
+
 fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
     let pal = app.pal;
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.set_width(150.0);
+            ui.add(egui::TextEdit::singleline(&mut app.setui.query).hint_text("🔍 Search settings").desired_width(146.0).font(vt(18.0)));
+            ui.add_space(4.0);
             for (t, name) in TABS {
                 let (r, resp) = ui.allocate_exact_size(Vec2::new(150.0, 28.0), Sense::click());
                 if *tab == t {
@@ -294,6 +363,29 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
         egui::ScrollArea::vertical().id_salt("set-body").max_width(590.0).show(ui, |ui| {
             ui.vertical(|ui| {
             ui.set_width(580.0);
+            let q = app.setui.query.trim().to_string();
+            if !q.is_empty() {
+                let hits = find(&q);
+                caption(ui, &pal, &format!("SETTINGS MATCHING \"{}\"", q.to_uppercase()));
+                if hits.is_empty() {
+                    dim(ui, &pal, "Nothing matches. Try another word, like \"theme\", \"quality\" or \"spotify\".");
+                }
+                for (t, name) in hits {
+                    let tab_name = TABS.iter().find(|x| x.0 == t).map(|x| x.1).unwrap_or("");
+                    let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                    if resp.hovered() {
+                        fill(ui.painter(), r, pal.panel_hi);
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                    ui.painter().text(r.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, name, vt(20.0), if resp.hovered() { pal.accent } else { pal.text });
+                    ui.painter().text(r.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, format!("{} ›", tab_name.to_uppercase()), px(6.0), pal.dim);
+                    if resp.clicked() {
+                        *tab = t;
+                        app.setui.query.clear();
+                    }
+                }
+                return;
+            }
             match tab {
                 SetTab::Look => look(app, ui),
                 SetTab::Layouts => layouts(app, ui),
@@ -1137,7 +1229,28 @@ fn downloads(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.download_format = if mp3 { "mp3-320".into() } else { "high".into() });
         }
     });
-    dim(ui, &pal, "Only new downloads use this; songs you already have stay as they are.");
+    // songs you already have: download them again in the new quality, like Spotify does
+    let fmt_now = app.settings.lock().download_format.clone();
+    // (not the song playing now: its file is in use)
+    let cur = app.player.current_id();
+    let up: Vec<String> = app.dl.upgradable(&fmt_now).into_iter().filter(|id| Some(id) != cur.as_ref()).collect();
+    let busy = app.dl.jobs.lock().iter().any(|j| j.id == "upgrade-quality" && j.tracks.iter().any(|t| t.status.active()));
+    if busy {
+        dim(ui, &pal, "Upgrading the songs you already have: see DOWNLOADS for progress.");
+    } else if up.is_empty() {
+        dim(ui, &pal, "Every song you downloaded is already in this quality (or better).");
+    } else {
+        let per = if fmt_now == "lossless" { 30.0 } else { 8.0 };
+        let gb = up.len() as f32 * per / 1024.0;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("{} song{} you downloaded {} in a lower quality.", up.len(), if up.len() == 1 { "" } else { "s" }, if up.len() == 1 { "is" } else { "are" })).color(pal.text));
+            if button(ui, &pal, &format!("UPGRADE TO {}", crate::downloader::quality_label(&fmt_now)), true, true).on_hover_text(format!("Downloads them again in this quality, in the background (about {gb:.1} GB). Each keeps its playlists, likes and plays; old files go to the Recycle Bin.")).clicked() {
+                app.dl.upgrade(&up);
+                app.toast(format!("Upgrading {} songs: see DOWNLOADS for progress", up.len()));
+            }
+        });
+        dim(ui, &pal, &format!("About {gb:.1} GB, in the background. Songs that came from your own files (not downloaded by DK.FM) stay as they are."));
+    }
     let mut conc = app.settings.lock().download_concurrency;
     row(ui, &pal, "Parallel downloads", |ui| {
         if ui.add(egui::Slider::new(&mut conc, 1..=6)).changed() {
@@ -1190,7 +1303,7 @@ fn spotify(app: &mut App, ui: &mut Ui) {
             Err(e) => app.toast_err(e),
         }
     }
-    let (mut id, mut sec, refresh, user) = { let s = app.settings.lock(); (s.spotify_client_id.clone(), s.spotify_client_secret.clone(), s.spotify_refresh_token.clone(), s.spotify_user.clone()) };
+    let (mut id, refresh, user) = { let s = app.settings.lock(); (s.spotify_client_id.clone(), s.spotify_refresh_token.clone(), s.spotify_user.clone()) };
     caption(ui, &pal, "YOUR SPOTIFY ACCOUNT");
     dim(ui, &pal, "Connect once to bring over everything at once: Liked Songs, every playlist (private ones too) and saved albums. Imported lists keep syncing.");
     ui.add_space(6.0);
@@ -1232,12 +1345,8 @@ fn spotify(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.spotify_client_id = id.trim().to_string());
         }
     });
-    row(ui, &pal, "Client Secret (optional)", |ui| {
-        if ui.add(egui::TextEdit::singleline(&mut sec).password(true).desired_width(300.0)).changed() {
-            app.edit_settings(|s| s.spotify_client_secret = sec.trim().to_string());
-        }
-    });
-    dim(ui, &pal, "The secret is only used for album and song links when you're not connected. Without any of this, DK.FM still reads public links (first 100 songs).");
+    // (no Client Secret: Connect Spotify doesn't need one)
+    dim(ui, &pal, "Only the Client ID is needed. Without connecting, DK.FM still reads public links (the first 100 songs of a playlist).");
     ui.add_space(14.0);
     caption(ui, &pal, "HOW TO SET UP (2 MINUTES, FREE)");
     if ui.link("1. Open developer.spotify.com/dashboard and log in.").clicked() {
@@ -1624,6 +1733,8 @@ fn about(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     caption(ui, &pal, "DK.FM");
     ui.label(egui::RichText::new(format!("v{} · native · {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS)).color(pal.text));
+    ui.label(egui::RichText::new("Made by Danyal Khan").font(px(8.0)).color(pal.accent));
+    ui.add_space(4.0);
     dim(ui, &pal, "Retro desktop music player. Plays your local library and imports Spotify / YouTube / SoundCloud playlists.");
     dim(ui, &pal, "Lyrics from LRCLIB · downloads powered by yt-dlp, FFmpeg and QuickJS · fonts VT323 & Press Start 2P (OFL).");
     dim(ui, &pal, "Only download music you have the rights to.");
@@ -1635,4 +1746,19 @@ fn cell(ui: &mut Ui, w: f32, text: egui::RichText) {
         ui.set_min_width(w);
         ui.add(egui::Label::new(text).truncate());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_search_finds_by_everyday_words() {
+        let tabs = |q: &str| find(q).into_iter().map(|(t, _)| TABS.iter().find(|x| x.0 == t).unwrap().1).collect::<Vec<_>>();
+        assert_eq!(tabs("lossless"), ["Downloads"]);
+        assert!(tabs("dark").contains(&"Look"));
+        assert!(tabs("spotify").contains(&"Spotify"));
+        assert_eq!(tabs("sound QUALITY"), ["Downloads"]);
+        assert!(tabs("zzzz").is_empty());
+    }
 }

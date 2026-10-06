@@ -81,7 +81,8 @@ fn short_hash(s: &str) -> String {
 }
 
 static RE_SP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:spotify:(playlist|album|track):([A-Za-z0-9]+))|open\.spotify\.com/(?:intl-[a-z-]+/)?(?:embed/)?(playlist|album|track)/([A-Za-z0-9]+)").unwrap());
-const LIKED_URL: &str = "spotify:liked";
+/// Spotify's Liked Songs (synced into DK.FM's own Liked, not a playlist)
+pub const LIKED_URL: &str = "spotify:liked";
 
 /// "A, B & C x D" -> A / B / C / D
 static RE_YT_ARTISTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*,\s*|\s+&\s+|\s+x\s+").unwrap());

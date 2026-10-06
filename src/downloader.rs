@@ -42,6 +42,8 @@ pub struct JTrack {
     pub low_confidence: bool,
     pub track_id: Option<String>,
     pub forced: Option<String>,
+    /// a sound quality upgrade: the library song whose file this download replaces
+    pub replace: Option<String>,
 }
 
 pub struct Job {
@@ -273,7 +275,19 @@ impl Downloader {
         let (dir, fmt, pattern) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone(), s.name_pattern.clone()) };
         // the folder "open folder" shows (songs may go into subfolders of it, per the name pattern)
         let folder = if pattern.trim().is_empty() || pattern.starts_with("{folder}") { PathBuf::from(dir).join(sanitize(&folder_name(&col.kind, &col.name))) } else { PathBuf::from(dir) };
-        if col.kind == "playlist" || col.kind == "album" {
+        // Spotify's Liked Songs: into DK.FM's own Liked (♥), and kept in sync from now on
+        let spotify_liked = col.url == sources::LIKED_URL;
+        let target = if spotify_liked {
+            let mut s = self.settings.lock();
+            if !s.spotify_liked_sync {
+                s.spotify_liked_sync = true;
+                s.save();
+            }
+            Some(LIKED.to_string())
+        } else {
+            target
+        };
+        if (col.kind == "playlist" || col.kind == "album") && !spotify_liked {
             let pid = format!("sp-{job_id}");
             // a re-sync keeps your changes: songs, order, name, cover, folder, pin
             let prev = self.lib.data.read().playlists.iter().find(|p| p.id == pid).cloned();
@@ -307,6 +321,7 @@ impl Downloader {
                 low_confidence: false,
                 track_id: None,
                 forced: None,
+                replace: None,
             })
             .collect();
         let mut q = self.queue.lock();
@@ -320,6 +335,51 @@ impl Downloader {
         // songs you already have go into the playlist now (and learn their Spotify ids), even
         // when nothing needs downloading
         self.mirror_job(&job_id);
+        self.touch();
+        job_id
+    }
+
+    /// Songs DK.FM downloaded in a lower quality than `fmt` (they can be downloaded again in it).
+    pub fn upgradable(&self, fmt: &str) -> Vec<String> {
+        let playing = self.lib.data.read();
+        playing.tracks.values().filter(|t| t.youtube_id.is_some() && below(t, fmt)).map(|t| t.id.clone()).collect()
+    }
+
+    /// Download these songs again in the sound quality set now, each replacing its old file
+    /// (playlists, likes and plays stay; an old file of another type goes to the Recycle Bin).
+    pub fn upgrade(&self, ids: &[String]) -> String {
+        let job_id = "upgrade-quality".to_string();
+        self.cancel(&job_id);
+        self.jobs.lock().retain(|j| j.id != job_id);
+        let (dir, fmt) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone()) };
+        let lib = self.lib.data.read();
+        let tracks: Vec<JTrack> = ids
+            .iter()
+            .filter_map(|id| lib.tracks.get(id))
+            .filter_map(|t| {
+                let y = t.youtube_id.clone()?;
+                let it = ITrack {
+                    title: t.title.clone(),
+                    artists: vec![t.artist.clone()],
+                    album: t.album.clone(),
+                    album_artist: t.album_artist.clone(),
+                    year: t.year,
+                    track_no: t.track,
+                    duration_ms: (t.duration > 0.0).then(|| (t.duration * 1000.0) as u64),
+                    spotify_id: t.spotify_id.clone(),
+                    youtube_id: Some(y.clone()),
+                    source_key: t.source_key.clone().unwrap_or_else(|| format!("yt:{y}")),
+                    raw_title: t.title.clone(),
+                    ..Default::default()
+                };
+                Some(JTrack { t: it, status: TStatus::Queued, progress: 0.0, error: None, note: None, matched: None, candidates: Vec::new(), low_confidence: false, track_id: None, forced: Some(y), replace: Some(t.id.clone()) })
+            })
+            .collect();
+        drop(lib);
+        let n = tracks.len();
+        let col = Collection { kind: "upgrade".into(), id: "quality".into(), name: format!("Sound quality upgrade to {} ({n} songs)", quality_label(&fmt)), tracks: tracks.iter().map(|t| t.t.clone()).collect(), complete: true, ..Default::default() };
+        self.queue.lock().extend((0..n).map(|i| (job_id.clone(), i)));
+        self.jobs.lock().push(Job { id: job_id.clone(), col, folder: PathBuf::from(dir), fmt, target_playlist: None, cancel: Arc::new(AtomicBool::new(false)), tracks });
         self.touch();
         job_id
     }
@@ -392,14 +452,23 @@ impl Downloader {
     }
 
     fn process(&self, job_id: &str, idx: usize) {
-        let (t, fmt, kind, job_cover, job_name, cancel, forced) = {
+        let (t, fmt, kind, job_cover, job_name, cancel, forced, replace) = {
             let jobs = self.jobs.lock();
             let Some((j, jt)) = jobs.iter().find(|j| j.id == job_id).and_then(|j| Some((j, j.tracks.get(idx)?))) else { return };
             if jt.status != TStatus::Queued || j.cancel.load(Ordering::Relaxed) {
                 return;
             }
-            (jt.t.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone())
+            (jt.t.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone(), jt.replace.clone())
         };
+        // an upgrade: the song's file now (next to it goes the new one)
+        let replacing: Option<(String, PathBuf)> = replace.as_ref().and_then(|id| self.lib.track(id).map(|t| (id.clone(), PathBuf::from(t.path))));
+        if replace.is_some() && replacing.is_none() {
+            self.with_track(job_id, &cancel, idx, |jt| {
+                jt.status = TStatus::Skipped;
+                jt.note = Some("No longer in your library".into());
+            });
+            return;
+        }
         // a song you already have (from another list, or a file the scan found) isn't downloaded again
         if forced.is_none() {
             let kidx = self.lib.key_index();
@@ -439,11 +508,19 @@ impl Downloader {
             let first_artist = t.artists.first().cloned().unwrap_or_else(|| "Unknown".into());
             let album = if !t.album.is_empty() { t.album.clone() } else if kind == "playlist" || kind == "album" { job_name.clone() } else { t.title.clone() };
             let rel = render_name(&pattern, &NameParts { artist: &first_artist, album: &album, title: &t.title, track: t.track_no, year: t.year, folder: &folder_name(&kind, &job_name) });
-            let base = PathBuf::from(dir).join(&rel);
-            let out_file = PathBuf::from(format!("{}.{ext}", base.display()));
+            let base = match &replacing {
+                Some((_, old)) => old.with_extension(""),
+                None => PathBuf::from(dir).join(&rel),
+            };
+            let mut out_file = PathBuf::from(format!("{}.{ext}", base.display()));
+            // an upgrade to the same file type: saved beside it first, then put in its place
+            let same = replacing.as_ref().is_some_and(|(_, old)| *old == out_file);
+            if same {
+                out_file = PathBuf::from(format!("{}.dkfm-new.{ext}", base.display()));
+            }
             let _ = std::fs::create_dir_all(out_file.parent().unwrap_or(Path::new(".")));
             // already downloaded, maybe at another sound quality before it was changed
-            let existing = std::iter::once(ext).chain(["m4a", "flac", "mp3"]).map(|e| PathBuf::from(format!("{}.{e}", base.display()))).find(|p| p.exists());
+            let existing = if replacing.is_some() { None } else { std::iter::once(ext).chain(["m4a", "flac", "mp3"]).map(|e| PathBuf::from(format!("{}.{e}", base.display()))).find(|p| p.exists()) };
 
             if let (Some(out_file), None) = (existing, &forced) {
                 let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, None));
@@ -543,11 +620,30 @@ impl Downloader {
                 }
                 let comment = format!("DK.FM · {}{}", if pick.id.is_empty() { t.direct_url.clone().unwrap_or_default() } else { format!("youtube:{}", pick.id) }, t.spotify_id.as_ref().map(|s| format!(" · spotify:{s}")).unwrap_or_default());
                 write_tags(&audio, &t, &album, &comment, Some(pick.id.as_str()).filter(|i| !i.is_empty()), cover)?;
+                // cancelled while it was being saved: it doesn't go into the library after all
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Cancelled".into());
+                }
                 if std::fs::rename(&audio, &out_file).is_err() {
                     std::fs::copy(&audio, &out_file).map_err(|e| e.to_string())?;
                 }
                 let yid = if pick.id.is_empty() { None } else { Some(pick.id.clone()) };
-                let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, yid.clone()));
+                let ids = match &replacing {
+                    // same type: the new file takes the old one's name, so it's the same song
+                    Some((_, old)) if same && std::fs::rename(&out_file, old).is_ok() => self.lib.add_files(std::slice::from_ref(old), |lt| apply_keys(lt, &t, yid.clone())),
+                    // FLAC for an M4A (or the old file is busy): the new song takes over the old
+                    // one's playlists, likes and plays, and the old file goes to the Recycle Bin
+                    Some((old_id, _)) => {
+                        let ids = self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, yid.clone()));
+                        if let Some(new_id) = ids.first().filter(|n| *n != old_id) {
+                            for f in self.lib.merge_duplicates(new_id, std::slice::from_ref(old_id)) {
+                                let _ = crate::system::trash(&f);
+                            }
+                        }
+                        ids
+                    }
+                    None => self.lib.add_files(std::slice::from_ref(&out_file), |lt| apply_keys(lt, &t, yid.clone())),
+                };
                 self.with_track(job_id, &cancel, idx, |jt| {
                     jt.status = TStatus::Done;
                     jt.track_id = ids.first().cloned();
@@ -609,8 +705,17 @@ impl Downloader {
         if col.kind != "playlist" && col.kind != "album" {
             return;
         }
-        let pid = format!("sp-{}-{}", col.kind, col.id);
         let idx = self.lib.key_index();
+        if col.url == sources::LIKED_URL {
+            // Liked Songs: the ones you have get ♥ (nothing is unliked here)
+            let ids: Vec<String> = col.tracks.iter().filter_map(|t| lookup(&idx, t).cloned()).collect();
+            let new: Vec<String> = { let d = self.lib.data.read(); ids.into_iter().filter(|id| !d.stats.get(id).is_some_and(|s| s.liked)).collect() };
+            if !new.is_empty() {
+                self.lib.set_liked(&new, true);
+            }
+            return;
+        }
+        let pid = format!("sp-{}-{}", col.kind, col.id);
         let mut ordered: Vec<String> = Vec::new();
         let mut keys: Vec<Vec<String>> = Vec::new();
         let mut links = Vec::new();
@@ -670,7 +775,11 @@ impl Downloader {
         if self.syncing.swap(true, Ordering::SeqCst) {
             return 0;
         }
-        let list: Vec<Playlist> = self.lib.data.read().playlists.iter().filter(|p| p.is_imported() && (manual || p.auto_sync != Some(false))).cloned().collect();
+        let mut list: Vec<Playlist> = self.lib.data.read().playlists.iter().filter(|p| p.is_imported() && (manual || p.auto_sync != Some(false))).cloned().collect();
+        // Spotify's Liked Songs, synced into Liked
+        if self.settings.lock().spotify_liked_sync {
+            list.push(Playlist { id: "sp-playlist-liked".into(), name: "Liked Songs".into(), source: Some("spotify".into()), source_url: Some(sources::LIKED_URL.into()), ..Default::default() });
+        }
         let mut added = 0;
         for p in list {
             added += self.sync_one(&p).unwrap_or(0);
@@ -696,6 +805,17 @@ impl Downloader {
             self.mirror(&col);
         }
         Ok(n)
+    }
+}
+
+/// This song's file is a lower sound quality than `fmt` would download now.
+fn below(t: &store::Track, fmt: &str) -> bool {
+    let ext = Path::new(&t.path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    match fmt {
+        "lossless" => ext != "flac",
+        // HIGH is 256 kbps AAC: the 128 kbps STANDARD files and older MP3s are below it
+        "standard" | "mp3-320" | "mp3-v0" => false,
+        _ => ext != "flac" && t.bitrate.is_some_and(|b| b < 200),
     }
 }
 
@@ -1013,5 +1133,16 @@ mod tests {
         drop(d);
         lib.delete_playlist(&pid);
         lib.flush();
+    }
+
+    #[test]
+    fn knows_which_songs_a_better_quality_would_upgrade() {
+        let t = |path: &str, kbps: Option<u32>| store::Track { path: path.into(), bitrate: kbps, ..Default::default() };
+        // LOSSLESS: everything that isn't FLAC yet
+        assert!(below(&t("a.m4a", Some(256)), "lossless") && below(&t("a.mp3", Some(320)), "lossless") && !below(&t("a.flac", Some(900)), "lossless"));
+        // HIGH: the 128 kbps files, not the 256 ones or FLAC
+        assert!(below(&t("a.m4a", Some(128)), "high") && !below(&t("a.m4a", Some(256)), "high") && !below(&t("a.flac", Some(900)), "high"));
+        // a lower setting never "upgrades" anything
+        assert!(!below(&t("a.m4a", Some(128)), "standard") && !below(&t("a.m4a", Some(128)), "mp3-320"));
     }
 }

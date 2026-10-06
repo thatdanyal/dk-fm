@@ -151,9 +151,10 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                 }
             }
             // wake up in time for the next glide, and to light the next line the moment it starts
-            if until.is_finite() {
+            // (none after the last line: `until` is f64::MAX there, far too long for a timer)
+            if next_at.is_some() {
                 let wait = if until > LEAD { until - LEAD } else { until };
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait.max(0.01)));
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait.clamp(0.01, 3600.0)));
             }
             let size = 22.0 * scale;
             let mut sa = egui::ScrollArea::vertical().auto_shrink([false; 2]).id_salt("lyr");

@@ -147,7 +147,7 @@ fn test_download(args: &[String]) {
 
 /// Errors (panics) leave no message on screen (no console on Windows): write what happened to
 /// crash.log in the data folder, so it can be reported and fixed. A panic in a background
-/// thread only stops that thread; one in the window's thread closes DK.FM.
+/// thread only stops that thread; one while drawing the window closes that screen (App::recover).
 fn crash_log() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {

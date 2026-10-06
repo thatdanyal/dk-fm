@@ -90,7 +90,7 @@ fn d_pixel() -> String { "pixel".into() }
 fn d_comfy() -> String { "comfortable".into() }
 fn d_all() -> String { "all".into() }
 fn d_daily() -> String { "daily".into() }
-fn d_custom() -> String { "custom".into() }
+fn d_played() -> String { "played".into() }
 /// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)
 fn d_hidden_tabs() -> Vec<String> { ["recent", "top"].map(String::from).to_vec() }
 pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "time"].map(String::from).to_vec() }
@@ -232,7 +232,13 @@ pub struct Settings {
     /// "daily" | "weekly"
     #[serde(default = "d_daily")] pub backup_every: String,
     // ---- playlists in the sidebar: "custom" (drag to reorder) | "name" | "added" | "played"
-    #[serde(default = "d_custom")] pub playlist_sort: String,
+    #[serde(default = "d_played")] pub playlist_sort: String,
+    /// width of the playlists column in LIBRARY (0 = fit the panel)
+    #[serde(default)] pub sidebar_width: f32,
+    /// Spotify's Liked Songs are synced into DK.FM's own Liked (♥), not a separate playlist
+    #[serde(default)] pub spotify_liked_sync: bool,
+    /// one-time changes already made to these settings and the library (see `Settings::upgrade`)
+    #[serde(default)] pub upgrades: Vec<String>,
     #[serde(default = "d_true")] pub sidebar_covers: bool,
     // ---- private listening (plays, skips and history aren't recorded while on)
     #[serde(default)] pub private_listening: bool,
@@ -249,6 +255,10 @@ pub struct Settings {
     #[serde(default = "d_true")] pub onboarded: bool,
     /// the "what's new" notice last shown (see ui::welcome::WHATS_NEW)
     #[serde(default)] pub whats_new_seen: String,
+    /// the DK.FM version that last ran (a different one = just updated: say what changed)
+    #[serde(default)] pub last_version: String,
+    /// the newest tour steps offered so far (ui::tour::TOUR_VERSION)
+    #[serde(default)] pub tour_seen: u32,
     /// no settings file yet when DK.FM started: a fresh install
     #[serde(skip)] pub fresh: bool,
     /// keep any keys this version doesn't know about
@@ -291,6 +301,15 @@ impl Settings {
     }
     pub fn save(&self) {
         save_json(&data_dir().join("settings.json"), self);
+    }
+    /// True the first time it's asked for `name` (and remembers it): for changes that are made
+    /// once for people who update, never again over their own choices.
+    pub fn upgrade(&mut self, name: &str) -> bool {
+        if self.upgrades.iter().any(|u| u == name) {
+            return false;
+        }
+        self.upgrades.push(name.into());
+        true
     }
 }
 

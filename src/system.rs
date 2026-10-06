@@ -235,9 +235,9 @@ impl Media {
         if key != self.last {
             self.last = key;
             let url = cover.map(|p| format!("file:///{}", p.replace('\\', "/")));
-            let _ = c.set_metadata(souvlaki::MediaMetadata { title: Some(title), artist: Some(artist), album: Some(album), cover_url: url.as_deref(), duration: Some(std::time::Duration::from_secs_f64(duration.max(0.0))) });
+            let _ = c.set_metadata(souvlaki::MediaMetadata { title: Some(title), artist: Some(artist), album: Some(album), cover_url: url.as_deref(), duration: Some(std::time::Duration::from_secs_f64(duration.max(0.0).min(1e7))) });
         }
-        let prog = Some(souvlaki::MediaPosition(std::time::Duration::from_secs_f64(position.max(0.0))));
+        let prog = Some(souvlaki::MediaPosition(std::time::Duration::from_secs_f64(position.max(0.0).min(1e7))));
         let _ = c.set_playback(if playing { souvlaki::MediaPlayback::Playing { progress: prog } } else { souvlaki::MediaPlayback::Paused { progress: prog } });
     }
 }

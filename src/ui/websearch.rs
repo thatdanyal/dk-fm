@@ -81,9 +81,21 @@ pub fn listen(app: &mut App, ctx: &egui::Context) {
     });
 }
 
+/// The search bar was typed in (`enter` = search now, else after a short pause).
+pub fn typed(app: &mut App, enter: bool) {
+    if app.browser.view_of(true) != &super::browser::View::Web {
+        let q = std::mem::take(&mut app.browser.web.query);
+        app.browser.set_view(super::browser::View::Web);
+        app.browser.web.query = q;
+    }
+    let w = &mut app.browser.web;
+    w.edited = if enter { None } else { Some(Instant::now()) };
+    w.stack.clear();
+}
+
 /// Search for `q` in FIND MUSIC (e.g. what SHAZAM heard).
 pub fn search_for(app: &mut App, q: String, cat: &str) {
-    app.show_panel(super::Tab::Library);
+    app.show_panel(super::Tab::Home);
     app.browser.set_view(super::browser::View::Web);
     let w = &mut app.browser.web;
     w.query = q;
@@ -145,28 +157,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     take_results(app);
     let cat = if app.browser.web.cat.is_empty() { "all".to_string() } else { app.browser.web.cat.clone() };
     egui::Frame::new().inner_margin(egui::Margin::same(14)).show(ui, |ui| {
-        ui.label(egui::RichText::new("FIND MUSIC").font(px(12.0)).color(pal.text));
-        ui.add_space(6.0);
-        let mut go = false;
-        ui.horizontal(|ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut app.browser.web.query).hint_text("What do you want to listen to? Songs, artists, albums, playlists, podcasts…").desired_width(ui.available_width() - 110.0).font(vt(19.0)));
-            if app.browser.web.focus {
-                r.request_focus();
-                app.browser.web.focus = false;
-            }
-            if r.changed() {
-                app.browser.web.edited = Some(Instant::now());
-                app.browser.web.stack.clear();
-            }
-            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                go = true;
-            }
-            if button(ui, &pal, "SEARCH", true, true).clicked() {
-                go = true;
-                app.browser.web.stack.clear();
-            }
-        });
-        ui.add_space(4.0);
+        // (the search box is the search bar in HOME's tab strip)
         ui.horizontal_wrapped(|ui| {
             for (k, label) in sources::CATEGORIES {
                 if tb_button(ui, &pal, label, cat == k).clicked() && cat != k {
@@ -198,7 +189,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         let key = format!("s|{cat}|{q}");
         let idle = app.browser.web.edited.map(|t| t.elapsed() >= Duration::from_millis(700)).unwrap_or(true);
         if !app.browser.web.res.contains_key(&key) {
-            if idle || go {
+            if idle {
                 let (q2, c2) = (q.clone(), cat.clone());
                 fetch(app, ui.ctx(), key.clone(), false, move |more| sources::catalog(&q2, &c2, more.as_deref()));
             } else {

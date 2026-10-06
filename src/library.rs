@@ -681,6 +681,24 @@ impl Library {
         paths
     }
 
+/// Spotify's "Liked Songs" imported as a playlist: its songs get ♥ in DK.FM's own Liked and the
+    /// playlist goes (Liked is one list). Returns how many songs that was, if there was one.
+    pub fn merge_spotify_liked(&self) -> Option<usize> {
+        let liked = |p: &Playlist| p.url() == Some(crate::sources::LIKED_URL);
+        let ids: Vec<String> = {
+            let d = self.data.read();
+            let pls: Vec<&Playlist> = d.playlists.iter().filter(|p| liked(p)).collect();
+            if pls.is_empty() {
+                return None;
+            }
+            pls.iter().flat_map(|p| p.track_ids.iter().cloned()).collect()
+        };
+        self.set_liked(&ids, true);
+        self.data.write().playlists.retain(|p| !liked(p));
+        self.changed();
+        Some(ids.len())
+    }
+
     pub fn set_liked(&self, ids: &[String], liked: bool) {
         let mut d = self.data.write();
         for id in ids {
@@ -992,6 +1010,29 @@ mod tests {
         assert!(!d.tracks.contains_key("a") && d.stats["b"].plays == 5 && d.stats["b"].liked);
         assert_eq!(d.playlists[0].track_ids, ["e", "b", "d"]);
         drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn spotify_liked_becomes_likes() {
+        let (_profile, dir) = crate::store::test_profile("libtest-liked");
+        let lib = Library::load();
+        {
+            let mut d = lib.data.write();
+            for t in [track("a", "Sade", "Smooth Operator", 258.0, "AAC", 128), track("b", "Drake", "Hold On", 230.0, "AAC", 256)] {
+                d.tracks.insert(t.id.clone(), t);
+            }
+            d.playlists = vec![
+                Playlist { id: "sp-playlist-liked".into(), name: "Liked Songs".into(), source_url: Some(crate::sources::LIKED_URL.into()), track_ids: vec!["a".into(), "b".into()], ..Default::default() },
+                Playlist { id: "mine".into(), name: "Mine".into(), track_ids: vec!["a".into()], ..Default::default() },
+            ];
+        }
+        assert_eq!(lib.merge_spotify_liked(), Some(2));
+        let d = lib.data.read();
+        assert!(d.stats["a"].liked && d.stats["b"].liked);
+        assert_eq!(d.playlists.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), ["mine"]);
+        drop(d);
+        assert_eq!(lib.merge_spotify_liked(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

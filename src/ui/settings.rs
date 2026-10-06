@@ -177,8 +177,8 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
             }
             false
         }
-        Modal::Setup { quality, eq, close } => {
-            app.modal = super::welcome::show_setup(app, ctx, quality, eq, close);
+        Modal::Setup { quality, eq, close, ask } => {
+            app.modal = super::welcome::show_setup(app, ctx, quality, eq, close, ask);
             false
         }
         Modal::Update => {
@@ -247,9 +247,11 @@ fn run_prompt(app: &mut App, action: PromptAction, text: String) {
             }
             app.toast(if n > 0 { format!("Saved \"{text}\" ({n} songs)") } else { format!("Created \"{text}\"") });
         }
-        PromptAction::NewPlaylistGet(t, preview) => {
+        PromptAction::NewPlaylistGet(t, preview, pick) => {
             let id = app.lib.new_playlist(&text, vec![]);
-            super::dest::get(app, &t, Some(id), preview);
+            // (the folder was settled before the name: no second question)
+            let pick = pick.unwrap_or_else(|| app.dl.auto_folder("track", &t.title));
+            super::dest::get(app, &t, Some(id), preview, Some(pick));
         }
         PromptAction::RenamePlaylist(id) => app.lib.edit_playlist(&id, |p| p.name = text),
         PromptAction::Describe(id) => app.lib.edit_playlist(&id, |p| p.description = text),
@@ -1199,32 +1201,38 @@ fn library(app: &mut App, ui: &mut Ui) {
 fn downloads(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     caption(ui, &pal, "DOWNLOAD FOLDER");
-    let dir = app.settings.lock().download_dir.clone();
+    let (dir, ask) = { let s = app.settings.lock(); (s.download_dir.clone(), s.ask_folder) };
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(&dir).color(pal.text));
         if button(ui, &pal, "CHANGE", false, true).clicked() {
-            if let Some(f) = rfd::FileDialog::new().pick_folder() {
+            if let Some(f) = rfd::FileDialog::new().set_directory(&dir).pick_folder() {
                 app.edit_settings(|s| s.download_dir = f.to_string_lossy().into_owned());
                 app.rescan();
             }
         }
     });
+    row(ui, &pal, "Where new songs go", |ui| {
+        if let Some(a) = choice(ui, &pal, &ask, &[(false, "LET DK.FM CHOOSE"), (true, "ASK ME EACH TIME")]) {
+            app.edit_settings(|s| s.ask_folder = a);
+        }
+    });
+    dim(ui, &pal, if ask { "Before each download DK.FM asks which folder the songs go in (it opens in the folder DK.FM would pick)." } else { "DK.FM picks: a folder per playlist or album in the download folder, and Downloads for single songs. You can still pick another folder on the Import screen or in SAVE TO." });
     ui.add_space(14.0);
     caption(ui, &pal, "SOUND QUALITY: ALL SONGS + FUTURE DOWNLOADS");
     let fmt = app.settings.lock().download_format.clone();
-    // older settings saved "m4a", which is HIGH now
-    let cur = if matches!(fmt.as_str(), "standard" | "lossless" | "mp3-320" | "mp3-v0") { fmt.clone() } else { "high".to_string() };
+    // older settings saved "m4a" (or "lossless", gone since 2.1), which are HIGH now
+    let cur = if matches!(fmt.as_str(), "standard" | "mp3-320" | "mp3-v0") { fmt.clone() } else { "high".to_string() };
     row(ui, &pal, "Downloads", |ui| {
-        if let Some(f) = choice(ui, &pal, &cur, &[("standard".to_string(), "STANDARD"), ("high".to_string(), "HIGH"), ("lossless".to_string(), "LOSSLESS")]) {
+        if let Some(f) = choice(ui, &pal, &cur, &[("standard".to_string(), "STANDARD"), ("high".to_string(), "HIGH")]) {
             app.edit_settings(|s| s.download_format = f);
         }
     });
     dim(ui, &pal, match cur.as_str() {
         "standard" => "YouTube's AAC stream as it is (about 128 kbps). Smallest files, about 4 MB a song.",
-        "lossless" => "The best stream YouTube has, saved as FLAC so nothing more is lost on the way. YouTube itself has no lossless audio, so it sounds like HIGH but files are about 5x bigger (25-40 MB a song).",
         "mp3-320" | "mp3-v0" => "MP3, for old devices and car stereos. Slightly lower quality than HIGH.",
         _ => "The best stream YouTube has (Opus, about 160 kbps), kept as 256 kbps AAC. Recommended: the best sound for its size, about 8 MB a song.",
     });
+    dim(ui, &pal, "Lossless: YouTube and SoundCloud have no lossless audio, so DK.FM can't download it. Have FLAC, ALAC or WAV files (from Bandcamp, Qobuz or a CD)? Add their folder in Settings > Library or drag them onto the window: DK.FM plays them as they are.");
     ui.horizontal(|ui| {
         ui.add_space(4.0);
         let mut mp3 = cur.starts_with("mp3");
@@ -1243,7 +1251,7 @@ fn downloads(app: &mut App, ui: &mut Ui) {
     } else if up.is_empty() {
         dim(ui, &pal, "Every song you downloaded is already in this quality (or better).");
     } else {
-        let per = if fmt_now == "lossless" { 30.0 } else { 8.0 };
+        let per = 8.0;
         let size = gb_text(up.len() as f64 * per / 1024.0);
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(format!("{} song{} you downloaded {} in a lower quality.", up.len(), if up.len() == 1 { "" } else { "s" }, if up.len() == 1 { "is" } else { "are" })).color(pal.text));
@@ -1254,8 +1262,8 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         });
         dim(ui, &pal, &format!("About {size}, in the background. Songs that came from your own files (not downloaded by DK.FM) stay as they are."));
     }
-    // FLACs from LOSSLESS, now that a smaller quality is set: made smaller here, same sound
-    let small: Vec<String> = app.dl.shrinkable(&fmt_now).into_iter().filter(|id| Some(id) != cur.as_ref()).collect();
+    // FLACs DK.FM downloaded as LOSSLESS (before 2.1): made smaller here, same sound
+    let small: Vec<String> = app.dl.shrinkable().into_iter().filter(|id| Some(id) != cur.as_ref()).collect();
     let shrinking = app.dl.jobs.lock().iter().any(|j| j.id == "shrink-quality" && j.tracks.iter().any(|t| t.status.active()));
     if shrinking {
         dim(ui, &pal, "Making your FLAC songs smaller: see DOWNLOADS for progress.");
@@ -1264,7 +1272,7 @@ fn downloads(app: &mut App, ui: &mut Ui) {
         let freed: f64 = { let d = app.lib.data.read(); small.iter().filter_map(|id| d.tracks.get(id)).map(|t| t.duration * (t.bitrate.unwrap_or(900) as f64 - kbps).max(0.0) * 1000.0 / 8.0).sum::<f64>() / 1e9 };
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(egui::RichText::new(format!("{} song{} from LOSSLESS {} FLAC.", small.len(), if small.len() == 1 { "" } else { "s" }, if small.len() == 1 { "is" } else { "are" })).color(pal.text));
+            ui.label(egui::RichText::new(format!("{} song{} downloaded as LOSSLESS {} FLAC.", small.len(), if small.len() == 1 { "" } else { "s" }, if small.len() == 1 { "is" } else { "are" })).color(pal.text));
             if button(ui, &pal, &format!("MAKE THEM {} (FREES ABOUT {})", crate::downloader::quality_label(&fmt_now), gb_text(freed).to_uppercase()), true, true).on_hover_text("Converted on this PC in a few minutes, nothing downloaded. They sound the same: YouTube's audio isn't lossless, so the FLAC holds exactly what this quality keeps. Playlists, likes and plays stay; the FLACs go to the Recycle Bin.").clicked() {
                 app.dl.shrink(&small);
                 app.toast(format!("Making {} songs smaller: see DOWNLOADS for progress", small.len()));
@@ -1305,7 +1313,7 @@ fn downloads(app: &mut App, ui: &mut Ui) {
     dim(ui, &pal, &if st.version.is_empty() { "Download tools are fetched the first time you import (yt-dlp, ffmpeg, QuickJS) and yt-dlp is updated daily.".into() } else { format!("yt-dlp {} · updated daily", st.version) });
 }
 
-/// SOUND QUALITY: ONE SONG — find a song, then STANDARD / HIGH / LOSSLESS just for it.
+/// SOUND QUALITY: ONE SONG — find a song, then STANDARD / HIGH just for it.
 fn one_song_quality(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     caption(ui, &pal, "SOUND QUALITY: ONE SONG");
@@ -1344,7 +1352,7 @@ fn one_song_quality(app: &mut App, ui: &mut Ui) {
         let now = crate::downloader::Downloader::quality_of(&t);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(format!("Now {}. Make it:", crate::downloader::quality_label(now))).color(pal.text));
-            for (f, label) in [("standard", "STANDARD"), ("high", "HIGH"), ("lossless", "LOSSLESS")] {
+            for (f, label) in [("standard", "STANDARD"), ("high", "HIGH")] {
                 // smaller only works from FLAC (nothing to download: converted here)
                 let can = f == now || now == "lossless" || f != "standard";
                 if button(ui, &pal, label, f == now, can).clicked() && f != now {
@@ -1359,8 +1367,8 @@ fn one_song_quality(app: &mut App, ui: &mut Ui) {
                 }
             }
         });
-        if now != "lossless" {
-            dim(ui, &pal, "LOSSLESS downloads it again as FLAC: about 5x the space (25-40 MB) for the same sound, since YouTube's audio isn't lossless.");
+        if now == "lossless" {
+            dim(ui, &pal, "It was downloaded as FLAC: HIGH or STANDARD make it smaller on this PC, nothing downloaded, same sound (YouTube's audio isn't lossless).");
         }
     }
     ui.ctx().data_mut(|d| {

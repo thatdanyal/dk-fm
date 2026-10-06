@@ -1,10 +1,12 @@
 //! "SAVE TO": where a new song goes when you + GET it (or KEEP a preview): your library only,
-//! Liked, one of your playlists or a new one. The last playlist used is at the top.
+//! Liked, one of your playlists or a new one. The last playlist used is at the top. Also which
+//! folder on your PC its file goes in (DK.FM chooses, unless you pick one).
 use super::theme::{px, vt};
 use super::widgets::fill;
 use super::{App, Modal, PromptAction};
 use crate::sources::ITrack;
 use eframe::egui::{self, Id, Key, Pos2, Sense, Vec2};
+use std::path::{Path, PathBuf};
 
 pub struct Dest {
     t: ITrack,
@@ -12,17 +14,46 @@ pub struct Dest {
     filter: String,
     /// a preview being kept (marked KEEPING once a place is picked)
     preview: bool,
+    /// the folder you picked for its file (None: DK.FM chooses, or asks if Settings says so)
+    pick: Option<PathBuf>,
     frames: u32,
 }
 
 /// Ask where `t` should go, in a small menu at `pos`.
 pub fn open(app: &mut App, t: &ITrack, pos: Pos2, preview: bool) {
-    app.dest = Some(Dest { t: t.clone(), pos, filter: String::new(), preview, frames: 0 });
+    app.dest = Some(Dest { t: t.clone(), pos, filter: String::new(), preview, pick: None, frames: 0 });
+}
+
+/// A folder picker for downloads, opened where DK.FM would put the songs (or the nearest folder
+/// of it that exists yet). None: cancelled.
+pub fn pick_folder(auto: &Path, title: &str) -> Option<PathBuf> {
+    let mut d = rfd::FileDialog::new().set_title(title);
+    if let Some(start) = auto.ancestors().find(|p| p.is_dir()) {
+        d = d.set_directory(start);
+    }
+    d.pick_folder()
+}
+
+/// The folder for a download: `picked` if you already chose one; else, with Settings >
+/// Downloads > ASK ME EACH TIME, a folder picker (None: you cancelled, so nothing downloads);
+/// else Some(None): DK.FM chooses (`auto`).
+pub fn folder_for(app: &App, picked: Option<PathBuf>, auto: &Path) -> Option<Option<PathBuf>> {
+    if picked.is_some() || !app.settings.lock().ask_folder {
+        return Some(picked);
+    }
+    pick_folder(auto, "Where should the songs go?").map(Some)
+}
+
+/// A folder as a short label: its last two parts ("…\Music\Chill").
+pub fn short(p: &Path) -> String {
+    let parts: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).filter(|s| !s.is_empty() && s != "\\" && s != "/").collect();
+    if parts.len() <= 2 { p.display().to_string() } else { format!("…{}{}", std::path::MAIN_SEPARATOR, parts[parts.len() - 2..].join(std::path::MAIN_SEPARATOR_STR)) }
 }
 
 /// Download `t` into `target` (None: just the library; `downloader::LIKED`: Liked; else a
-/// playlist id).
-pub fn get(app: &mut App, t: &ITrack, target: Option<String>, preview: bool) {
+/// playlist id), its file in `pick` (None: DK.FM chooses, or asks if Settings says so).
+pub fn get(app: &mut App, t: &ITrack, target: Option<String>, preview: bool, pick: Option<PathBuf>) {
+    let Some(pick) = folder_for(app, pick, &app.dl.auto_folder("track", &t.title)) else { return };
     if preview {
         super::preview::mark_kept(app, t);
     }
@@ -34,7 +65,7 @@ pub fn get(app: &mut App, t: &ITrack, target: Option<String>, preview: bool) {
     if let Some(id) = target.as_ref().filter(|id| *id != crate::downloader::LIKED) {
         app.edit_settings(|s| s.last_playlist = id.clone());
     }
-    super::addsongs::get_to(app, t, target, name);
+    super::addsongs::get_in(app, t, target, name, pick);
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -46,6 +77,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let mut close = ctx.input(|i| i.key_pressed(Key::Escape)) || app.modal.is_some();
     let mut chosen: Option<Option<String>> = None;
     let mut new_pl = false;
+    let (mut change, mut reset) = (false, false);
+    let auto = app.dl.auto_folder("track", &d.t.title);
     // your playlists, last used first (a synced one keeps songs you add: sync only adds to it)
     let last = app.settings.lock().last_playlist.clone();
     let mut pls: Vec<(String, String)> = {
@@ -96,6 +129,20 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     }
                 }
             });
+            // the folder its file goes in
+            ui.separator();
+            ui.label(egui::RichText::new("FOLDER ON YOUR PC").font(px(6.0)).color(pal.dim));
+            let label = match &d.pick {
+                Some(p) => short(p),
+                None if app.settings.lock().ask_folder => "Ask when I pick a place".into(),
+                None => format!("DK.FM chooses ({})", short(&auto)),
+            };
+            if row(ui, ">", &label, "CHANGE") {
+                change = true;
+            }
+            if d.pick.is_some() && row(ui, "<", "Let DK.FM choose", "") {
+                reset = true;
+            }
         });
     });
     d.frames += 1;
@@ -103,12 +150,25 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     if d.frames > 1 && ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().map(|q| !area.response.rect.contains(q)).unwrap_or(false)) {
         close = true;
     }
+    if change {
+        if let Some(p) = pick_folder(d.pick.as_deref().unwrap_or(&auto), "Where should this song go?") {
+            d.pick = Some(p);
+        }
+        // (the click that closed the folder picker isn't a click outside)
+        d.frames = 0;
+        close = false;
+    }
+    if reset {
+        d.pick = None;
+    }
     if let Some(target) = chosen {
-        get(app, &d.t, target, d.preview);
+        get(app, &d.t, target, d.preview, d.pick.clone());
         return;
     }
     if new_pl {
-        app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylistGet(Box::new(d.t.clone()), d.preview) });
+        // (the folder first: cancelling it makes no empty playlist)
+        let Some(pick) = folder_for(app, d.pick.clone(), &auto) else { return };
+        app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylistGet(Box::new(d.t.clone()), d.preview, pick) });
         return;
     }
     if !close {

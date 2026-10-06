@@ -195,24 +195,24 @@ pub fn setup_modal(app: &App) -> Option<Modal> {
     if !s.setup_pending {
         return None;
     }
-    let quality = if s.download_format == "lossless" || s.download_format == "standard" { s.download_format.clone() } else { "high".into() };
+    let quality = if s.download_format == "standard" { s.download_format.clone() } else { "high".into() };
     let eq = { let e = app.player.st.lock().eq.clone(); if e.enabled { e.preset } else { "Flat".into() } };
-    Some(Modal::Setup { quality, eq, close: s.close_mode().to_string() })
+    Some(Modal::Setup { quality, eq, close: s.close_mode().to_string(), ask: s.ask_folder })
 }
 
 /// "SET UP YOUR SOUND": sound quality for every download, the EQ, where songs are saved and what
 /// the X button does. SAVE applies them; KEEP DEFAULTS changes nothing. Either way it's done.
-pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut eq: String, mut close: String) -> Option<Modal> {
+pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut eq: String, mut close: String, mut ask: bool) -> Option<Modal> {
     let pal = app.pal;
     let (mut save, mut skip) = (false, false);
     let dir = app.settings.lock().download_dir.clone();
     let mut change_dir = false;
-    let open = window(pal, ctx, "SET UP YOUR SOUND", Vec2::new(560.0, 470.0), false, |ui| {
+    let open = window(pal, ctx, "SET UP YOUR SOUND", Vec2::new(560.0, 540.0), false, |ui| {
         dim(ui, &pal, "Pick these once: they apply to everything you download from now on. You can change them any time in Settings.");
         ui.add_space(10.0);
         caption(ui, &pal, "1. SOUND QUALITY OF YOUR DOWNLOADS");
         ui.horizontal(|ui| {
-            for (f, label) in [("standard", "STANDARD"), ("high", "HIGH (RECOMMENDED)"), ("lossless", "LOSSLESS")] {
+            for (f, label) in [("standard", "STANDARD"), ("high", "HIGH (RECOMMENDED)")] {
                 if button(ui, &pal, label, quality == f, true).clicked() {
                     quality = f.into();
                 }
@@ -222,13 +222,11 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
             "standard" => {
                 dim(ui, &pal, "About 128 kbps, about 4 MB a song. Smallest files; fine for earbuds.");
             }
-            "lossless" => {
-                ui.label(egui::RichText::new("⚠ LOSSLESS uses a LOT of storage: 25-40 MB a song, about 5x HIGH (1,000 songs ≈ 30 GB). YouTube's audio isn't lossless, so it sounds the same as HIGH. Only pick it if space doesn't matter to you.").font(vt(18.0)).color(pal.accent));
-            }
             _ => {
                 dim(ui, &pal, "The best sound YouTube has, about 8 MB a song. Best sound for its size.");
             }
         }
+        dim(ui, &pal, "Lossless (FLAC, ALAC, WAV) can't be downloaded: YouTube doesn't have it. Add your own lossless files any time and DK.FM plays them as they are.");
         ui.add_space(10.0);
         caption(ui, &pal, "2. EQUALIZER");
         ui.horizontal(|ui| {
@@ -247,6 +245,14 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
                 change_dir = true;
             }
         });
+        ui.horizontal(|ui| {
+            for (a, label) in [(false, "LET DK.FM CHOOSE"), (true, "ASK ME EACH TIME")] {
+                if button(ui, &pal, label, ask == a, true).clicked() {
+                    ask = a;
+                }
+            }
+        });
+        dim(ui, &pal, if ask { "Before each download you pick the folder." } else { "A folder per playlist or album in there (you can still pick another one when you download)." });
         if !cfg!(target_os = "linux") {
             ui.add_space(10.0);
             caption(ui, &pal, "4. THE X BUTTON");
@@ -278,6 +284,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
     if save {
         app.edit_settings(|s| {
             s.download_format = quality.clone();
+            s.ask_folder = ask;
             if !cfg!(target_os = "linux") {
                 s.close_mode = close.clone();
             }
@@ -296,7 +303,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         app.edit_settings(|s| s.setup_pending = false);
         return None;
     }
-    Some(Modal::Setup { quality, eq, close })
+    Some(Modal::Setup { quality, eq, close, ask })
 }
 
 /// The tour steps this person was last offered (from before this was remembered: the first

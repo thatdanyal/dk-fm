@@ -49,7 +49,10 @@ pub struct JTrack {
 pub struct Job {
     pub id: String,
     pub col: Collection,
+    /// the folder "open folder" shows
     pub folder: PathBuf,
+    /// the folder you picked for these songs (None: DK.FM chooses, in the download folder)
+    pub pick: Option<PathBuf>,
     pub fmt: String,
     /// existing library playlist that finished songs are added to (e.g. "find new songs")
     pub target_playlist: Option<String>,
@@ -85,6 +88,11 @@ impl Drop for Claim<'_> {
 fn sanitize(s: &str) -> String {
     let t = clean(s);
     if t.is_empty() { "Untitled".into() } else { t }
+}
+
+/// A folder named `name` (made safe for a folder name) in `parent`.
+pub fn subfolder(parent: &Path, name: &str) -> PathBuf {
+    parent.join(sanitize(name))
 }
 
 /// Text that's safe inside a file or folder name on every OS (≤ 120 characters, may be empty).
@@ -160,6 +168,17 @@ pub fn render_name(pattern: &str, p: &NameParts) -> PathBuf {
     out
 }
 
+/// The name pattern inside a folder you picked: without its "{folder}" folder level (the
+/// picked folder takes its place), e.g. "{folder}/{artist} - {title}" -> "{artist} - {title}".
+fn picked_pattern(pattern: &str) -> String {
+    let pattern = if pattern.trim().is_empty() { store::DEFAULT_PATTERN } else { pattern };
+    let segs: Vec<&str> = pattern.split(['/', '\\']).collect();
+    let (last, dirs) = segs.split_last().unwrap();
+    let kept: Vec<&str> = dirs.iter().filter(|s| s.trim() != "{folder}").copied().chain([*last]).collect();
+    let p = kept.join("/");
+    if p.trim() == "{folder}" { "{artist} - {title}".into() } else { p }
+}
+
 trait OrDefault {
     fn or_if_empty(self, d: &str) -> String;
 }
@@ -189,18 +208,17 @@ pub fn thresholds(strictness: &str) -> (i32, i32, i32) {
 }
 
 /// Sound quality (Settings > Downloads > Sound quality) -> (file extension, yt-dlp arguments).
-/// YouTube's best audio is Opus at about 160 kbps (AAC 256 kbps on YouTube Music with Premium);
-/// YouTube has no lossless audio, so LOSSLESS keeps exactly what that best stream has.
+/// YouTube's best audio is Opus at about 160 kbps (AAC 256 kbps on YouTube Music with Premium).
+/// There's no LOSSLESS download: YouTube has no lossless audio, so a FLAC of it only sounded
+/// like HIGH at 3-5x the size (before 2.1 it could be picked; it's HIGH now). Lossless music
+/// comes into DK.FM from your own files (music folders, ADD FILES, drag and drop).
 pub fn fmt_args(fmt: &str) -> (&'static str, Vec<&'static str>) {
     match fmt {
         // the ~128 kbps AAC stream as it is: smallest files, never re-encoded
         "standard" => ("m4a", vec!["-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a", "--audio-quality", "0"]),
-        // the best stream decoded once into FLAC: nothing more is lost on the way (about 5x larger)
-        // (16-bit: the source has nothing a 24-bit file would keep, and it halves the size)
-        "lossless" => ("flac", vec!["-f", "bestaudio", "-x", "--audio-format", "flac", "--postprocessor-args", "ExtractAudio:-sample_fmt s16"]),
         "mp3-320" => ("mp3", vec!["-f", "bestaudio", "-x", "--audio-format", "mp3", "--audio-quality", "320K"]),
         "mp3-v0" => ("mp3", vec!["-f", "bestaudio", "-x", "--audio-format", "mp3", "--audio-quality", "0"]),
-        // "high" (the default; older settings saved "m4a"): the best stream, kept if it's already
+        // "high" (the default; older settings saved "m4a" or "lossless"): the best stream, kept if it's already
         // 256 kbps AAC, else made into 256 kbps AAC so the Opus original's quality survives
         _ => ("m4a", vec!["-f", "bestaudio[acodec^=mp4a][abr>=190]/bestaudio", "-x", "--audio-format", "m4a", "--audio-quality", "256K"]),
     }
@@ -271,12 +289,36 @@ impl Downloader {
 
     /// Like `start`, but every song that finishes is also added to the playlist `target`.
     pub fn start_to(&self, col: Collection, selected: Option<Vec<usize>>, target: Option<String>) -> String {
+        self.start_in(col, selected, target, None)
+    }
+
+    /// The folder DK.FM picks for a download (songs may go into subfolders of it, per the name
+    /// pattern): the download folder, or the playlist's / album's folder in it.
+    pub fn auto_folder(&self, kind: &str, name: &str) -> PathBuf {
+        let (dir, pattern) = { let s = self.settings.lock(); (s.download_dir.clone(), s.name_pattern.clone()) };
+        if pattern.trim().is_empty() || pattern.starts_with("{folder}") { PathBuf::from(dir).join(sanitize(&folder_name(kind, name))) } else { PathBuf::from(dir) }
+    }
+
+    /// Like `start_to`, with the songs saved in `pick`, a folder you chose (None: DK.FM chooses).
+    /// An imported playlist remembers it: songs sync brings later go there too.
+    pub fn start_in(&self, col: Collection, selected: Option<Vec<usize>>, target: Option<String>, pick: Option<PathBuf>) -> String {
         let job_id = format!("{}-{}", col.kind, col.id);
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
-        let (dir, fmt, pattern) = { let s = self.settings.lock(); (s.download_dir.clone(), s.download_format.clone(), s.name_pattern.clone()) };
-        // the folder "open folder" shows (songs may go into subfolders of it, per the name pattern)
-        let folder = if pattern.trim().is_empty() || pattern.starts_with("{folder}") { PathBuf::from(dir).join(sanitize(&folder_name(&col.kind, &col.name))) } else { PathBuf::from(dir) };
+        let fmt = self.settings.lock().download_format.clone();
+        let pid = format!("sp-{job_id}");
+        let listed = col.kind == "playlist" || col.kind == "album";
+        let pick = pick.or_else(|| if listed { self.lib.data.read().playlists.iter().find(|p| p.id == pid).and_then(|p| p.save_dir.clone()).map(PathBuf::from) } else { None });
+        if let Some(p) = &pick {
+            // songs there can change sound quality like the ones in the download folder
+            let p = p.to_string_lossy().into_owned();
+            let mut s = self.settings.lock();
+            if !s.save_folders.contains(&p) {
+                s.save_folders.push(p);
+                s.save();
+            }
+        }
+        let folder = pick.clone().unwrap_or_else(|| self.auto_folder(&col.kind, &col.name));
         // Spotify's Liked Songs: into DK.FM's own Liked (♥), and kept in sync from now on
         let spotify_liked = col.url == sources::LIKED_URL;
         let target = if spotify_liked {
@@ -289,8 +331,7 @@ impl Downloader {
         } else {
             target
         };
-        if (col.kind == "playlist" || col.kind == "album") && !spotify_liked {
-            let pid = format!("sp-{job_id}");
+        if listed && !spotify_liked {
             // a re-sync keeps your changes: songs, order, name, cover, folder, pin
             let prev = self.lib.data.read().playlists.iter().find(|p| p.id == pid).cloned();
             let had = prev.is_some();
@@ -305,6 +346,7 @@ impl Downloader {
                 auto_sync: Some(prev.auto_sync.unwrap_or(true)),
                 last_sync: Some(store::now_ms()),
                 created_at: if had && prev.created_at > 0.0 { prev.created_at } else { store::now_ms() },
+                save_dir: pick.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 ..prev
             });
         }
@@ -333,7 +375,7 @@ impl Downloader {
             }
         }
         drop(q);
-        self.jobs.lock().push(Job { id: job_id.clone(), col, folder, fmt, target_playlist: target, cancel: Arc::new(AtomicBool::new(false)), tracks });
+        self.jobs.lock().push(Job { id: job_id.clone(), col, folder, pick, fmt, target_playlist: target, cancel: Arc::new(AtomicBool::new(false)), tracks });
         // songs you already have go into the playlist now (and learn their Spotify ids), even
         // when nothing needs downloading
         self.mirror_job(&job_id);
@@ -345,21 +387,17 @@ impl Downloader {
     /// Only songs in the download folder: files you had before (even ones yt-dlp named with
     /// their YouTube id) are never replaced.
     pub fn upgradable(&self, fmt: &str) -> Vec<String> {
-        let dir = self.settings.lock().download_dir.clone();
         let d = self.lib.data.read();
-        d.tracks.values().filter(|t| t.youtube_id.is_some() && in_folder(&t.path, &dir) && below(t, fmt)).map(|t| t.id.clone()).collect()
+        d.tracks.values().filter(|t| self.requalifiable(t) && below(t, fmt)).map(|t| t.id.clone()).collect()
     }
 
-    /// FLACs DK.FM downloaded, while a smaller sound quality is set: they can become files of
-    /// that quality on this PC, nothing downloaded. They sound the same: YouTube's audio was
-    /// never lossless, so the FLAC holds exactly what HIGH would have saved.
-    pub fn shrinkable(&self, fmt: &str) -> Vec<String> {
-        if fmt == "lossless" {
-            return Vec::new();
-        }
-        let dir = self.settings.lock().download_dir.clone();
+    /// FLACs DK.FM downloaded (LOSSLESS, before 2.1): they can become files of the sound quality
+    /// set now on this PC, nothing downloaded. They sound the same: YouTube's audio was never
+    /// lossless, so the FLAC holds exactly what HIGH would have saved. FLACs you added yourself
+    /// are never touched.
+    pub fn shrinkable(&self) -> Vec<String> {
         let d = self.lib.data.read();
-        d.tracks.values().filter(|t| t.youtube_id.is_some() && in_folder(&t.path, &dir) && t.path.to_lowercase().ends_with(".flac")).map(|t| t.id.clone()).collect()
+        d.tracks.values().filter(|t| self.requalifiable(t) && t.path.to_lowercase().ends_with(".flac")).map(|t| t.id.clone()).collect()
     }
 
     /// Make these FLACs smaller (the sound quality set now), each replacing its file: playlists,
@@ -368,7 +406,7 @@ impl Downloader {
         self.rework("shrink-quality", "shrink", ids, None, |fmt, n| format!("Making {n} songs smaller ({})", quality_label(fmt)))
     }
 
-    /// The sound quality a song is in now: "lossless" (FLAC), "high" or "standard".
+    /// The sound quality a song is in now: "lossless" (a FLAC from before 2.1), "high" or "standard".
     pub fn quality_of(t: &store::Track) -> &'static str {
         if t.path.to_lowercase().ends_with(".flac") {
             "lossless"
@@ -379,9 +417,13 @@ impl Downloader {
         }
     }
 
-    /// Can this song's sound quality be changed? (only songs DK.FM downloaded, in its folder)
+    /// Can this song's sound quality be changed? (only songs DK.FM downloaded, in its download
+    /// folder or a folder you picked for a download)
     pub fn requalifiable(&self, t: &store::Track) -> bool {
-        t.youtube_id.is_some() && in_folder(&t.path, &self.settings.lock().download_dir)
+        t.youtube_id.is_some() && {
+            let s = self.settings.lock();
+            std::iter::once(&s.download_dir).chain(&s.save_folders).any(|d| in_folder(&t.path, d))
+        }
     }
 
     /// Put just these songs in sound quality `fmt` (whatever is set for everything else):
@@ -392,7 +434,7 @@ impl Downloader {
             let d = self.lib.data.read();
             let ok: Vec<&store::Track> = ids.iter().filter_map(|id| d.tracks.get(id)).filter(|t| self.requalifiable(t)).collect();
             let up = ok.iter().filter(|t| below(t, fmt)).map(|t| t.id.clone()).collect();
-            let small = ok.iter().filter(|t| fmt != "lossless" && t.path.to_lowercase().ends_with(".flac")).map(|t| t.id.clone()).collect();
+            let small = ok.iter().filter(|t| t.path.to_lowercase().ends_with(".flac")).map(|t| t.id.clone()).collect();
             (up, small)
         };
         let tag = ids.first().map(|i| i.chars().take(12).collect::<String>()).unwrap_or_default();
@@ -445,7 +487,7 @@ impl Downloader {
         let n = tracks.len();
         let col = Collection { kind: kind.into(), id: "quality".into(), name: name(&fmt, n), tracks: tracks.iter().map(|t| t.t.clone()).collect(), complete: true, ..Default::default() };
         self.queue.lock().extend((0..n).map(|i| (job_id.clone(), i)));
-        self.jobs.lock().push(Job { id: job_id.clone(), col, folder: PathBuf::from(dir), fmt, target_playlist: None, cancel: Arc::new(AtomicBool::new(false)), tracks });
+        self.jobs.lock().push(Job { id: job_id.clone(), col, folder: PathBuf::from(dir), pick: None, fmt, target_playlist: None, cancel: Arc::new(AtomicBool::new(false)), tracks });
         self.touch();
         job_id
     }
@@ -518,13 +560,13 @@ impl Downloader {
     }
 
     fn process(&self, job_id: &str, idx: usize) {
-        let (t, fmt, kind, job_cover, job_name, cancel, forced, replace) = {
+        let (t, fmt, kind, job_cover, job_name, cancel, forced, replace, pick) = {
             let jobs = self.jobs.lock();
             let Some((j, jt)) = jobs.iter().find(|j| j.id == job_id).and_then(|j| Some((j, j.tracks.get(idx)?))) else { return };
             if jt.status != TStatus::Queued || j.cancel.load(Ordering::Relaxed) {
                 return;
             }
-            (jt.t.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone(), jt.replace.clone())
+            (jt.t.clone(), j.fmt.clone(), j.col.kind.clone(), j.col.cover.clone(), j.col.name.clone(), j.cancel.clone(), jt.forced.clone(), jt.replace.clone(), j.pick.clone())
         };
         // an upgrade: the song's file now (next to it goes the new one)
         let replacing: Option<(String, PathBuf)> = replace.as_ref().and_then(|id| self.lib.track(id).map(|t| (id.clone(), PathBuf::from(t.path))));
@@ -579,10 +621,12 @@ impl Downloader {
             let (min_score, accept_score, sure_score) = thresholds(&strictness);
             let first_artist = t.artists.first().cloned().unwrap_or_else(|| "Unknown".into());
             let album = if !t.album.is_empty() { t.album.clone() } else if kind == "playlist" || kind == "album" { job_name.clone() } else { t.title.clone() };
+            // a folder you picked is the folder: the pattern's own "{folder}/" isn't added in it
+            let pattern = if pick.is_some() { picked_pattern(&pattern) } else { pattern };
             let rel = render_name(&pattern, &NameParts { artist: &first_artist, album: &album, title: &t.title, track: t.track_no, year: t.year, folder: &folder_name(&kind, &job_name) });
             let base = match &replacing {
                 Some((_, old)) => old.with_extension(""),
-                None => PathBuf::from(dir).join(&rel),
+                None => pick.unwrap_or_else(|| PathBuf::from(dir)).join(&rel),
             };
             let mut out_file = PathBuf::from(format!("{}.{ext}", base.display()));
             // an upgrade to the same file type: saved beside it first, then put in its place
@@ -1016,7 +1060,6 @@ fn tidy_unfinished(dir: &Path) {
 fn below(t: &store::Track, fmt: &str) -> bool {
     let ext = Path::new(&t.path).extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
     match fmt {
-        "lossless" => ext != "flac",
         // HIGH is 256 kbps AAC: the 128 kbps STANDARD files and older MP3s are below it
         "standard" | "mp3-320" | "mp3-v0" => false,
         _ => ext != "flac" && t.bitrate.is_some_and(|b| b < 200),
@@ -1159,6 +1202,44 @@ mod tests {
         assert_eq!(n, (20, 35, 45));
         assert!(r.0 < n.0 && n.0 < s.0 && r.1 < n.1 && n.1 < s.1);
         assert_eq!(thresholds("???"), n);
+    }
+
+    #[test]
+    fn songs_go_in_the_folder_you_picked_and_sync_remembers_it() {
+        // already-downloaded files finish without yt-dlp or network: they show where DK.FM looks
+        let (_profile, dir) = crate::store::test_profile("picktest");
+        let (music, mine) = (dir.join("Music"), dir.join("Elsewhere").join("Road trip"));
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("Daft Punk - One More Time.m4a"), b"not really audio").unwrap();
+        std::fs::write(mine.join("Daft Punk - Aerodynamic.m4a"), b"not really audio").unwrap();
+        let lib = Library::load();
+        let settings = Arc::new(Mutex::new(Settings { download_dir: music.display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings.clone());
+        let song = |title: &str, y: &str| ITrack { title: title.into(), artists: vec!["Daft Punk".into()], youtube_id: Some(y.into()), direct_url: Some(format!("https://music.youtube.com/watch?v={y}")), source_key: format!("yt:{y}"), ..Default::default() };
+        let mut col = Collection { kind: "playlist".into(), id: "trip".into(), name: "Trip".into(), tracks: vec![song("One More Time", "abcdefghijk")], complete: true, source: "youtube".into(), url: "https://example.invalid/trip".into(), ..Default::default() };
+        let wait = |dl: &Downloader| {
+            let t0 = std::time::Instant::now();
+            while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        assert_eq!(dl.auto_folder("playlist", "Trip"), music.join("Trip"));
+        let job = dl.start_in(col.clone(), None, None, Some(mine.clone()));
+        wait(&dl);
+        let first = dl.jobs.lock().iter().find(|j| j.id == job).and_then(|j| j.tracks[0].track_id.clone()).expect("song finished");
+        // the picked folder is the folder: no "Trip" folder made in it, nothing in Music
+        assert_eq!(Path::new(&lib.track(&first).unwrap().path), mine.join("Daft Punk - One More Time.m4a"));
+        assert!(!music.join("Trip").exists());
+        assert!(dl.requalifiable(&lib.track(&first).unwrap()));
+        assert_eq!(lib.data.read().playlists.iter().find(|p| p.id == "sp-playlist-trip").unwrap().save_dir.as_deref(), Some(mine.to_string_lossy().as_ref()));
+        // sync later (no folder given) brings a new song to the same folder
+        col.tracks.push(song("Aerodynamic", "bcdefghijkl"));
+        let job = dl.start(col, Some(vec![1]));
+        wait(&dl);
+        let second = dl.jobs.lock().iter().find(|j| j.id == job).and_then(|j| j.tracks[1].track_id.clone()).expect("synced song finished");
+        assert_eq!(Path::new(&lib.track(&second).unwrap().path), mine.join("Daft Punk - Aerodynamic.m4a"));
+        drop(lib);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1363,8 +1444,7 @@ mod tests {
         let pid = lib.new_playlist("Mine", vec![old.clone()]);
         let settings = Arc::new(Mutex::new(Settings { download_dir: dir.join("Music").display().to_string(), download_format: "high".into(), sync_hours: 0, ..Default::default() }));
         let dl = Downloader::new(lib.clone(), settings);
-        assert_eq!(dl.shrinkable("high"), vec![old.clone()]);
-        assert!(dl.shrinkable("lossless").is_empty());
+        assert_eq!(dl.shrinkable(), vec![old.clone()]);
         let job = dl.shrink(std::slice::from_ref(&old));
         let t0 = std::time::Instant::now();
         while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(120) {
@@ -1421,6 +1501,15 @@ mod tests {
     }
 
     #[test]
+    fn a_picked_folder_takes_the_place_of_the_folder_level() {
+        assert_eq!(picked_pattern("{folder}/{artist} - {title}"), "{artist} - {title}");
+        assert_eq!(picked_pattern(""), "{artist} - {title}");
+        assert_eq!(picked_pattern("{folder}/{album}/{track} {title}"), "{album}/{track} {title}");
+        assert_eq!(picked_pattern("{artist}/{folder} - {title}"), "{artist}/{folder} - {title}");
+        assert_eq!(picked_pattern("{folder}"), "{artist} - {title}");
+    }
+
+    #[test]
     fn only_songs_in_the_download_folder_are_upgraded() {
         assert!(in_folder("C:\\Users\\A\\Music\\DK.FM\\OG\\a.m4a", "C:\\Users\\A\\Music\\DK.FM"));
         assert!(in_folder("c:/users/a/music/dk.fm/a.m4a", "C:\\Users\\A\\Music\\DK.FM\\"));
@@ -1432,8 +1521,8 @@ mod tests {
     #[test]
     fn knows_which_songs_a_better_quality_would_upgrade() {
         let t = |path: &str, kbps: Option<u32>| store::Track { path: path.into(), bitrate: kbps, ..Default::default() };
-        // LOSSLESS: everything that isn't FLAC yet
-        assert!(below(&t("a.m4a", Some(256)), "lossless") && below(&t("a.mp3", Some(320)), "lossless") && !below(&t("a.flac", Some(900)), "lossless"));
+        // LOSSLESS (before 2.1) is HIGH now: nothing is downloaded again as FLAC
+        assert!(!below(&t("a.m4a", Some(256)), "lossless") && fmt_args("lossless").0 == "m4a");
         // HIGH: the 128 kbps files, not the 256 ones or FLAC
         assert!(below(&t("a.m4a", Some(128)), "high") && !below(&t("a.m4a", Some(256)), "high") && !below(&t("a.flac", Some(900)), "high"));
         // a lower setting never "upgrades" anything

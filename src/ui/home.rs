@@ -302,15 +302,17 @@ fn releases(app: &mut App, ctx: &egui::Context) -> (Vec<(Release, i64)>, bool, O
 /// Download a release like an import: the songs you don't have (an album or EP also becomes a
 /// playlist; a single's songs just join your library).
 pub(super) fn get_release(app: &mut App, r: &Release) {
+    let kind = if r.kind == "Single" { "track" } else { "album" };
+    let Some(pick) = super::dest::folder_for(app, None, &app.dl.auto_folder(kind, &r.title)) else { return };
     let (dl, lib, gets) = (app.dl.clone(), app.lib.clone(), app.home.gets.clone());
     gets.lock().insert(r.playlist.clone(), Ok(None));
-    let (url, title, pl, kind) = (r.url(), r.title.clone(), r.playlist.clone(), if r.kind == "Single" { "track" } else { "album" });
+    let (url, title, pl) = (r.url(), r.title.clone(), r.playlist.clone());
     app.toast(format!("Getting \"{title}\"…"));
     std::thread::spawn(move || {
         let r = sources::generic(&url, Some(title), Some(kind), 300).map(|col| {
             let keys: HashSet<String> = lib.key_index().into_keys().collect();
             let sel: Vec<usize> = col.tracks.iter().enumerate().filter(|(_, t)| !super::import::owned(&keys, t)).map(|(i, _)| i).collect();
-            Some(dl.start(col, Some(sel)))
+            Some(dl.start_in(col, Some(sel), None, pick))
         });
         if let Err(e) = &r {
             dl.notices.lock().push(e.clone());

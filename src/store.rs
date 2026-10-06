@@ -157,6 +157,11 @@ pub struct Settings {
     #[serde(default = "d_true")] pub glow: bool,
     #[serde(default)] pub music_folders: Vec<String>,
     #[serde(default)] pub download_dir: String,
+    /// ask which folder songs go in before each download (else DK.FM chooses, in `download_dir`)
+    #[serde(default)] pub ask_folder: bool,
+    /// folders you picked for downloads (their songs can change sound quality like the ones in
+    /// `download_dir`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub save_folders: Vec<String>,
     #[serde(default = "d_format")] pub download_format: String,
     #[serde(default = "d_conc")] pub download_concurrency: u32,
     #[serde(default = "d_sync")] pub sync_hours: u32,
@@ -294,6 +299,10 @@ impl Settings {
         if s.download_dir.is_empty() {
             s.download_dir = music.join("DK.FM").to_string_lossy().into_owned();
         }
+        // LOSSLESS downloads are gone (YouTube has no lossless audio): HIGH sounds the same
+        if s.download_format == "lossless" {
+            s.download_format = "high".into();
+        }
         if s.eq.gains.len() != 10 {
             s.eq.gains = vec![0.0; 10];
         }
@@ -370,6 +379,9 @@ pub struct Playlist {
     #[serde(default, skip_serializing_if = "String::is_empty")] pub description: String,
     /// the sidebar folder it's in
     #[serde(default, skip_serializing_if = "Option::is_none")] pub folder: Option<String>,
+    /// the folder on your PC you picked for its songs when importing it (None: DK.FM's own);
+    /// songs sync brings later go there too
+    #[serde(default, skip_serializing_if = "Option::is_none")] pub save_dir: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")] pub pinned: bool,
     /// when you last played it (unix ms)
     #[serde(default, skip_serializing_if = "is_zero")] pub last_played: f64,

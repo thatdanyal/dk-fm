@@ -9,6 +9,7 @@ use crate::sources::{self, Collection, Fetched, ITrack};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, TextureHandle, Ui, Vec2};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Default)]
@@ -27,6 +28,8 @@ pub struct ImportState {
     /// single songs / picks from a list: where they go (None: just the library; a playlist id;
     /// downloader::LIKED)
     dest: Option<String>,
+    /// the folder you picked for this download (None: DK.FM chooses, or asks if Settings says so)
+    pick: Option<std::path::PathBuf>,
 }
 
 impl ImportState {
@@ -135,6 +138,7 @@ fn take_result(app: &mut App, ctx: &egui::Context) {
                     }
                 }
                 app.import.result = Some(f);
+                app.import.pick = None;
                 app.import.cover = img.map(|i| ctx.load_texture("import-cover", i, egui::TextureOptions::LINEAR));
             }
             Err(e) => app.toast_err(e),
@@ -244,6 +248,7 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             });
         });
         ui.add_space(6.0);
+        let auto = app.dl.auto_folder(&c.kind, &c.name);
         ui.horizontal(|ui| {
             if button(ui, &pal, "ALL", false, true).clicked() {
                 app.import.selected = (0..c.tracks.len()).collect();
@@ -276,17 +281,37 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
                 app.import.dest = d;
             }
             if button(ui, &pal, &format!("DOWNLOAD {n} AS {fmt}"), true, n > 0).clicked() {
-                let mut sel: Vec<usize> = app.import.selected.iter().copied().collect();
-                sel.sort();
-                if loose {
-                    if let Some(id) = app.import.dest.clone().filter(|id| id != crate::downloader::LIKED) {
-                        app.edit_settings(|s| s.last_playlist = id);
+                if let Some(pick) = super::dest::folder_for(app, app.import.pick.clone(), &auto) {
+                    let mut sel: Vec<usize> = app.import.selected.iter().copied().collect();
+                    sel.sort();
+                    if loose {
+                        if let Some(id) = app.import.dest.clone().filter(|id| id != crate::downloader::LIKED) {
+                            app.edit_settings(|s| s.last_playlist = id);
+                        }
+                        app.dl.start_in(c.clone(), Some(sel), app.import.dest.clone(), pick);
+                    } else {
+                        app.dl.start_in(c.clone(), Some(sel), None, pick);
                     }
-                    app.dl.start_to(c.clone(), Some(sel), app.import.dest.clone());
-                } else {
-                    app.dl.start(c.clone(), Some(sel));
+                    app.browser.set_view(View::Downloads);
                 }
-                app.browser.set_view(View::Downloads);
+            }
+        });
+        // the folder on your PC the songs go in
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("FOLDER").font(px(6.0)).color(pal.dim));
+            let (text, color) = match &app.import.pick {
+                Some(p) => (p.display().to_string(), pal.text),
+                None if app.settings.lock().ask_folder => ("DK.FM asks when you press DOWNLOAD".to_string(), pal.dim),
+                None => (format!("{} (DK.FM chooses)", auto.display()), pal.dim),
+            };
+            ui.label(egui::RichText::new(text).color(color));
+            if button(ui, &pal, "CHOOSE FOLDER…", false, true).clicked() {
+                if let Some(p) = super::dest::pick_folder(app.import.pick.as_deref().unwrap_or(&auto), "Where should these songs go?") {
+                    app.import.pick = Some(p);
+                }
+            }
+            if app.import.pick.is_some() && button(ui, &pal, "LET DK.FM CHOOSE", false, true).clicked() {
+                app.import.pick = None;
             }
         });
     });
@@ -369,7 +394,11 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                 app.import.selected.clear();
             }
             let n = app.import.selected.len();
-            if button(ui, &pal, &format!("IMPORT {n} SELECTED"), true, n > 0).clicked() {
+            // (a folder you pick holds a folder per list, like DK.FM's download folder does)
+            let parent = PathBuf::from(app.settings.lock().download_dir.clone());
+            let go = button(ui, &pal, &format!("IMPORT {n} SELECTED"), true, n > 0).clicked();
+            let pick = if go { super::dest::folder_for(app, None, &parent) } else { None };
+            if let Some(pick) = pick {
                 let urls: Vec<(String, String)> = app.import.selected.iter().map(|&i| (playlists[i].name.clone(), playlists[i].url.clone())).collect();
                 let (dl, lib) = (app.dl.clone(), app.lib.clone());
                 app.toast(format!("Importing {} lists — they'll stay in sync automatically", urls.len()));
@@ -380,7 +409,8 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
                             Ok(Fetched::Collection(c)) => {
                                 let keys: HashSet<String> = lib.key_index().into_keys().collect();
                                 let sel: Vec<usize> = c.tracks.iter().enumerate().filter(|(_, t)| !owned(&keys, t)).map(|(i, _)| i).collect();
-                                dl.start(c, Some(sel));
+                                let into = pick.as_ref().map(|p| crate::downloader::subfolder(p, &c.name));
+                                dl.start_in(c, Some(sel), None, into);
                             }
                             Ok(_) => {}
                             Err(e) => dl.notices.lock().push(format!("{name}: {e}")),

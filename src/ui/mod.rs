@@ -86,7 +86,7 @@ pub enum Modal {
     /// the once-only notice after an update
     WhatsNew,
     /// a new install's sound setup (after the welcome and any tour): quality, EQ, folder, X button
-    Setup { quality: String, eq: String, close: String },
+    Setup { quality: String, eq: String, close: String, ask: bool },
 }
 
 #[derive(Clone)]
@@ -100,7 +100,8 @@ pub enum PromptAction {
     RenameFolder(String),
     PasteYoutube(String, usize),
     /// a new playlist for a song about to be downloaded (and whether it's a preview being kept)
-    NewPlaylistGet(Box<crate::sources::ITrack>, bool),
+    /// (the song, a preview being kept, the folder picked for it)
+    NewPlaylistGet(Box<crate::sources::ITrack>, bool, Option<std::path::PathBuf>),
 }
 
 pub struct App {

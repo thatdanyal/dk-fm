@@ -1575,7 +1575,8 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
 }
 
 /// Sound quality for just these songs (Settings > Downloads sets it for everything): a row of
-/// STANDARD / HIGH / LOSSLESS in the song menu, the one they're in now ticked.
+/// STANDARD / HIGH in the song menu, the one they're in now ticked (LOSSLESS FLACs from before
+/// 2.1 tick neither: both make them smaller).
 pub(super) fn quality_menu(app: &mut App, ui: &mut Ui, sel: &[String]) {
     let tracks: Vec<crate::store::Track> = sel.iter().filter_map(|id| app.lib.track(id)).filter(|t| app.dl.requalifiable(t)).collect();
     if tracks.is_empty() {
@@ -1585,7 +1586,7 @@ pub(super) fn quality_menu(app: &mut App, ui: &mut Ui, sel: &[String]) {
     let now: Vec<&str> = tracks.iter().map(crate::downloader::Downloader::quality_of).collect();
     ui.label(egui::RichText::new(if tracks.len() == 1 { "Sound quality of this song:" } else { "Sound quality of these songs:" }).weak());
     ui.horizontal(|ui| {
-        for (f, label, tip) in [("standard", "STANDARD", "Smallest (only LOSSLESS songs can be made smaller)"), ("high", "HIGH", "Recommended: the best sound for its size"), ("lossless", "LOSSLESS", "FLAC: about 5x bigger, same sound (YouTube's audio isn't lossless)")] {
+        for (f, label, tip) in [("standard", "STANDARD", "Smallest (only songs downloaded as LOSSLESS FLAC can be made smaller)"), ("high", "HIGH", "Recommended: the best sound for its size")] {
             let all = now.iter().all(|q| *q == f);
             if ui.selectable_label(all, label).on_hover_text(tip).clicked() && !all {
                 let playing = app.player.current_id();
@@ -1594,7 +1595,7 @@ pub(super) fn quality_menu(app: &mut App, ui: &mut Ui, sel: &[String]) {
                 let busy = tracks.len() > ids.len();
                 app.toast(match n {
                     0 if busy => "That song is playing: skip to another song first, then change it".to_string(),
-                    0 => "Only LOSSLESS (FLAC) songs can be made smaller: this one stays as it is".to_string(),
+                    0 => "Only songs downloaded as LOSSLESS (FLAC) can be made smaller: this one stays as it is".to_string(),
                     n => format!("Changing {} to {}: see DOWNLOADS for progress. Playlists, likes and plays stay{}", plural(n), crate::downloader::quality_label(f), if busy { " (not the one playing now)" } else { "" }),
                 });
                 ui.close_menu();

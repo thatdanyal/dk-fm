@@ -345,11 +345,19 @@ pub fn get(app: &mut App, t: &ITrack, pl: Option<&Playlist>) {
 }
 
 /// Download an online song into `target` (a playlist id, `downloader::LIKED`, or None: just the
-/// library); `name` is the target's name, for the message.
+/// library); `name` is the target's name, for the message. With Settings > Downloads > ASK ME
+/// EACH TIME, the folder is asked first.
 pub fn get_to(app: &mut App, t: &ITrack, target: Option<String>, name: Option<String>) {
+    if let Some(pick) = super::dest::folder_for(app, None, &app.dl.auto_folder("track", &t.title)) {
+        get_in(app, t, target, name, pick);
+    }
+}
+
+/// `get_to` with its file in `pick`, a folder you chose (None: DK.FM chooses).
+pub fn get_in(app: &mut App, t: &ITrack, target: Option<String>, name: Option<String>, pick: Option<std::path::PathBuf>) {
     let src = if t.source_key.starts_with("sc:") { "soundcloud" } else { "youtube" };
     let col = Collection { kind: "track".into(), id: col_id(t), name: t.title.clone(), owner: t.artists.join(", "), cover: t.cover.clone(), tracks: vec![t.clone()], complete: true, via: src.into(), source: src.into(), url: t.direct_url.clone().unwrap_or_default(), warning: None };
-    app.dl.start_to(col, None, target);
+    app.dl.start_in(col, None, target, pick);
     app.toast(match name { Some(n) => format!("Downloading \"{}\" into \"{n}\"", t.title), None => format!("Downloading \"{}\" to your library", t.title) });
 }
 

@@ -17,7 +17,7 @@ pub const STEPS: [(&str, &str, &str, u32); 17] = [
     ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
     ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
     ("downloads", "DOWNLOADS", "What's downloading right now. Cancel any time; CLEAR FINISHED tidies the list.", 2),
-    ("shazam", "SHAZAM", "Hear a song in a video, a game or a browser tab? Press SHAZAM and DK.FM names it, then finds it for you.", 1),
+    ("shazam", "SHAZAM", "Hear a song in a video, a game or a browser tab, or on a radio in the room? Press SHAZAM, pick THIS PC or MICROPHONE, and DK.FM names it, then finds it for you.", 1),
     ("discover", "DISCOVER", "New music picked from the artists you play most and the songs you like, minus what you already have.", 1),
     ("library", "LIBRARY", "Your playlists: the one you played last moves to the top. Drag the line beside them to make the column wider. ⬇ Downloads lists every song you downloaded; select some and press DELETE to remove them.", 2),
     ("library", "SONGS LIKE THIS", "Right-click any song (or click … at the end of its row) > Songs like this: similar songs to listen to first and download if you like them.", 1),

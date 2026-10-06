@@ -104,6 +104,7 @@ jobs:
             <key>LSMinimumSystemVersion</key><string>11.0</string>
             <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
             <key>NSHighResolutionCapable</key><true/>
+            <key>NSMicrophoneUsageDescription</key><string>SHAZAM listens through the microphone to name a song playing around you.</string>
           </dict></plist>
           EOF
           codesign --force --deep -s - DK.FM.app   # ad-hoc signature (Apple Silicon won't run unsigned code)

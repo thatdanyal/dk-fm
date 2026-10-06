@@ -1,6 +1,7 @@
-//! SHAZAM: listens to what the PC is playing for a few seconds (WASAPI loopback on
-//! Windows; a "monitor" input, else the default input, elsewhere), makes a Shazam-style audio
-//! signature (spectral peaks in four frequency bands, 16 kHz mono) and looks it up.
+//! SHAZAM: listens for a few seconds, either to what the PC is playing (WASAPI loopback on
+//! Windows; a "monitor" input, else the default input, elsewhere) or to the microphone (one at a
+//! time: two songs mixed into one recording match neither), makes a Shazam-style audio signature
+//! (spectral peaks in four frequency bands, 16 kHz mono) and looks it up.
 use crate::net;
 use crate::ui::scope::Fft;
 use parking_lot::Mutex;
@@ -19,23 +20,26 @@ pub struct Heard {
     pub album: String,
 }
 
-/// Records `secs` of what the computer is playing, as 16 kHz mono.
-pub fn capture(secs: f32) -> Result<Vec<f32>, String> {
+/// What SHAZAM listens to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ear {
+    /// what this PC is playing
+    #[default]
+    Pc,
+    /// the room, through the default microphone
+    Mic,
+}
+
+/// Records `secs` from `ear`, as 16 kHz mono.
+pub fn capture(secs: f32, ear: Ear) -> Result<Vec<f32>, String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
-    // Windows: an input stream on the speakers is a loopback of everything they play
-    #[cfg(windows)]
-    let (dev, cfg) = {
-        let d = host.default_output_device().ok_or("No speakers found")?;
-        let c = d.default_output_config().map_err(|e| e.to_string())?;
+    let (dev, cfg) = if ear == Ear::Mic {
+        let d = host.default_input_device().ok_or("No microphone found: plug one in or turn it on in Windows sound settings")?;
+        let c = d.default_input_config().map_err(|e| format!("Couldn't use the microphone: {e}"))?;
         (d, c)
-    };
-    #[cfg(not(windows))]
-    let (dev, cfg) = {
-        let monitor = host.input_devices().ok().and_then(|mut l| l.find(|d| d.name().map(|n| n.to_lowercase().contains("monitor")).unwrap_or(false)));
-        let d = monitor.or_else(|| host.default_input_device()).ok_or("Nothing to listen with: no input device")?;
-        let c = d.default_input_config().map_err(|e| e.to_string())?;
-        (d, c)
+    } else {
+        pc_device(&host)?
     };
     let (rate, ch) = (cfg.sample_rate().0, cfg.channels().max(1) as usize);
     let buf: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
@@ -71,9 +75,20 @@ pub fn capture(secs: f32) -> Result<Vec<f32>, String> {
             let p = push;
             dev.build_input_stream(&sc, move |d: &[u16], _| p(&mut d.iter().map(|s| (*s as f32 - 32768.0) / 32768.0)), err, None)
         }
+        cpal::SampleFormat::I32 => {
+            let p = push;
+            dev.build_input_stream(&sc, move |d: &[i32], _| p(&mut d.iter().map(|s| *s as f32 / 2_147_483_648.0)), err, None)
+        }
         f => return Err(format!("Unsupported sound format {f:?}")),
     }
-    .map_err(|e| format!("Couldn't listen: {e}"))?;
+    .map_err(|e| {
+        let e = e.to_string();
+        if ear == Ear::Mic && e.to_lowercase().contains("denied") {
+            "The microphone is blocked: allow it for desktop apps in Windows Settings > Privacy & security > Microphone".to_string()
+        } else {
+            format!("Couldn't listen: {e}")
+        }
+    })?;
     stream.play().map_err(|e| e.to_string())?;
     let end = std::time::Instant::now() + Duration::from_secs_f32(secs + 2.0);
     while buf.lock().len() < max && std::time::Instant::now() < end {
@@ -82,6 +97,35 @@ pub fn capture(secs: f32) -> Result<Vec<f32>, String> {
     drop(stream);
     let mono = std::mem::take(&mut *buf.lock());
     Ok(resample(&mono, rate, RATE))
+}
+
+/// The device whose sound is "what this PC is playing".
+fn pc_device(host: &cpal::Host) -> Result<(cpal::Device, cpal::SupportedStreamConfig), String> {
+    use cpal::traits::{DeviceTrait, HostTrait};
+    // Windows: an input stream on the speakers is a loopback of everything they play
+    #[cfg(windows)]
+    {
+        let d = host.default_output_device().ok_or("No speakers found")?;
+        let c = d.default_output_config().map_err(|e| e.to_string())?;
+        Ok((d, c))
+    }
+    #[cfg(not(windows))]
+    {
+        let monitor = host.input_devices().ok().and_then(|mut l| l.find(|d| d.name().map(|n| n.to_lowercase().contains("monitor")).unwrap_or(false)));
+        let d = monitor.or_else(|| host.default_input_device()).ok_or("Nothing to listen with: no input device")?;
+        let c = d.default_input_config().map_err(|e| e.to_string())?;
+        Ok((d, c))
+    }
+}
+
+/// Brings a quiet recording (a microphone across the room, the PC turned down) up to a level
+/// where its peaks clear the signature's floor (silence was already turned away).
+fn level(s: &mut [f32]) {
+    let peak = s.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+    if peak > 0.0 && peak < 0.5 {
+        let g = 0.8 / peak;
+        s.iter_mut().for_each(|x| *x *= g);
+    }
 }
 
 /// Box-filtered linear resampling (plenty for peak-picking up to 5.5 kHz).
@@ -304,13 +348,21 @@ pub fn lookup(samples: &[f32]) -> Result<Option<Heard>, String> {
     Ok(Some(Heard { title: t["title"].as_str().unwrap_or("").into(), artist: t["subtitle"].as_str().unwrap_or("").into(), album }))
 }
 
-/// Listen and look up; up to two tries (the second with a longer recording) before giving up.
-pub fn identify() -> Result<Option<Heard>, String> {
+/// Listen to `ear` and look up; up to two tries (the second with a longer recording) before
+/// giving up.
+pub fn identify(ear: Ear) -> Result<Option<Heard>, String> {
     for secs in [8.0, 12.0] {
-        let s = capture(secs)?;
-        if s.iter().map(|x| x.abs()).fold(0.0f32, f32::max) < 0.003 {
-            return Err("Heard silence: play the song on this PC, then try again.".into());
+        let mut s = capture(secs, ear)?;
+        let quiet = if ear == Ear::Mic { 0.0005 } else { 0.003 };
+        if s.iter().map(|x| x.abs()).fold(0.0f32, f32::max) < quiet {
+            if ear == Ear::Pc {
+                return Err("Heard silence: play the song on this PC, then try again.".into());
+            }
+            use cpal::traits::{DeviceTrait, HostTrait};
+            let name = cpal::default_host().default_input_device().and_then(|d| d.name().ok()).unwrap_or_default();
+            return Err(format!("The microphone ({name}) heard nothing: check it's on and not muted, or pick another one as the default input in Windows sound settings."));
         }
+        level(&mut s);
         if let Some(h) = lookup(&s)? {
             return Ok(Some(h));
         }
@@ -345,5 +397,12 @@ mod tests {
         assert_eq!(base64(b"M"), "TQ==");
         // 48 kHz -> 16 kHz keeps the length in time
         assert_eq!(resample(&vec![0.0; 48_000], 48_000, RATE).len(), 16_000);
+        // a quiet recording is brought up, a loud one left alone
+        let mut q = vec![0.01, -0.02];
+        level(&mut q);
+        assert!((q[1] + 0.8).abs() < 1e-6);
+        let mut l = vec![0.9, -0.6];
+        level(&mut l);
+        assert_eq!(l, vec![0.9, -0.6]);
     }
 }

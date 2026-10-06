@@ -32,7 +32,7 @@ enum Act {
     CycleRepeat,
     View(View),
     /// SHAZAM (also on the deck)
-    Listen,
+    Listen(crate::recognize::Ear),
     Import(String),
     SyncAll,
     OpenShare,
@@ -96,7 +96,8 @@ fn commands(app: &App) -> Vec<(String, &'static str, &'static str, Act)> {
         ("Home".into(), "start discover mixes new releases recently played", "🏠", Act::View(View::Home)),
         ("THEATER: the song big, with its lyrics".into(), "now playing full screen fullscreen big cover lyrics f11 karaoke", "🗖", Act::NowPlaying),
         ("Discover new music".into(), "discover new recommendations similar radio explore", "🔍", Act::View(View::Discover)),
-        ("Shazam: name the song playing on this PC".into(), "shazam identify recognize listen what song is this whats playing", "♫", Act::Listen),
+        ("Shazam: name the song playing on this PC".into(), "shazam identify recognize listen what song is this whats playing computer pc", "♫", Act::Listen(crate::recognize::Ear::Pc)),
+        ("Shazam with the microphone: name a song playing around you".into(), "shazam identify recognize listen what song is this whats playing mic microphone room radio", "♫", Act::Listen(crate::recognize::Ear::Mic)),
         ("Find music online (songs, artists, albums, podcasts…)".into(), "search youtube web download get new song artist album playlist podcast audiobook profile clean explicit live instrumental version", "🌐", Act::View(View::Web)),
         ("Take the tour".into(), "tutorial help guide how to features walkthrough instructions", "💡", Act::Tour),
         ("Import music from a link".into(), "spotify youtube soundcloud download add", "📥", Act::View(View::Import)),
@@ -206,7 +207,7 @@ fn run(app: &mut App, ctx: &egui::Context, act: Act) {
         Act::ToggleShuffle => app.player.toggle_shuffle(),
         Act::CycleRepeat => app.player.cycle_repeat(),
         Act::View(v) => app.browser.set_view(v),
-        Act::Listen => super::websearch::listen(app, ctx),
+        Act::Listen(ear) => super::websearch::listen_to(app, ctx, ear),
         Act::Tour => super::tour::start(app),
         Act::Import(u) => {
             app.browser.set_view(View::Import);

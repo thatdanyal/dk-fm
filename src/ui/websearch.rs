@@ -3,7 +3,8 @@
 //! (songs, albums, singles), an album / playlist / podcast (its songs) and a profile (its
 //! playlists). Songs are labelled CLEAN / EXPLICIT / LIVE / INSTRUMENTAL... so you pick the
 //! version; nothing downloads until you click + GET, and ▶ plays a preview first.
-//! SHAZAM (a button on the deck) names a song playing on the PC; see recognize.rs.
+//! SHAZAM (a button on the deck) names a song playing on the PC or near the microphone; see
+//! recognize.rs.
 use super::theme::{px, vt};
 use super::widgets::{button, fill, frame_rect, tb_button};
 use super::App;
@@ -14,10 +15,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub use crate::recognize::Ear;
+
 #[derive(Default, Clone)]
 pub enum Listen {
     #[default]
     Idle,
+    /// asking what to listen to: this PC or the microphone
+    Choose,
     Busy,
     Got(crate::recognize::Heard),
     NoMatch,
@@ -47,6 +52,8 @@ type Done = (String, Result<HitPage, String>, bool);
 #[derive(Default)]
 pub struct WebState {
     pub listen: Arc<Mutex<Listen>>,
+    /// what SHAZAM listened to last (AGAIN uses it, the chooser suggests it)
+    pub ear: Ear,
     pub query: String,
     pub focus: bool,
     edited: Option<Instant>,
@@ -63,16 +70,29 @@ pub struct WebState {
     owned: HashMap<String, (u64, Vec<Option<String>>)>,
 }
 
-/// Start listening for the song playing on this PC (in the background).
+/// SHAZAM was pressed: ask what to listen to (pressed again: never mind).
 pub fn listen(app: &mut App, ctx: &egui::Context) {
+    let mut l = app.browser.web.listen.lock();
+    *l = match *l {
+        Listen::Busy => Listen::Busy,
+        Listen::Choose => Listen::Idle,
+        _ => Listen::Choose,
+    };
+    // the card was already drawn this frame
+    ctx.request_repaint();
+}
+
+/// Start listening to `ear` for a song (in the background).
+pub fn listen_to(app: &mut App, ctx: &egui::Context, ear: Ear) {
     let slot = app.browser.web.listen.clone();
     if matches!(*slot.lock(), Listen::Busy) {
         return;
     }
+    app.browser.web.ear = ear;
     *slot.lock() = Listen::Busy;
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        *slot.lock() = match crate::recognize::identify() {
+        *slot.lock() = match crate::recognize::identify(ear) {
             Ok(Some(h)) => Listen::Got(h),
             Ok(None) => Listen::NoMatch,
             Err(e) => Listen::Failed(e),
@@ -217,7 +237,7 @@ fn intro(app: &mut App, ui: &mut Ui) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(format!("Sound: every download takes the best audio YouTube has for that song (sound quality: {quality}, change it in Settings > Downloads). Results from YouTube Music's SONGS are the studio versions, the best source; videos can be quieter or have extra sounds.")).color(pal.dim));
     ui.add_space(6.0);
-    ui.label(egui::RichText::new("Hear a song somewhere on your PC? Press SHAZAM on the deck.").color(pal.dim));
+    ui.label(egui::RichText::new("Hear a song on your PC or around you? Press SHAZAM on the deck.").color(pal.dim));
 }
 
 /// ALL: a few artists, songs (the versions to pick from), albums and playlists.
@@ -534,7 +554,9 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let mut close = false;
-    let mut again = false;
+    let ear = app.browser.web.ear;
+    let mut go: Option<Ear> = None;
+    let other = |e: Ear| if e == Ear::Pc { (Ear::Mic, "USE THE MIC") } else { (Ear::Pc, "USE THIS PC") };
     egui::Area::new(egui::Id::new("shazam-card")).anchor(Align2::CENTER_BOTTOM, [0.0, -70.0]).order(egui::Order::Foreground).show(ctx, |ui| {
         egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
             ui.set_max_width(520.0);
@@ -547,8 +569,24 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
                 });
             });
             match &heard {
+                Listen::Choose => {
+                    ui.label(egui::RichText::new("What should SHAZAM listen to?").color(pal.text));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if button(ui, &pal, "THIS PC", ear == Ear::Pc, true).on_hover_text("A song playing on this PC: in a browser, a game, a video…").clicked() {
+                            go = Some(Ear::Pc);
+                        }
+                        if button(ui, &pal, "MICROPHONE", ear == Ear::Mic, true).on_hover_text("A song playing around you: a radio, a shop, a party, another phone…").clicked() {
+                            go = Some(Ear::Mic);
+                        }
+                    });
+                }
                 Listen::Busy => {
-                    ui.label(egui::RichText::new("Listening for about 10 seconds: keep the song playing…").color(pal.text));
+                    let msg = match ear {
+                        Ear::Pc => "Listening to this PC for about 10 seconds: keep the song playing…",
+                        Ear::Mic => "Listening through the microphone for about 10 seconds: hold it near the music…",
+                    };
+                    ui.label(egui::RichText::new(msg).color(pal.text));
                     ctx.request_repaint_after(Duration::from_millis(400));
                 }
                 Listen::Got(h) => {
@@ -565,21 +603,33 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
                             super::preview::toggle(app, &t);
                         }
                         if button(ui, &pal, "AGAIN", false, true).clicked() {
-                            again = true;
+                            go = Some(ear);
                         }
                     });
                 }
                 Listen::NoMatch => {
                     ui.label(egui::RichText::new("Couldn't name that one. Try again during a clear part of the song.").color(pal.text));
-                    if button(ui, &pal, "TRY AGAIN", true, true).clicked() {
-                        again = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if button(ui, &pal, "TRY AGAIN", true, true).clicked() {
+                            go = Some(ear);
+                        }
+                        let (e, t) = other(ear);
+                        if button(ui, &pal, t, false, true).clicked() {
+                            go = Some(e);
+                        }
+                    });
                 }
                 Listen::Failed(e) => {
                     ui.label(egui::RichText::new(e).color(pal.accent));
-                    if button(ui, &pal, "TRY AGAIN", false, true).clicked() {
-                        again = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if button(ui, &pal, "TRY AGAIN", false, true).clicked() {
+                            go = Some(ear);
+                        }
+                        let (e, t) = other(ear);
+                        if button(ui, &pal, t, false, true).clicked() {
+                            go = Some(e);
+                        }
+                    });
                 }
                 Listen::Idle => {}
             }
@@ -588,8 +638,8 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
     if close {
         *app.browser.web.listen.lock() = Listen::Idle;
     }
-    if again {
+    if let Some(e) = go {
         *app.browser.web.listen.lock() = Listen::Idle;
-        listen(app, ctx);
+        listen_to(app, ctx, e);
     }
 }

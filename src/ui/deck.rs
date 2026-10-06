@@ -85,18 +85,19 @@ fn shazam_wide(app: &mut App, ui: &mut Ui, w: f32) {
     let busy = matches!(*app.browser.web.listen.lock(), super::websearch::Listen::Busy);
     let r = tbtn(ui, &pal, if busy { "LISTENING…" } else { "♫ SHAZAM" }, Vec2::new(w, 26.0), busy, false);
     app.mark("shazam", r.rect);
-    if r.on_hover_text("Shazam: name the song playing on this PC right now (in a browser, a game, a video…)").clicked() && !busy {
+    if r.on_hover_text("Shazam: name a song playing on this PC or around you (with the microphone)").clicked() && !busy {
         super::websearch::listen(app, ui.ctx());
     }
 }
 
-/// SHAZAM: name the song playing on this PC (the answer floats above the window).
+/// SHAZAM: name a song playing on this PC or near the microphone (the answer floats above the
+/// window).
 fn shazam_button(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let busy = matches!(*app.browser.web.listen.lock(), super::websearch::Listen::Busy);
     let r = icon(ui, &pal, if busy { "…" } else { "SHAZAM" }, busy);
     app.mark("shazam", r.rect);
-    if r.on_hover_text("Shazam: name the song playing on this PC right now (in a browser, a game, a video…)").clicked() && !busy {
+    if r.on_hover_text("Shazam: name a song playing on this PC or around you (with the microphone)").clicked() && !busy {
         super::websearch::listen(app, ui.ctx());
     }
 }

@@ -121,11 +121,37 @@ fn transport(app: &mut App, ui: &mut Ui, st: &crate::audio::Status, k: f32) {
         if tbtn(ui, &pal, "⏭", Vec2::new(46.0, 40.0) * k, false, false).on_hover_text("Next").clicked() {
             app.player.next(true);
         }
-        let rl = match opts.repeat.as_str() { "one" => "RPT1", _ => "RPT" };
-        if tbtn(ui, &pal, rl, Vec2::new(46.0, 30.0) * k, opts.repeat != "off", false).on_hover_text("Repeat: off / all / one").clicked() {
+        if repeat_btn(ui, &pal, Vec2::new(46.0, 30.0) * k, &opts.repeat).clicked() {
             app.player.cycle_repeat();
         }
     });
+}
+
+/// Repeat, like Spotify's: an arrow looping around itself (lit when on, with a 1 when it repeats
+/// the song). Each press goes off > all > this song > off.
+pub(super) fn repeat_btn(ui: &mut Ui, pal: &super::theme::Pal, size: Vec2, mode: &str) -> egui::Response {
+    let on = mode != "off";
+    let resp = tbtn(ui, pal, "", size, on, false);
+    let body = Rect::from_min_size(resp.rect.min + if resp.is_pointer_button_down_on() { Vec2::splat(3.0) } else { Vec2::ZERO }, size);
+    let fg = if on { pal.ink } else if resp.hovered() { pal.accent } else { pal.text };
+    let w = (size.y * 0.75).min(size.x * 0.55).round();
+    let h = (w * 0.6).round();
+    let ir = Rect::from_center_size(body.center(), Vec2::new(w, h));
+    let p = ui.painter();
+    p.rect_stroke(ir, egui::CornerRadius::same((h / 2.0) as u8), Stroke::new(2.0_f32, fg), egui::StrokeKind::Middle);
+    // arrowheads: along the top pointing right, along the bottom pointing left
+    let a = (h * 0.42).max(3.0);
+    for (tip, dir) in [(Pos2::new(ir.left() + w * 0.72, ir.top()), 1.0_f32), (Pos2::new(ir.left() + w * 0.28, ir.bottom()), -1.0)] {
+        let pts = vec![tip + Vec2::new(a * 0.6 * dir, 0.0), tip + Vec2::new(-a * 0.6 * dir, -a * 0.75), tip + Vec2::new(-a * 0.6 * dir, a * 0.75)];
+        p.add(egui::Shape::convex_polygon(pts, fg, Stroke::NONE));
+    }
+    if mode == "one" {
+        // a small "1" badge in the corner
+        let c = Pos2::new(body.right() - 7.5, body.top() + 7.5);
+        p.circle_filled(c, 6.5, fg);
+        p.text(c + Vec2::new(0.5, 0.5), Align2::CENTER_CENTER, "1", px(6.0), pal.accent2);
+    }
+    resp.on_hover_text(match mode { "all" => "Repeat: all (press to repeat this song)", "one" => "Repeat: this song (press to turn off)", _ => "Repeat (press to repeat all)" })
 }
 
 /// Mute button + volume slider + percentage, leaving `reserve` px for what follows.

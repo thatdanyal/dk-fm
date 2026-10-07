@@ -76,7 +76,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 if tbtn(ui, &pal, "⏭", Vec2::new(46.0, 40.0), false, false).clicked() {
                     app.player.next(true);
                 }
-                if tbtn(ui, &pal, if opts.repeat == "one" { "RPT1" } else { "RPT" }, Vec2::new(46.0, 30.0), opts.repeat != "off", false).clicked() {
+                if super::deck::repeat_btn(ui, &pal, Vec2::new(46.0, 30.0), &opts.repeat).clicked() {
                     app.player.cycle_repeat();
                 }
                 let liked = t.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);

@@ -105,7 +105,8 @@ fn shazam_button(app: &mut App, ui: &mut Ui) {
 /// Shuffle · previous · play/pause · next · repeat, centred; `k` scales the buttons.
 fn transport(app: &mut App, ui: &mut Ui, st: &crate::audio::Status, k: f32) {
     let pal = app.pal;
-    ui.horizontal(|ui| {
+    // one row as tall as the play button, every button centred on it (so they line up)
+    ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 53.0 * k), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         let total = (46.0 * 4.0 + 62.0 + 8.0 * 4.0) * k;
         ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
         let opts = app.player.st.lock().opts.clone();

@@ -60,7 +60,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.painter().text(tr.left_center(), Align2::LEFT_CENTER, fmt_time(st.position), vt(19.0), pal.dim);
             ui.painter().text(tr.right_center(), Align2::RIGHT_CENTER, fmt_time(dur), vt(19.0), pal.dim);
             ui.add_space(6.0);
-            ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(Vec2::new(ui.available_width(), 53.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let total = 46.0 * 4.0 + 62.0 + 46.0 + 8.0 * 5.0 + 20.0;
                 ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
                 let opts = app.player.st.lock().opts.clone();

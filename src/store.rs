@@ -246,6 +246,8 @@ pub struct Settings {
     /// album covers next to song titles in lists
     #[serde(default = "d_true")] pub list_covers: bool,
     #[serde(default)] pub custom_themes: Vec<CustomTheme>,
+    /// the THEME menu's order (theme keys, dragged into place; themes not in it go last)
+    #[serde(default)] pub theme_order: Vec<String>,
     /// visualizer colours: none = follow the theme, else [low, mid, peak] hex
     #[serde(default)] pub vis_colors: Option<[String; 3]>,
     /// visualizer bar count (0 = fit the panel)

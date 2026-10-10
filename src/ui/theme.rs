@@ -81,7 +81,73 @@ pub const FIELDS: [(&str, &str); 16] = [
     ("lcd_bg", "Display background"), ("lcd", "Display text"), ("shadow", "Shadows"), ("sel", "Selection"),
 ];
 
+/// The theme editor's main colours: (key, name, what it colours). Each sets its palette field and
+/// the shades that go with it (see `Pal::set_role`).
+pub const ROLES: [(&str, &str, &str); 6] = [
+    ("main", "MAIN", "The background, with the panels and title bar a shade off it"),
+    ("accent", "ACCENT 1", "Buttons, highlights, the playing song, the display"),
+    ("accent2", "ACCENT 2", "Headings, links, buttons that are on"),
+    ("text", "TEXT", "Text, with dimmer shades for less important text"),
+    ("detail", "DETAIL", "Borders and lines"),
+    ("display", "DISPLAY", "Behind the LCD-style numbers and cards"),
+];
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
+
+fn light(c: Color32) -> f32 {
+    (0.299 * c.r() as f32 + 0.587 * c.g() as f32 + 0.114 * c.b() as f32) / 255.0
+}
+
 impl Pal {
+    /// A main colour's current value.
+    pub fn role(&self, role: &str) -> Color32 {
+        match role {
+            "main" => self.bg,
+            "accent" => self.accent,
+            "accent2" => self.accent2,
+            "text" => self.text,
+            "detail" => self.line_hi,
+            "display" => self.lcd_bg,
+            _ => self.accent,
+        }
+    }
+
+    /// Sets a main colour and the shades that go with it.
+    pub fn set_role(&mut self, role: &str, c: Color32) {
+        match role {
+            "main" => {
+                self.bg = c;
+                self.bg2 = mix(c, self.text, 0.03);
+                self.panel = mix(c, self.text, 0.05);
+                self.panel_hi = mix(c, self.text, 0.09);
+                self.dark = light(c) < 0.5;
+                self.shadow = if self.dark { Color32::BLACK } else { mix(c, Color32::BLACK, 0.3) };
+            }
+            "accent" => {
+                self.accent = c;
+                self.lcd = c;
+                self.sel = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 40);
+                // text on it: dark on a bright accent, light on a dark one
+                self.ink = if light(c) > 0.45 { mix(c, Color32::BLACK, 0.9) } else { mix(c, Color32::WHITE, 0.92) };
+            }
+            "accent2" => self.accent2 = c,
+            "text" => {
+                self.text = c;
+                self.dim = mix(c, self.bg, 0.4);
+                self.faint = mix(c, self.bg, 0.68);
+            }
+            "detail" => {
+                self.line_hi = c;
+                self.line = mix(c, self.bg, 0.45);
+            }
+            "display" => self.lcd_bg = c,
+            _ => {}
+        }
+    }
+
     pub fn field(&mut self, name: &str) -> Option<&mut Color32> {
         Some(match name {
             "bg" => &mut self.bg, "bg2" => &mut self.bg2, "panel" => &mut self.panel, "panel_hi" => &mut self.panel_hi,
@@ -124,18 +190,29 @@ pub fn resolve(s: &Settings) -> Pal {
     palette(&s.theme, s.accent.as_deref())
 }
 
-/// Every theme to pick from: built-ins, then custom ones (key, name).
+/// Every theme to pick from (key, name): built-ins, then custom ones, in the order you dragged
+/// them into (themes you haven't moved keep their place after those).
 pub fn all_themes(s: &Settings) -> Vec<(String, String)> {
-    THEMES.iter().map(|(k, n)| (k.to_string(), n.to_string())).chain(s.custom_themes.iter().map(|c| (format!("{CUSTOM}{}", c.name), c.name.clone()))).collect()
+    let mut v: Vec<(String, String)> = THEMES.iter().map(|(k, n)| (k.to_string(), n.to_string())).chain(s.custom_themes.iter().map(|c| (format!("{CUSTOM}{}", c.name), c.name.clone()))).collect();
+    if !s.theme_order.is_empty() {
+        v.sort_by_key(|(k, _)| s.theme_order.iter().position(|o| o == k).unwrap_or(usize::MAX));
+    }
+    v
 }
 
-/// A theme's colour square in pickers (Album Cover's is a rainbow).
+/// A theme's colour block in pickers: its three main colours side by side (background, accent,
+/// second accent). Album Cover's is a rainbow.
 pub fn swatch(p: &egui::Painter, r: egui::Rect, s: &Settings, key: &str) {
     if key == super::covertheme::KEY {
         super::covertheme::rainbow(p, r);
-    } else {
-        p.rect_filled(r, 0.0, theme_pal(s, key).accent);
+        return;
     }
+    let t = theme_pal(s, key);
+    let w = r.width() / 3.0;
+    for (i, c) in [t.bg, t.accent, t.accent2].into_iter().enumerate() {
+        p.rect_filled(egui::Rect::from_min_size(r.min + egui::vec2(w * i as f32, 0.0), egui::vec2(w, r.height())), 0.0, c);
+    }
+    p.rect_stroke(r, 0.0, Stroke::new(1.0_f32, t.line_hi), egui::StrokeKind::Inside);
 }
 
 pub fn theme_pal(s: &Settings, key: &str) -> Pal {
@@ -150,10 +227,17 @@ pub fn theme_pal(s: &Settings, key: &str) -> Pal {
 }
 
 pub fn vt(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("vt".into()))
+    FontId::new(step(size), FontFamily::Name("vt".into()))
 }
 pub fn px(size: f32) -> FontId {
-    FontId::new(size, FontFamily::Name("px".into()))
+    FontId::new(step(size), FontFamily::Name("px".into()))
+}
+
+/// Text sizes in steps (whole pixels, 4 px apart above 32): egui draws each size's letters into
+/// its font texture once and keeps them, so sizes that follow a panel's width (lyrics, the deck's
+/// time, cover placeholders) used to add more memory with every resize.
+fn step(size: f32) -> f32 {
+    if size <= 32.0 { size.round().max(1.0) } else { (size / 4.0).round() * 4.0 }
 }
 
 /// Chosen font ("pixel" / "clean" / "sys:<file>") and whether headings stay pixel.

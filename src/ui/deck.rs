@@ -110,7 +110,7 @@ fn transport(app: &mut App, ui: &mut Ui, st: &crate::audio::Status, k: f32) {
         let total = (46.0 * 4.0 + 62.0 + 8.0 * 4.0) * k;
         ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
         let opts = app.player.st.lock().opts.clone();
-        if tbtn(ui, &pal, "SHUF", Vec2::new(46.0, 30.0) * k, opts.shuffle, false).on_hover_text("Shuffle").clicked() {
+        if shuffle_btn(ui, &pal, Vec2::new(46.0, 30.0) * k, opts.shuffle).clicked() {
             app.player.toggle_shuffle();
         }
         if tbtn(ui, &pal, "⏮", Vec2::new(46.0, 40.0) * k, false, false).on_hover_text("Previous").clicked() {
@@ -126,6 +126,27 @@ fn transport(app: &mut App, ui: &mut Ui, st: &crate::audio::Status, k: f32) {
             app.player.cycle_repeat();
         }
     });
+}
+
+/// Shuffle, like Spotify's: two arrows crossing over each other (lit when on).
+pub(super) fn shuffle_btn(ui: &mut Ui, pal: &super::theme::Pal, size: Vec2, on: bool) -> egui::Response {
+    let resp = tbtn(ui, pal, "", size, on, false);
+    let body = Rect::from_min_size(resp.rect.min + if resp.is_pointer_button_down_on() { Vec2::splat(3.0) } else { Vec2::ZERO }, size);
+    let fg = if on { pal.ink } else if resp.hovered() { pal.accent } else { pal.text };
+    let w = (size.y * 0.8).min(size.x * 0.6).round();
+    let h = (w * 0.62).round();
+    let ir = Rect::from_center_size(body.center(), Vec2::new(w, h));
+    let a = (h * 0.36).max(3.0);
+    let p = ui.painter();
+    // each arrow: in at one height on the left, crossing the other, out at the other height
+    for (y0, y1) in [(ir.bottom(), ir.top()), (ir.top(), ir.bottom())] {
+        let end = ir.right() - a * 0.9;
+        let pts = [Pos2::new(ir.left(), y0), Pos2::new(ir.left() + w * 0.42, y0), Pos2::new(end - w * 0.38, y1), Pos2::new(end, y1)];
+        p.add(egui::epaint::CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, Stroke::new(2.0_f32, fg)));
+        let tip = Pos2::new(ir.right(), y1);
+        p.add(egui::Shape::convex_polygon(vec![tip, tip + Vec2::new(-a * 1.1, -a * 0.75), tip + Vec2::new(-a * 1.1, a * 0.75)], fg, Stroke::NONE));
+    }
+    resp.on_hover_text(if on { "Shuffle: on (press to play in order)" } else { "Shuffle" })
 }
 
 /// Repeat, like Spotify's: an arrow looping around itself (lit when on, with a 1 when it repeats

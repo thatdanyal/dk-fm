@@ -1,9 +1,10 @@
 //! THEATER (full-screen now playing), your way: three versions of it (presets) you name and
 //! arrange yourself. Each is two columns of parts (cover, song, seek bar, controls, lyrics, up
 //! next, clock, visualizer, volume, plays) top to bottom; an empty right column makes one wide
-//! column. LAYOUT (inside THEATER) adds, removes and moves parts, renames a version and makes one
-//! the default. In the title bar, clicking THEATER opens the default; hovering it lists all three.
-//! 1 / 2 / 3 switch while it's open; Esc (or F11) leaves. Nothing extra repaints: it redraws on
+//! column. LAYOUT (the title bar's, while THEATER is open) drags parts between spots, onto a bin
+//! to take them out and in from a list, renames a version and makes one the default. In the
+//! title bar, clicking THEATER opens the default; hovering it lists all three (right-click one:
+//! make it the default). 1 / 2 / 3 switch while it's open; Esc (or F11) leaves. Nothing extra repaints: it redraws on
 //! the same playback tick as the deck (the clock asks for one repaint a minute).
 use super::deck::tbtn;
 use super::theme::{px, vt};
@@ -201,6 +202,7 @@ pub fn hover_menu(app: &mut App, ui: &mut Ui, button: &egui::Response) -> Option
     }
     let (presets, def) = { let s = app.settings.lock(); (s.theater.clone(), s.theater_default) };
     let mut picked = None;
+    let mut main = None;
     let area = egui::Area::new(id).order(egui::Order::Foreground).fixed_pos(button.rect.left_bottom() + Vec2::new(0.0, 2.0)).show(&ctx, |ui| {
         egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
             ui.set_min_width(220.0);
@@ -208,16 +210,24 @@ pub fn hover_menu(app: &mut App, ui: &mut Ui, button: &egui::Response) -> Option
             for (i, p) in presets.iter().enumerate() {
                 let open = app.nowplaying && app.theater.preset == i;
                 let label = format!("{} {}{}", if open { "▶" } else { " " }, p.name, if i == def { "  ★" } else { "" });
-                if ui.add_sized(Vec2::new(220.0, 24.0), egui::Button::new(egui::RichText::new(label).font(vt(20.0))).selected(open)).on_hover_text(if i == def { "Your default: clicking THEATER opens this one" } else { "Open this version of THEATER" }).clicked() {
+                let r = ui.add_sized(Vec2::new(220.0, 24.0), egui::Button::new(egui::RichText::new(label).font(vt(20.0))).selected(open)).on_hover_text(if i == def { "Your main THEATER: clicking THEATER opens this one" } else { "Open this version of THEATER (right-click: make it your main one)" });
+                if r.clicked() {
                     picked = Some(Some(i));
+                }
+                if r.secondary_clicked() && i != def {
+                    main = Some(i);
                 }
             }
             ui.add_space(2.0);
-            if ui.add_sized(Vec2::new(220.0, 22.0), egui::Button::new(egui::RichText::new("  LAYOUT… (ADD, MOVE, RENAME)").font(px(6.0)).color(pal.dim))).clicked() {
+            if ui.add_sized(Vec2::new(220.0, 22.0), egui::Button::new(egui::RichText::new("  LAYOUT… (DRAG, RENAME)").font(px(6.0)).color(pal.dim))).clicked() {
                 picked = Some(None);
             }
         });
     });
+    if let Some(i) = main {
+        app.edit_settings(|s| s.theater_default = i);
+        app.toast(format!("{} is your main THEATER now", presets[i].name));
+    }
     ctx.data_mut(|d| d.insert_temp(id, area.response.rect.union(button.rect)));
     if picked.is_some() {
         ctx.data_mut(|d| d.remove::<Rect>(id));
@@ -246,16 +256,27 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
     }
     let preset = { let s = app.settings.lock(); s.theater.get(app.theater.preset).cloned().unwrap_or_else(|| crate::store::d_theater()[0].clone()) };
-    if !preset.singalong {
+    let has_lyrics = preset.left.iter().chain(&preset.right).any(|k| k == "lyrics");
+    if !has_lyrics {
         app.theater.score = None;
     }
     let full = ui.max_rect();
     backdrop(app, ui, full, &preset);
-    // the parts, in one or two columns (room on the right for the editor while it's open)
-    let room = if app.theater.edit { Rect::from_min_max(full.min, Pos2::new(full.right() - 340.0, full.bottom())) } else { full };
+    // the parts, in one or two columns (room on the left for the editor while it's open)
+    let edit = app.theater.edit;
+    let room = if edit { Rect::from_min_max(Pos2::new(full.left() + TRAY_W + 10.0, full.top()), full.max) } else { full };
     let body = Rect::from_min_max(room.min + Vec2::new(24.0, 52.0), room.max - Vec2::new(24.0, 16.0));
-    let two = !preset.right.is_empty() && !preset.left.is_empty() && body.width() >= 760.0;
-    if two {
+    // (left 0 / right 1, the column's area, where each of its parts is)
+    let mut cols: Vec<(usize, Rect, Vec<Rect>)> = Vec::new();
+    if edit {
+        // editing: always two columns to drop parts into (an empty right one is a narrow strip)
+        let split = if preset.right.is_empty() { body.right() - (body.width() * 0.25).max(150.0) } else { body.center().x };
+        let lr = Rect::from_min_max(body.min, Pos2::new(split - 12.0, body.bottom()));
+        let rr = Rect::from_min_max(Pos2::new(split + 12.0, body.top()), body.max);
+        let a = column(app, ui, lr, &preset.left, &preset);
+        let b = column(app, ui, rr, &preset.right, &preset);
+        cols = vec![(0, lr, a), (1, rr, b)];
+    } else if !preset.right.is_empty() && !preset.left.is_empty() && body.width() >= 760.0 {
         let mid = body.center().x;
         column(app, ui, Rect::from_min_max(body.min, Pos2::new(mid - 12.0, body.bottom())), &preset.left, &preset);
         column(app, ui, Rect::from_min_max(Pos2::new(mid + 12.0, body.top()), body.max), &preset.right, &preset);
@@ -270,35 +291,164 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if pointer != app.theater.idle.0 {
         app.theater.idle = (pointer, now);
     }
-    let resting = preset.auto_hide && !app.theater.edit && now - app.theater.idle.1 > 3.0;
+    let resting = preset.auto_hide && !edit && now - app.theater.idle.1 > 3.0;
     if resting {
         ctx.set_cursor_icon(egui::CursorIcon::None);
     } else {
-        if preset.auto_hide && !app.theater.edit {
+        if preset.auto_hide && !edit {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64((3.05 - (now - app.theater.idle.1)).max(0.05)));
         }
-        let bar = Rect::from_min_max(Pos2::new(full.left() + 16.0, full.top() + 14.0), Pos2::new(room.right() - 16.0, full.top() + 42.0));
+        // (LAYOUT is the title bar's LAYOUT button, top left)
+        let bar = Rect::from_min_max(Pos2::new(room.left() + 16.0, full.top() + 14.0), Pos2::new(room.right() - 16.0, full.top() + 42.0));
         ui.allocate_new_ui(egui::UiBuilder::new().max_rect(bar).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
             ui.label(egui::RichText::new(&preset.name).font(px(7.0)).color(pal.dim)).on_hover_text("Press 1, 2 or 3 for your other versions of THEATER");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if tb_button(ui, &pal, "× CLOSE · ESC", false).on_hover_text("Back to DK.FM (Esc or F11)").clicked() {
                     app.nowplaying = false;
                 }
-                if tb_button(ui, &pal, "LAYOUT", app.theater.edit).on_hover_text("Add, remove and move what THEATER shows; name your three versions and pick the default").clicked() {
-                    app.theater.edit = !app.theater.edit;
-                }
-                if preset.singalong && preset.left.iter().chain(&preset.right).any(|k| k == "lyrics") {
+                if has_lyrics {
                     let on = app.theater.score.is_some();
-                    if tb_button(ui, &pal, if on { "♪ SCORING · STOP" } else { "♪ SCORE ME" }, on).on_hover_text("Sing along and get a score: the microphone listens, and each line is graded on timing and on singing notes that fit the song. Headphones give a fair score (with speakers the microphone hears the song too). Nothing is recorded or saved but your best score.").clicked() {
+                    if tb_button(ui, &pal, if on { "♪ SCORING · STOP" } else { "♪ SCORE ME" }, on).on_hover_text("Sing along and get a score: the microphone listens, and each line is graded on timing and on singing notes that fit the song (the words light up as they're sung). Headphones give a fair score (with speakers the microphone hears the song too). Nothing is recorded or saved but your best score (Stats > KARAOKE).").clicked() {
                         app.theater.score = if on { None } else { Some(Score::start(app)) };
                     }
                 }
             });
         });
     }
-    if app.theater.edit {
-        editor(app, ui, Rect::from_min_max(Pos2::new(full.right() - 330.0, full.top() + 48.0), full.max - Vec2::new(10.0, 10.0)));
+    if edit {
+        let trash = editor(app, ui, Rect::from_min_max(full.min + Vec2::new(10.0, 10.0), Pos2::new(full.left() + TRAY_W, full.bottom() - 10.0)));
+        drag_parts(app, ui, &cols, &preset, trash);
     }
+}
+
+/// LAYOUT's panel on the left.
+const TRAY_W: f32 = 300.0;
+
+/// A part being dragged in LAYOUT: which, and where it was (None: from the panel's list).
+#[derive(Clone)]
+struct PartDrag {
+    key: String,
+    from: Option<(usize, usize)>,
+}
+
+/// LAYOUT: each part on screen gets a frame and its name, and can be dragged to a spot between
+/// the parts of either column; onto the bin, it's taken out. Parts dragged in from the panel are
+/// added where they're dropped.
+fn drag_parts(app: &mut App, ui: &mut Ui, cols: &[(usize, Rect, Vec<Rect>)], preset: &TheaterPreset, trash: Rect) {
+    let pal = app.pal;
+    let ctx = ui.ctx().clone();
+    let dragging = egui::DragAndDrop::payload::<PartDrag>(&ctx);
+    for (side, cr, rects) in cols {
+        let keys = if *side == 0 { &preset.left } else { &preset.right };
+        if rects.is_empty() {
+            // an empty column: a place to drop into
+            let r = Rect::from_min_size(cr.min, Vec2::new(cr.width(), cr.height().min(160.0)));
+            dashed(ui.painter(), r, if dragging.is_some() { pal.accent2 } else { pal.line_hi });
+            let msg: &[&str] = if *side == 1 { &["DROP HERE FOR", "A SECOND COLUMN"] } else { &["DROP PARTS HERE"] };
+            for (n, line) in msg.iter().enumerate() {
+                let dy = (n as f32 - (msg.len() as f32 - 1.0) / 2.0) * 14.0;
+                ui.painter().text(r.center() + Vec2::new(0.0, dy), Align2::CENTER_CENTER, *line, px(6.0), pal.dim);
+            }
+        }
+        for (j, (k, r)) in keys.iter().zip(rects).enumerate() {
+            let r = r.shrink(1.0);
+            let moving = dragging.as_ref().is_some_and(|d| d.from == Some((*side, j)));
+            let resp = ui.interact(r, ui.id().with(("theater-part", side, j)), Sense::drag());
+            let hot = resp.hovered() && dragging.is_none();
+            let p = ui.painter();
+            if moving {
+                fill(p, r, with_alpha(pal.bg, 190));
+            }
+            frame_rect(p, r, 2.0, if hot { pal.accent } else { with_alpha(pal.line_hi, 210) });
+            let g = p.layout_no_wrap(part_name(k).to_string(), vt(17.0), pal.ink);
+            let tag = Rect::from_min_size(r.min, g.size() + Vec2::new(24.0, 2.0));
+            fill(p, tag, if hot { pal.accent } else { pal.line_hi });
+            grip(p, Pos2::new(tag.left() + 8.0, tag.center().y), pal.ink);
+            p.galley(tag.min + Vec2::new(19.0, 1.0), g, pal.ink);
+            if hot {
+                ctx.set_cursor_icon(egui::CursorIcon::Grab);
+            }
+            if resp.drag_started() {
+                egui::DragAndDrop::set_payload(&ctx, PartDrag { key: k.clone(), from: Some((*side, j)) });
+            }
+        }
+    }
+    let (Some(d), Some(pos)) = (dragging, ctx.pointer_interact_pos()) else { return };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    // where it lands: the bin, or the spot between parts nearest the mouse in the column under it
+    let bin = trash.contains(pos);
+    let spot = if bin {
+        None
+    } else {
+        cols.iter().find(|c| c.1.expand2(Vec2::new(12.0, 40.0)).contains(pos)).map(|(side, cr, rects)| {
+            let i = rects.iter().filter(|r| r.center().y < pos.y).count();
+            let y = match (rects.first(), i) {
+                (None, _) => cr.top() + 2.0,
+                (Some(f), 0) => f.top() - 6.0,
+                _ if i == rects.len() => rects[i - 1].bottom() + 6.0,
+                _ => (rects[i - 1].bottom() + rects[i].top()) / 2.0,
+            };
+            (*side, i, cr.x_range(), y)
+        })
+    };
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("theater-drag")));
+    // every spot faint, the one it would go to lit
+    for (side, cr, rects) in cols {
+        let mut ys: Vec<f32> = rects.windows(2).map(|w| (w[0].bottom() + w[1].top()) / 2.0).collect();
+        ys.push(rects.first().map(|f| f.top() - 6.0).unwrap_or(cr.top() + 2.0));
+        if let Some(l) = rects.last() {
+            ys.push(l.bottom() + 6.0);
+        }
+        for y in ys {
+            let lit = spot.as_ref().is_some_and(|s| s.0 == *side && (s.3 - y).abs() < 0.5);
+            p.hline(cr.x_range(), y, egui::Stroke::new(if lit { 5.0_f32 } else { 1.0 }, if lit { pal.accent } else { with_alpha(pal.accent2, 120) }));
+        }
+    }
+    let g = p.layout_no_wrap(format!("{}{}", if bin { "TAKE OUT " } else { "" }, part_name(&d.key)), px(7.0), pal.ink);
+    let gr = Rect::from_min_size(pos + Vec2::new(14.0, 8.0), g.size() + Vec2::new(26.0, 10.0));
+    fill(&p, gr.translate(Vec2::splat(3.0)), pal.shadow);
+    fill(&p, gr, if bin { pal.accent2 } else { pal.accent });
+    grip(&p, Pos2::new(gr.left() + 9.0, gr.center().y), pal.ink);
+    p.galley(gr.min + Vec2::new(18.0, 5.0), g, pal.ink);
+    if !ctx.input(|i| i.pointer.any_released()) {
+        return;
+    }
+    egui::DragAndDrop::clear_payload(&ctx);
+    if spot.is_none() && !bin {
+        return; // dropped nowhere: stays where it was
+    }
+    let mut np = preset.clone();
+    if let Some((s, j)) = d.from {
+        let col = if s == 0 { &mut np.left } else { &mut np.right };
+        if j < col.len() {
+            col.remove(j);
+        }
+    }
+    if let Some((side, mut i, ..)) = spot {
+        if matches!(d.from, Some((s, j)) if s == side && j < i) {
+            i -= 1;
+        }
+        let col = if side == 0 { &mut np.left } else { &mut np.right };
+        col.insert(i.min(col.len()), d.key.clone());
+    }
+    if np != *preset {
+        let i = app.theater.preset;
+        app.edit_settings(|s| s.theater[i] = np);
+    }
+}
+
+/// A grip (2 x 3 dots) centred on `c`: "drag me".
+fn grip(p: &egui::Painter, c: Pos2, col: Color32) {
+    for (dx, dy) in [(-2.5, -4.0), (2.5, -4.0), (-2.5, 0.0), (2.5, 0.0), (-2.5, 4.0), (2.5, 4.0)] {
+        fill(p, Rect::from_center_size(c + Vec2::new(dx, dy), Vec2::splat(2.0)), col);
+    }
+}
+
+/// A dashed outline (drop places).
+fn dashed(p: &egui::Painter, r: Rect, c: Color32) {
+    let s = egui::Stroke::new(2.0_f32, c);
+    let pts = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+    p.extend(egui::Shape::dashed_line(&pts, s, 8.0, 6.0));
 }
 
 /// Behind everything: the theme's background, a glow of the cover's colours, or the cover itself.
@@ -352,9 +502,9 @@ fn fixed_height(k: &str) -> Option<f32> {
 
 /// One column: fixed parts get their height, the cover the biggest square that fits, lyrics and
 /// the visualizer share the rest. A column with nothing to stretch sits in the middle.
-fn column(app: &mut App, ui: &mut Ui, r: Rect, parts: &[String], preset: &TheaterPreset) {
+fn column(app: &mut App, ui: &mut Ui, r: Rect, parts: &[String], preset: &TheaterPreset) -> Vec<Rect> {
     if parts.is_empty() {
-        return;
+        return Vec::new();
     }
     const GAP: f32 = 12.0;
     let fixed: f32 = parts.iter().filter_map(|k| fixed_height(k)).sum::<f32>() + GAP * (parts.len() as f32 - 1.0);
@@ -371,6 +521,7 @@ fn column(app: &mut App, ui: &mut Ui, r: Rect, parts: &[String], preset: &Theate
     let wsum: f32 = flex.iter().map(|k| weight(k)).sum();
     let used = fixed + cover + if flex.is_empty() { 0.0 } else { left };
     let mut y = r.top() + if flex.is_empty() { ((r.height() - used) / 2.0).max(0.0) } else { 0.0 };
+    let mut out = Vec::with_capacity(parts.len());
     for k in parts {
         let h = match k.as_str() {
             "cover" => cover,
@@ -378,8 +529,10 @@ fn column(app: &mut App, ui: &mut Ui, r: Rect, parts: &[String], preset: &Theate
         };
         let pr = Rect::from_min_size(Pos2::new(r.left(), y), Vec2::new(r.width(), h));
         part(app, ui, pr, k, preset);
+        out.push(pr);
         y += h + GAP;
     }
+    out
 }
 
 fn part(app: &mut App, ui: &mut Ui, r: Rect, k: &str, preset: &TheaterPreset) {
@@ -431,7 +584,7 @@ fn part(app: &mut App, ui: &mut Ui, r: Rect, k: &str, preset: &TheaterPreset) {
                 let total = 46.0 * 4.0 + 62.0 + 46.0 + 8.0 * 5.0 + 20.0;
                 ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
                 let opts = app.player.st.lock().opts.clone();
-                if tbtn(ui, &pal, "SHUF", Vec2::new(46.0, 30.0), opts.shuffle, false).clicked() {
+                if super::deck::shuffle_btn(ui, &pal, Vec2::new(46.0, 30.0), opts.shuffle).clicked() {
                     app.player.toggle_shuffle();
                 }
                 if tbtn(ui, &pal, "⏮", Vec2::new(46.0, 40.0), false, false).clicked() {
@@ -459,7 +612,8 @@ fn part(app: &mut App, ui: &mut Ui, r: Rect, k: &str, preset: &TheaterPreset) {
             frame_rect(ui.painter(), r, 2.0, pal.line);
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r.shrink(4.0)), |ui| {
                 ui.set_clip_rect(r.shrink(2.0));
-                super::lyrics::show_sized(app, ui, preset.lyrics_size, preset.singalong);
+                let sing = preset.singalong || app.theater.score.is_some();
+                super::lyrics::show_sized(app, ui, preset.lyrics_size, sing);
             });
         }
         "visualizer" => {
@@ -531,9 +685,10 @@ fn up_next(app: &mut App, ui: &mut Ui, r: Rect) {
     }
 }
 
-/// LAYOUT: pick a version, rename it, make it the default, add / remove / move its parts, the
-/// background, the lyrics size and hiding the buttons. Changes show right away.
-fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
+/// LAYOUT's panel (left): pick a version, rename it, make it the default, the parts not on screen
+/// (drag one onto the screen), the bin (drag a part onto it to take it out), the background, the
+/// lyrics size and hiding the buttons. Changes show right away. Returns where the bin is.
+fn editor(app: &mut App, ui: &mut Ui, r: Rect) -> Rect {
     let pal = app.pal;
     fill(ui.painter(), r.translate(Vec2::splat(4.0)), pal.shadow);
     fill(ui.painter(), r, pal.panel);
@@ -543,12 +698,16 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
     let before = p.clone();
     let mut make_default = false;
     let mut reset = false;
+    let mut bin = Rect::NOTHING;
+    let dragging = egui::DragAndDrop::payload::<PartDrag>(ui.ctx());
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r.shrink(10.0)), |ui| {
         egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             ui.label(egui::RichText::new("THEATER LAYOUT").font(px(9.0)).color(pal.text));
-            ui.label(egui::RichText::new("Your three versions (1, 2, 3 switch while THEATER is open):").font(vt(17.0)).color(pal.dim));
-            ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Drag the parts on the screen to move them. Drag a part onto the bin to take it out, or one from below onto the screen to add it.").font(vt(17.0)).color(pal.dim));
+            ui.add_space(4.0);
+            ui.label(egui::RichText::new("VERSION (1, 2, 3 SWITCH)").font(px(6.0)).color(pal.text));
+            ui.horizontal_wrapped(|ui| {
                 let names: Vec<String> = app.settings.lock().theater.iter().map(|x| x.name.clone()).collect();
                 for (n, name) in names.iter().enumerate() {
                     let label = format!("{}{}", name, if n == def { " ★" } else { "" });
@@ -557,7 +716,6 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
                     }
                 }
             });
-            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("NAME").font(px(6.0)).color(pal.dim));
                 let mut name = p.name.clone();
@@ -566,56 +724,49 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
                 }
             });
             if i == def {
-                ui.label(egui::RichText::new("★ YOUR DEFAULT: clicking THEATER (or F11) opens this one").font(vt(17.0)).color(pal.accent2));
-            } else if button(ui, &pal, "★ MAKE THIS THE DEFAULT", false, true).on_hover_text("Clicking THEATER (or F11) opens this one").clicked() {
+                ui.label(egui::RichText::new("★ YOUR MAIN THEATER: clicking THEATER (or F11) opens this one").font(vt(17.0)).color(pal.accent2));
+            } else if button(ui, &pal, "★ MAKE THIS MY MAIN THEATER", false, true).on_hover_text("Clicking THEATER (or F11) opens this one").clicked() {
                 make_default = true;
             }
-            ui.add_space(6.0);
-            for side in [0usize, 1] {
-                ui.label(egui::RichText::new(if side == 0 { "LEFT COLUMN (TOP TO BOTTOM)" } else { "RIGHT COLUMN (EMPTY = ONE WIDE COLUMN)" }).font(px(6.0)).color(pal.text));
-                let list = if side == 0 { p.left.clone() } else { p.right.clone() };
-                if list.is_empty() {
-                    ui.label(egui::RichText::new("  (nothing)").font(vt(17.0)).color(pal.faint));
-                }
-                for (j, k) in list.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        let small = |ui: &mut Ui, s: &str, on: bool, tip: &str| ui.add_enabled(on, egui::Button::new(egui::RichText::new(s).font(vt(18.0))).min_size(Vec2::new(26.0, 22.0))).on_hover_text(tip).clicked();
-                        let col = if side == 0 { &mut p.left } else { &mut p.right };
-                        if small(ui, "▲", j > 0, "Move up") {
-                            col.swap(j, j - 1);
-                        }
-                        if small(ui, "▼", j + 1 < list.len(), "Move down") {
-                            col.swap(j, j + 1);
-                        }
-                        let (arrow, tip) = if side == 0 { ("▶", "Move to the right column") } else { ("◀", "Move to the left column") };
-                        if small(ui, arrow, true, tip) {
-                            let k = col.remove(j);
-                            if side == 0 { p.right.push(k) } else { p.left.push(k) }
-                            return;
-                        }
-                        if small(ui, "×", true, "Take it out") {
-                            col.remove(j);
-                            return;
-                        }
-                        ui.label(egui::RichText::new(part_name(k)).font(vt(19.0)).color(pal.text)).on_hover_text(PARTS.iter().find(|x| x.0 == k).map(|x| x.2).unwrap_or(""));
-                    });
-                }
-                ui.add_space(4.0);
-            }
+            ui.add_space(8.0);
             let missing: Vec<&(&str, &str, &str)> = PARTS.iter().filter(|x| !p.left.iter().chain(p.right.iter()).any(|k| k == x.0)).collect();
-            if !missing.is_empty() {
-                ui.label(egui::RichText::new("ADD").font(px(6.0)).color(pal.text));
-                ui.horizontal_wrapped(|ui| {
-                    for (k, name, tip) in missing {
-                        if button(ui, &pal, &format!("+ {name}"), false, true).on_hover_text(*tip).clicked() {
-                            // into the shorter column
-                            if !p.right.is_empty() && p.right.len() < p.left.len() { p.right.push(k.to_string()) } else { p.left.push(k.to_string()) }
-                        }
-                    }
-                });
+            ui.label(egui::RichText::new("ADD: DRAG ONTO THE SCREEN").font(px(6.0)).color(pal.text));
+            if missing.is_empty() {
+                ui.label(egui::RichText::new("Everything is on the screen").font(vt(17.0)).color(pal.faint));
+            }
+            for (k, name, tip) in missing {
+                let w = ui.available_width();
+                let (cr, resp) = ui.allocate_exact_size(Vec2::new(w, 28.0), Sense::click_and_drag());
+                let moving = dragging.as_ref().is_some_and(|d| d.from.is_none() && d.key == *k);
+                let hot = resp.hovered() && dragging.is_none();
+                fill(ui.painter(), cr, if hot { pal.panel_hi } else { pal.bg2 });
+                frame_rect(ui.painter(), cr, 2.0, if hot { pal.accent } else { pal.line_hi });
+                let c = if moving { pal.faint } else { pal.text };
+                grip(ui.painter(), Pos2::new(cr.left() + 14.0, cr.center().y), c);
+                ui.painter().text(cr.left_center() + Vec2::new(26.0, 0.0), Align2::LEFT_CENTER, *name, vt(19.0), c);
+                if hot {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                }
+                if resp.drag_started() {
+                    egui::DragAndDrop::set_payload(ui.ctx(), PartDrag { key: k.to_string(), from: None });
+                }
+                if resp.on_hover_text(format!("{tip}. Drag it onto the screen (or click to add it at the bottom)")).clicked() {
+                    // into the shorter column
+                    if !p.right.is_empty() && p.right.len() < p.left.len() { p.right.push(k.to_string()) } else { p.left.push(k.to_string()) }
+                }
             }
             ui.add_space(6.0);
+            // the bin
+            let (br, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 64.0), Sense::hover());
+            let over = dragging.as_ref().is_some_and(|d| d.from.is_some()) && ui.ctx().pointer_hover_pos().is_some_and(|q| br.contains(q));
+            fill(ui.painter(), br, if over { pal.accent2 } else { pal.bg2 });
+            dashed(ui.painter(), br, if over { pal.ink } else if dragging.is_some() { pal.accent2 } else { pal.line_hi });
+            let c = if over { pal.ink } else { pal.dim };
+            bin_icon(ui.painter(), Pos2::new(br.left() + 30.0, br.center().y), c);
+            ui.painter().text(Pos2::new(br.left() + 54.0, br.center().y - 7.0), Align2::LEFT_CENTER, "DRAG HERE", px(6.0), c);
+            ui.painter().text(Pos2::new(br.left() + 54.0, br.center().y + 7.0), Align2::LEFT_CENTER, "TO TAKE OUT", px(6.0), c);
+            bin = br;
+            ui.add_space(8.0);
             ui.label(egui::RichText::new("BACKGROUND").font(px(6.0)).color(pal.text));
             ui.horizontal(|ui| {
                 for (b, label, tip) in [("plain", "PLAIN", "The theme's background"), ("glow", "GLOW", "A glow of the theme's colours (the cover's, with the Album Cover theme)"), ("cover", "COVER", "The album cover behind everything, dimmed")] {
@@ -631,18 +782,18 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
             ui.checkbox(&mut p.singalong, egui::RichText::new("Sing-along: words light up as they're sung, with a 3-2-1 countdown before the singing starts").font(vt(18.0)));
             ui.checkbox(&mut p.auto_hide, egui::RichText::new("Hide the buttons and the mouse when it rests (3 s)").font(vt(18.0)));
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if button(ui, &pal, "DONE", true, true).clicked() {
                     app.theater.edit = false;
                 }
                 if button(ui, &pal, "RESET THIS ONE", false, true).on_hover_text("Back to how this version first was").clicked() {
                     reset = true;
                 }
+                if button(ui, &pal, "COPY SHARE CODE", false, true).on_hover_text("Copy a code for this version to send to a friend: they paste it into DK.FM (Ctrl+V, or Settings > Share codes)").clicked() {
+                    let sh = super::sharing::theater_share(app, i);
+                    super::sharing::copy(app, ui.ctx(), &sh, &format!("THEATER \"{}\"", p.name));
+                }
             });
-            if button(ui, &pal, "COPY SHARE CODE", false, true).on_hover_text("Copy a code for this version to send to a friend: they paste it into DK.FM (Ctrl+V, or Settings > Share codes)").clicked() {
-                let sh = super::sharing::theater_share(app, i);
-                super::sharing::copy(app, ui.ctx(), &sh, &format!("THEATER \"{}\"", p.name));
-            }
         });
     });
     if reset {
@@ -655,5 +806,18 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
                 s.theater_default = i;
             }
         });
+    }
+    bin
+}
+
+/// A rubbish bin drawn with shapes (centred on `c`).
+fn bin_icon(p: &egui::Painter, c: Pos2, col: Color32) {
+    let s = egui::Stroke::new(2.0_f32, col);
+    let body = Rect::from_center_size(c + Vec2::new(0.0, 3.0), Vec2::new(18.0, 20.0));
+    p.rect_stroke(body, 0.0, s, egui::StrokeKind::Middle);
+    p.hline(body.left() - 3.0..=body.right() + 3.0, body.top() - 3.0, s);
+    p.rect_stroke(Rect::from_center_size(Pos2::new(c.x, body.top() - 5.5), Vec2::new(8.0, 4.0)), 0.0, s, egui::StrokeKind::Middle);
+    for dx in [-4.0, 0.0, 4.0] {
+        p.vline(c.x + dx, body.top() + 4.0..=body.bottom() - 4.0, egui::Stroke::new(1.5_f32, col));
     }
 }

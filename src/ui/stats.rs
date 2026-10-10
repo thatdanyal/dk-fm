@@ -13,7 +13,9 @@ pub struct StatsState {
     /// what's on screen, worked out once per (period, history length, library change). Building
     /// it every frame re-shuffled songs with equal counts (HashMap order), so the lists jumped
     /// around whenever the mouse moved.
-    cache: Option<((usize, usize, u64), Arc<Computed>)>,
+    cache: Option<((usize, usize, u64, u64), Arc<Computed>)>,
+    /// karaoke.json's last change, looked at every few seconds (not every frame)
+    karaoke_seen: Option<(std::time::Instant, u64)>,
 }
 
 #[derive(Default)]
@@ -28,6 +30,8 @@ struct Computed {
     skipped: Vec<(String, u32)>,
     hours: [i64; 24],
     streak: usize,
+    /// sing-along scores: your best per song (id, score), highest first
+    karaoke: Vec<(String, u32)>,
     tracks: HashMap<String, crate::store::Track>,
 }
 
@@ -94,14 +98,24 @@ fn compute(app: &App, period: usize) -> Computed {
         c.streak += 1;
         day -= 1;
     }
-    c.tracks = top.iter().map(|t| &t.0).chain(sk.iter().map(|t| &t.0)).filter_map(|id| d.tracks.get(id).map(|x| (id.clone(), x.clone()))).collect();
+    // karaoke bests are all-time (a score isn't tied to a week)
+    c.karaoke = crate::karaoke::bests().into_iter().filter(|k| d.tracks.contains_key(&k.0)).take(10).collect();
+    c.tracks = top.iter().map(|t| &t.0).chain(sk.iter().map(|t| &t.0)).chain(c.karaoke.iter().map(|k| &k.0)).filter_map(|id| d.tracks.get(id).map(|x| (id.clone(), x.clone()))).collect();
     (c.top, c.artists, c.skipped) = (top, tart, sk);
     c
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    let key = (app.stats.period, app.lib.history.read().events.len(), app.lib.gen.load(std::sync::atomic::Ordering::Relaxed));
+    let kar = match app.stats.karaoke_seen {
+        Some((at, v)) if at.elapsed().as_secs() < 5 => v,
+        _ => {
+            let v = std::fs::metadata(crate::store::data_dir().join("karaoke.json")).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
+            app.stats.karaoke_seen = Some((std::time::Instant::now(), v));
+            v
+        }
+    };
+    let key = (app.stats.period, app.lib.history.read().events.len(), app.lib.gen.load(std::sync::atomic::Ordering::Relaxed), kar);
     if app.stats.cache.as_ref().map(|c| c.0 != key).unwrap_or(true) {
         let c = compute(app, app.stats.period);
         app.stats.cache = Some((key, Arc::new(c)));
@@ -147,6 +161,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 (tart.len().to_string(), "TOP ARTISTS"),
                 (format!("{streak} DAY{}", if streak == 1 { "" } else { "S" }), "LISTENING STREAK"),
                 (fmt_h(peak), "YOUR PEAK HOUR"),
+                (c.karaoke.first().map(|k| k.1.to_string()).unwrap_or_else(|| "--".into()), "KARAOKE HIGH SCORE"),
             ];
             let w = ui.available_width();
             let n = ((w + 10.0) / 160.0).floor().max(1.0) as usize;
@@ -224,6 +239,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     if h % 6 == 0 {
                         ui.painter().text(Pos2::new(x, r.bottom()), Align2::LEFT_BOTTOM, fmt_h(h), vt(14.0), pal.dim);
                     }
+                }
+            });
+            section(ui, "KARAOKE HIGH SCORES (ALL TIME)", &mut |ui| {
+                if c.karaoke.is_empty() {
+                    ui.label(egui::RichText::new("No scores yet: open THEATER on a song with synced lyrics and press ♪ SCORE ME.").color(pal.dim));
+                }
+                for (i, (id, score)) in c.karaoke.iter().enumerate() {
+                    let Some(t) = tracks.get(id) else { continue };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(if i == 0 { "★".to_string() } else { format!("{:>2}", i + 1) }).color(pal.accent));
+                        ui.label(egui::RichText::new(&t.title).color(pal.text));
+                        ui.label(egui::RichText::new(&t.artist).color(pal.dim));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(format!("{score} · {}", crate::karaoke::grade(*score))).color(if i == 0 { pal.accent2 } else { pal.dim }));
+                        });
+                    });
                 }
             });
             section(ui, "MOST SKIPPED (SMART SHUFFLE PLAYS THESE LATER)", &mut |ui| {

@@ -66,6 +66,12 @@ pub struct SetUi {
     /// theme editor: working copy (previewed live) and its name
     draft: Option<Pal>,
     draft_name: String,
+    /// the colour being changed: a main colour ("main", "accent"…) or "f:<palette field>"
+    slot: String,
+    /// the colour picker's paste box
+    hex: String,
+    /// every palette colour listed, not just the main ones
+    every: bool,
     /// inline rename: (what: "theme" | "layout", old name, new text)
     rename: Option<(&'static str, String, String)>,
     layout_name: String,
@@ -488,7 +494,9 @@ fn look(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let s = app.settings.lock().clone();
     caption(ui, &pal, "THEME");
+    dim(ui, &pal, "Right-click one of your own themes to delete it. Drag themes into your order in the THEME menu.");
     let mut chosen = None;
+    let mut delete = None;
     ui.horizontal_wrapped(|ui| {
         for (k, name) in theme::all_themes(&s) {
             let tp = theme::theme_pal(&s, &k);
@@ -508,11 +516,25 @@ fn look(app: &mut App, ui: &mut Ui) {
             fill(ui.painter(), Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 26.0), r.max), pal.panel);
             ui.painter().with_clip_rect(r).text(egui::pos2(r.left() + 8.0, r.bottom() - 13.0), Align2::LEFT_CENTER, &name, vt(17.0), pal.text);
             frame_rect(ui.painter(), r, 2.0, if s.theme == k { pal.accent } else if resp.hovered() { pal.text } else { pal.line_hi });
+            if s.theme == k {
+                ui.painter().text(egui::pos2(r.right() - 12.0, r.bottom() - 13.0), Align2::CENTER_CENTER, "✔", vt(18.0), pal.accent);
+            }
+            if k.starts_with(theme::CUSTOM) {
+                resp.context_menu(|ui| {
+                    if ui.button(format!("Delete \"{name}\"")).clicked() {
+                        delete = Some(k.clone());
+                        ui.close_menu();
+                    }
+                });
+            }
             if resp.clicked() {
                 chosen = Some(k);
             }
         }
     });
+    if let Some(k) = delete {
+        app.delete_theme(ui.ctx(), &k);
+    }
     if let Some(k) = chosen {
         app.setui.draft = None;
         app.edit_settings(|s| s.theme = k);
@@ -681,16 +703,59 @@ fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
     }
     if let Some(mut d) = app.setui.draft {
         let mut changed = false;
-        egui::Grid::new("theme-grid").num_columns(4).spacing([10.0, 4.0]).show(ui, |ui| {
-            for (i, (f, label)) in theme::FIELDS.iter().enumerate() {
-                let c = d.field(f).unwrap();
-                changed |= ui.color_edit_button_srgba(c).changed();
-                ui.label(egui::RichText::new(*label).color(pal.text));
-                if i % 2 == 1 {
-                    ui.end_row();
+        if app.setui.slot.is_empty() {
+            app.setui.slot = "main".into();
+        }
+        dim(ui, &pal, "Pick a colour to change, then choose it on the wheel (brightness on the bar beside it), type red, green and blue (0-255), or paste one. DK.FM changes as you go.");
+        ui.add_space(4.0);
+        // the colours to change: the main ones (each sets its shades too), or every one
+        let slots: Vec<(String, String, String)> = if app.setui.every {
+            theme::FIELDS.iter().map(|(f, l)| (format!("f:{f}"), l.to_uppercase(), String::new())).collect()
+        } else {
+            theme::ROLES.iter().map(|(k, n, t)| (k.to_string(), n.to_string(), t.to_string())).collect()
+        };
+        let colour_of = |d: &mut Pal, slot: &str| match slot.strip_prefix("f:") {
+            Some(f) => d.field(f).map(|c| *c).unwrap_or(d.accent),
+            None => d.role(slot),
+        };
+        ui.horizontal_wrapped(|ui| {
+            for (k, name, tip) in &slots {
+                let on = app.setui.slot == *k;
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(if app.setui.every { 150.0 } else { 120.0 }, 30.0), Sense::click());
+                fill(ui.painter(), r, if on { pal.panel_hi } else { pal.bg2 });
+                frame_rect(ui.painter(), r, 2.0, if on { pal.accent } else if resp.hovered() { pal.text } else { pal.line_hi });
+                let sw = Rect::from_min_size(r.min + Vec2::new(5.0, 5.0), Vec2::splat(20.0));
+                fill(ui.painter(), sw, colour_of(&mut d, k));
+                frame_rect(ui.painter(), sw, 1.0, pal.line_hi);
+                ui.painter().with_clip_rect(r).text(egui::pos2(sw.right() + 6.0, r.center().y), Align2::LEFT_CENTER, name, vt(17.0), pal.text);
+                let resp = if tip.is_empty() { resp } else { resp.on_hover_text(tip.as_str()) };
+                if resp.clicked() {
+                    app.setui.slot = k.clone();
                 }
             }
         });
+        if !slots.iter().any(|x| x.0 == app.setui.slot) {
+            app.setui.slot = slots[0].0.clone();
+        }
+        let mut every = app.setui.every;
+        if switch(ui, &pal, &mut every, "EVERY COLOUR (ADVANCED)") {
+            app.setui.every = every;
+        }
+        ui.add_space(4.0);
+        let slot = app.setui.slot.clone();
+        let mut col = colour_of(&mut d, &slot);
+        if super::colorpick::picker(ui, &pal, &slot, &mut col, &mut app.setui.hex) {
+            match slot.strip_prefix("f:") {
+                Some(f) => {
+                    if let Some(c) = d.field(f) {
+                        *c = col;
+                    }
+                }
+                None => d.set_role(&slot, col),
+            }
+            changed = true;
+        }
+        ui.add_space(6.0);
         let mut dark = d.dark;
         if switch(ui, &pal, &mut dark, "DARK THEME (WIDGET SHADING)") {
             d.dark = dark;
@@ -779,21 +844,15 @@ fn theme_editor(app: &mut App, ui: &mut Ui, s: &crate::store::Settings) {
                         if s.theme == key(&old) {
                             s.theme = key(&new);
                         }
+                        for k in s.theme_order.iter_mut().filter(|k| **k == key(&old)) {
+                            *k = key(&new);
+                        }
                     }
                 });
                 app.setui.rename = None;
                 app.set_theme(ui.ctx());
             }
-            Some(("delete", n, _)) => {
-                app.edit_settings(|s| {
-                    s.custom_themes.retain(|c| c.name != n);
-                    if s.theme == key(&n) {
-                        s.theme = "red-retro".into();
-                    }
-                });
-                app.set_theme(ui.ctx());
-                app.toast(format!("Deleted theme \"{n}\""));
-            }
+            Some(("delete", n, _)) => app.delete_theme(ui.ctx(), &key(&n)),
             _ => {}
         }
     }

@@ -4,6 +4,7 @@
 pub mod addsongs;
 pub mod browser;
 pub mod cjk;
+pub mod colorpick;
 pub mod covertheme;
 pub mod deck;
 pub mod dest;
@@ -89,6 +90,18 @@ pub enum Modal {
     Setup { quality: String, eq: String, close: String, ask: bool, lang: String },
 }
 
+/// What was done in the THEME menu.
+enum ThemeAct {
+    Use(String),
+    Save,
+    Delete(String),
+    /// every theme key, in the new order
+    Order(Vec<String>),
+}
+
+/// A theme being dragged in the THEME menu (its key).
+struct ThemeDrag(String);
+
 #[derive(Clone)]
 pub enum PromptAction {
     NewPlaylist(Vec<String>),
@@ -119,6 +132,8 @@ pub struct App {
     pub layout_edit: bool,
     pub mini: bool,
     normal_size: Option<Vec2>,
+    /// in the background (minimized or not focused): see system::went_away
+    away: bool,
     pub covers: widgets::Covers,
     pub browser: browser::BrowserState,
     pub import: import::ImportState,
@@ -536,6 +551,7 @@ impl App {
             layout_edit: false,
             mini: false,
             normal_size: None,
+            away: false,
             covers,
             browser,
             import: import::ImportState::default(),
@@ -973,6 +989,123 @@ impl App {
         self.player.current_id().and_then(|id| self.lib.track(&id))
     }
 
+    /// Deletes one of your own themes (the built-in ones stay); in use, Red Retro takes over.
+    pub fn delete_theme(&mut self, ctx: &egui::Context, key: &str) {
+        let Some(name) = key.strip_prefix(theme::CUSTOM).map(str::to_string) else { return };
+        self.edit_settings(|s| {
+            s.custom_themes.retain(|c| c.name != name);
+            s.theme_order.retain(|k| k != key);
+            if s.theme == key {
+                s.theme = "red-retro".into();
+            }
+        });
+        self.set_theme(ctx);
+        self.toast(format!("Deleted theme \"{name}\""));
+    }
+
+    /// THEME's list: ✔ the one in use, each theme's three main colours, click to use it, drag to
+    /// move it, right-click one of yours to delete it.
+    fn theme_menu(&mut self, ui: &mut egui::Ui) -> Option<ThemeAct> {
+        let pal = self.pal;
+        let s = self.settings.lock().clone();
+        let themes = theme::all_themes(&s);
+        let ctx = ui.ctx().clone();
+        let ask_id = Id::new("theme-delete-ask");
+        let asking: Option<String> = ctx.data(|d| d.get_temp(ask_id));
+        let dragging = egui::DragAndDrop::payload::<ThemeDrag>(&ctx).map(|d| d.0.clone());
+        let mut out = None;
+        let mut drop_at: Option<(String, usize)> = None;
+        ui.set_min_width(240.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        for (i, (k, name)) in themes.iter().enumerate() {
+            if asking.as_deref() == Some(k.as_str()) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(egui::RichText::new(format!(" DELETE {}?", name.to_uppercase())).color(pal.accent));
+                    if ui.button("DELETE").clicked() {
+                        out = Some(ThemeAct::Delete(k.clone()));
+                        ctx.data_mut(|d| d.remove::<String>(ask_id));
+                    }
+                    if ui.button("KEEP").clicked() {
+                        ctx.data_mut(|d| d.remove::<String>(ask_id));
+                    }
+                });
+                continue;
+            }
+            let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::click_and_drag());
+            let mine = k.starts_with(theme::CUSTOM);
+            let moving = dragging.as_deref() == Some(k.as_str());
+            let hot = resp.hovered() && dragging.is_none();
+            let p = ui.painter();
+            if hot {
+                fill(p, r, pal.panel_hi);
+            }
+            if self.theme_key == *k {
+                p.text(egui::pos2(r.left() + 11.0, r.center().y), Align2::CENTER_CENTER, "✔", vt(18.0), pal.accent);
+            }
+            let sw = Rect::from_min_size(egui::pos2(r.left() + 24.0, r.center().y - 7.0), Vec2::new(30.0, 14.0));
+            theme::swatch(p, sw, &s, k);
+            let c = if hot { pal.accent } else { pal.text };
+            p.with_clip_rect(r).text(egui::pos2(sw.right() + 8.0, r.center().y), Align2::LEFT_CENTER, name, vt(19.0), widgets::with_alpha(c, if moving { 80 } else { 255 }));
+            if hot {
+                // grip: drag to move
+                for n in 0..3 {
+                    fill(p, Rect::from_min_size(egui::pos2(r.right() - 16.0, r.center().y - 5.0 + n as f32 * 4.0), Vec2::new(8.0, 2.0)), pal.faint);
+                }
+            }
+            let resp = resp.on_hover_text(if mine { "Click to use · drag to move · right-click to delete" } else { "Click to use · drag to move (built-in: can't be deleted)" });
+            if resp.clicked() {
+                out = Some(ThemeAct::Use(k.clone()));
+            }
+            if resp.secondary_clicked() {
+                if mine {
+                    ctx.data_mut(|d| d.insert_temp(ask_id, k.clone()));
+                } else {
+                    self.toast("Built-in themes can't be deleted: only the ones you saved");
+                }
+            }
+            if resp.drag_started() {
+                resp.dnd_set_drag_payload(ThemeDrag(k.clone()));
+            }
+            if let (Some(from), Some(pos)) = (&dragging, ctx.pointer_hover_pos()) {
+                if r.contains(pos) {
+                    let below = pos.y > r.center().y;
+                    ui.painter().hline(r.x_range(), if below { r.bottom() - 1.0 } else { r.top() + 1.0 }, egui::Stroke::new(3.0_f32, pal.accent));
+                    if resp.dnd_release_payload::<ThemeDrag>().is_some() {
+                        drop_at = Some((from.clone(), if below { i + 1 } else { i }));
+                    }
+                }
+            }
+        }
+        ui.add_space(4.0);
+        ui.separator();
+        if ui.button("   + SAVE THESE COLOURS…").on_hover_text("Keep the colours on screen now as a theme of yours (great with Album Cover: keep a song's look)").clicked() {
+            out = Some(ThemeAct::Save);
+        }
+        for hint in ["  Drag a theme to move it", "  Right-click yours to delete it"] {
+            ui.add(egui::Label::new(egui::RichText::new(hint).font(vt(16.0)).color(pal.faint)).wrap_mode(egui::TextWrapMode::Extend));
+        }
+        if let Some((from, slot)) = drop_at {
+            let mut keys: Vec<String> = themes.iter().map(|t| t.0.clone()).collect();
+            if let Some(fi) = keys.iter().position(|k| *k == from) {
+                let k = keys.remove(fi);
+                keys.insert(if fi < slot { slot - 1 } else { slot }.min(keys.len()), k);
+                out = Some(ThemeAct::Order(keys));
+            }
+        }
+        // the theme being dragged follows the pointer
+        if let (Some(k), Some(pos)) = (&dragging, ctx.pointer_hover_pos()) {
+            let name = themes.iter().find(|t| t.0 == *k).map(|t| t.1.clone()).unwrap_or_default();
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            let p = ctx.layer_painter(egui::LayerId::new(Order::Tooltip, Id::new("drag-theme")));
+            let g = p.layout_no_wrap(name, vt(19.0), pal.ink);
+            let gr = Rect::from_min_size(pos + Vec2::new(14.0, 6.0), g.size() + Vec2::new(14.0, 6.0));
+            fill(&p, gr, pal.accent);
+            p.galley(gr.min + Vec2::new(7.0, 3.0), g, pal.ink);
+        }
+        out
+    }
+
     // ------------------------------------------------------------ title bar
     fn titlebar(&mut self, ctx: &egui::Context) {
         let pal = self.pal;
@@ -1005,11 +1138,17 @@ impl App {
                     let room = |ui: &egui::Ui, w: f32| ui.available_width() > 200.0 + w;
                     let no_deck = self.dock.find_tab(&Tab::Deck).is_none();
                     let later = if no_deck { 170.0 } else { 0.0 }; // play / skip come first
-                    let lr = if room(ui, 240.0 + later) { Some(tb_button(ui, &pal, "LAYOUT", self.layout_edit)) } else { None };
+                    // LAYOUT edits what's showing: the panels, or THEATER's parts while it's open
+                    let lr = if room(ui, 240.0 + later) { Some(tb_button(ui, &pal, "LAYOUT", if self.nowplaying { self.theater.edit } else { self.layout_edit })) } else { None };
                     if let Some(lr) = lr {
                         self.mark("layout", lr.rect);
-                        if lr.clicked() {
-                            self.toggle_layout_edit();
+                        let tip = if self.nowplaying { "Change this THEATER: drag its parts around, add or take some out" } else { "Move, resize, add and remove panels" };
+                        if lr.on_hover_text(tip).clicked() {
+                            if self.nowplaying {
+                                self.theater.edit = !self.theater.edit;
+                            } else {
+                                self.toggle_layout_edit();
+                            }
                         }
                     }
                     if room(ui, 300.0 + later) {
@@ -1051,34 +1190,30 @@ impl App {
                     });
                     let r = if room(ui, 160.0 + later) { tb_button(ui, &pal, "THEME", false) } else { ui.allocate_response(Vec2::ZERO, Sense::hover()) };
                     self.mark("theme", r.rect);
-                    let mut chosen = None;
                     let tid = ui.make_persistent_id("theme-menu");
+                    // (dev hook: DKFM_VIEW=theme-menu opens it for a screenshot)
+                    if self.frames == 3 && std::env::var("DKFM_VIEW").is_ok_and(|v| v == "theme-menu") {
+                        ui.memory_mut(|m| m.open_popup(tid));
+                    }
                     if r.clicked() {
                         ui.memory_mut(|m| m.toggle_popup(tid));
                     }
-                    let mut save_theme = false;
-                    egui::popup::popup_below_widget(ui, tid, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-                        ui.set_min_width(180.0);
-                        let s = self.settings.lock().clone();
-                        for (k, name) in theme::all_themes(&s) {
-                            let resp = ui.horizontal(|ui| {
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                                theme::swatch(ui.painter(), r, &s, &k);
-                                ui.button(format!("{} {name}", if self.theme_key == k { "•" } else { " " }))
-                            });
-                            if resp.inner.clicked() {
-                                chosen = Some(k);
-                            }
-                        }
-                        ui.separator();
-                        save_theme = ui.button("   + SAVE THESE COLOURS…").on_hover_text("Keep the colours on screen now as a theme of yours (great with Album Cover: keep a song's look)").clicked();
-                    });
-                    if save_theme {
-                        self.ask_save_theme();
+                    // (closes on a click outside it, not inside: dragging a theme or answering
+                    // "delete?" keeps it open)
+                    let mut act = None;
+                    egui::popup::popup_below_widget(ui, tid, &r, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| act = self.theme_menu(ui));
+                    if matches!(act, Some(ThemeAct::Use(_) | ThemeAct::Save)) {
+                        ui.memory_mut(|m| m.close_popup());
                     }
-                    if let Some(k) = chosen {
-                        self.edit_settings(|s| s.theme = k);
-                        self.set_theme(ctx);
+                    match act {
+                        Some(ThemeAct::Use(k)) => {
+                            self.edit_settings(|s| s.theme = k);
+                            self.set_theme(ctx);
+                        }
+                        Some(ThemeAct::Save) => self.ask_save_theme(),
+                        Some(ThemeAct::Delete(k)) => self.delete_theme(ctx, &k),
+                        Some(ThemeAct::Order(keys)) => self.edit_settings(|s| s.theme_order = keys),
+                        None => {}
                     }
                     if room(ui, 90.0 + later) {
                         let r = tb_button(ui, &pal, "SETTINGS", false);
@@ -1596,6 +1731,11 @@ impl App {
         }
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
+        }
+        let away = ctx.input(|i| !i.focused || i.viewport().minimized.unwrap_or(false));
+        if away != self.away {
+            self.away = away;
+            system::went_away(away);
         }
         preview::poll(self);
         self.marks.clear();

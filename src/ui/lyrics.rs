@@ -128,7 +128,9 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
         }
     }
     let fit = (area.width() / 380.0).min(area.height() / 300.0 + 0.35).clamp(0.75, 1.9);
-    let scale = scale * fit * app.settings.lock().lyrics_zoom;
+    // in steps of a tenth: every text size gets its letters drawn into egui's font texture once,
+    // so a size that slid with the panel's width kept adding to it while you resized
+    let scale = (scale * fit * app.settings.lock().lyrics_zoom * 10.0).round() / 10.0;
     let entry = app.lyrics.cache.lock().get(&t.id).cloned();
     let (lyr, source) = match entry {
         Some(l) => l,

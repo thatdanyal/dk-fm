@@ -242,6 +242,14 @@ pub fn best(id: &str) -> Option<u32> {
     v.get(id).copied()
 }
 
+/// Every song's best score, highest first (for Stats).
+pub fn bests() -> Vec<(String, u32)> {
+    let v: std::collections::HashMap<String, u32> = crate::store::load_json(&crate::store::data_dir().join("karaoke.json"));
+    let mut v: Vec<(String, u32)> = v.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    v
+}
+
 /// Saves `score` for the song if it beats your best; returns the best before it.
 pub fn save_best(id: &str, score: u32) -> Option<u32> {
     let path = crate::store::data_dir().join("karaoke.json");

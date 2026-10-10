@@ -218,7 +218,11 @@ impl<'app> GlowWinitApp<'app> {
         )?;
         let gl = painter.gl().clone();
 
-        let max_texture_side = painter.max_texture_side();
+        // DK.FM patch: egui's font atlas is as wide as the largest texture the GPU allows (16384
+        // on most) and only starts over when 80% full, so text in many sizes kept adding RAM that
+        // was never given back. 2048 wide caps it (it starts over at ~13 MB); DK.FM's own
+        // textures are 512 px at most.
+        let max_texture_side = painter.max_texture_side().min(2048);
         glutin.max_texture_side = Some(max_texture_side);
         for viewport in glutin.viewports.values_mut() {
             if let Some(egui_winit) = viewport.egui_winit.as_mut() {

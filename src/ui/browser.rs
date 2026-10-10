@@ -500,7 +500,11 @@ fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
     fill(ui.painter(), r, pal.bg);
     frame_rect(ui.painter(), r, 2.0, if on { pal.accent } else { pal.line_hi });
     ui.painter().text(Pos2::new(r.left() + 12.0, r.center().y), Align2::CENTER_CENTER, "🔍", vt(14.0), pal.dim);
-    let field = Rect::from_min_max(Pos2::new(r.left() + 22.0, r.top() + 1.0), Pos2::new(r.right() - 4.0, r.bottom() - 1.0));
+    let mic = crate::voice::available();
+    let field = Rect::from_min_max(Pos2::new(r.left() + 22.0, r.top() + 1.0), Pos2::new(r.right() - if mic { 30.0 } else { 4.0 }, r.bottom() - 1.0));
+    if mic {
+        voice_button(app, ui, r, field);
+    }
     let w = &mut app.browser.web;
     let resp = ui.put(field, egui::TextEdit::singleline(&mut w.query).hint_text("Search music").frame(false).font(vt(18.0)).vertical_align(egui::Align::Center));
     if w.focus {
@@ -513,6 +517,85 @@ fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
     } else if resp.gained_focus() && !w.query.trim().is_empty() && !on {
         app.browser.set_view(View::Web);
     }
+}
+
+/// The search bar's microphone: say a song, an artist or a lyric. While it listens the bar says
+/// so; what it heard is searched for (in the category showing); a problem shows under the bar.
+fn voice_button(app: &mut App, ui: &mut Ui, bar: Rect, field: Rect) {
+    use super::websearch::Voice;
+    let pal = app.pal;
+    let state = app.browser.web.voice.lock().clone();
+    let listening = matches!(state, Voice::Listening);
+    let mr = Rect::from_min_max(Pos2::new(bar.right() - 28.0, bar.top() + 2.0), Pos2::new(bar.right() - 2.0, bar.bottom() - 2.0));
+    let resp = ui.interact(mr, ui.id().with("voice-search"), Sense::click());
+    let t = ui.input(|i| i.time);
+    if listening {
+        let a = (150.0 + 100.0 * (t * 5.0).sin()) as u8;
+        fill(ui.painter(), mr, with_alpha(pal.accent, a));
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        // over the text box: what to do
+        fill(ui.painter(), field, pal.bg);
+        ui.painter().with_clip_rect(field).text(Pos2::new(field.left() + 4.0, field.center().y), Align2::LEFT_CENTER, "LISTENING… SAY A SONG, ARTIST OR LYRIC", px(6.0), pal.accent);
+    } else if resp.hovered() {
+        fill(ui.painter(), mr, pal.panel_hi);
+    }
+    mic_icon(ui.painter(), mr.center(), if listening { pal.ink } else if resp.hovered() { pal.accent } else { pal.dim });
+    if resp.on_hover_text(if listening { "Listening… (stops by itself when you stop talking)" } else { "Voice search: say a song, an artist or a line of lyrics" }).clicked() {
+        super::websearch::voice(app, ui.ctx());
+    }
+    match state {
+        Voice::Heard(q) => {
+            *app.browser.web.voice.lock() = Voice::Idle;
+            app.browser.web.query = q;
+            super::websearch::typed(app, true);
+        }
+        Voice::Failed(e) => {
+            // under the bar, until closed (with a way to the Windows setting it needs)
+            let mut close = false;
+            egui::Area::new(egui::Id::new("voice-problem")).order(egui::Order::Foreground).fixed_pos(bar.left_bottom() + Vec2::new(0.0, 4.0)).show(ui.ctx(), |ui| {
+                egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+                    ui.set_max_width(bar.width().max(320.0));
+                    ui.label(egui::RichText::new("VOICE SEARCH").font(px(6.0)).color(pal.accent2));
+                    ui.label(egui::RichText::new(&e).color(pal.text));
+                    ui.horizontal(|ui| {
+                        let page = if e.contains("Speech") { Some("ms-settings:privacy-speech") } else if e.contains("Microphone") { Some("ms-settings:privacy-microphone") } else { None };
+                        if let Some(page) = page {
+                            if button(ui, &pal, "OPEN WINDOWS SETTINGS", true, true).on_hover_text("Opens the Windows Settings page with that switch").clicked() {
+                                let _ = open::that(page);
+                            }
+                        }
+                        if button(ui, &pal, "TRY AGAIN", false, true).clicked() {
+                            close = true;
+                            super::websearch::voice(app, ui.ctx());
+                        }
+                        if button(ui, &pal, "CLOSE", false, true).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            });
+            if close {
+                let mut v = app.browser.web.voice.lock();
+                if matches!(*v, Voice::Failed(_)) {
+                    *v = Voice::Idle;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A microphone drawn with shapes (centred on `c`).
+fn mic_icon(p: &egui::Painter, c: Pos2, col: egui::Color32) {
+    let s = egui::Stroke::new(2.0_f32, col);
+    p.rect_filled(Rect::from_center_size(c - Vec2::new(0.0, 3.0), Vec2::new(6.0, 10.0)), 3, col);
+    let pts: Vec<Pos2> = (0..=8).map(|i| {
+        let a = std::f32::consts::PI * i as f32 / 8.0;
+        c + Vec2::new(-5.5 * a.cos(), -1.0 + 5.0 * a.sin())
+    }).collect();
+    p.add(egui::Shape::line(pts, s));
+    p.vline(c.x, c.y + 4.0..=c.y + 7.0, s);
+    p.hline(c.x - 3.0..=c.x + 3.0, c.y + 7.0, s);
 }
 
 // ------------------------------------------------------------------------------- sidebar

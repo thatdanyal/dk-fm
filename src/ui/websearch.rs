@@ -52,6 +52,8 @@ type Done = (String, Result<HitPage, String>, bool);
 #[derive(Default)]
 pub struct WebState {
     pub listen: Arc<Mutex<Listen>>,
+    /// voice search (the search bar's microphone)
+    pub voice: Arc<Mutex<Voice>>,
     /// what SHAZAM listened to last (AGAIN uses it, the chooser suggests it)
     pub ear: Ear,
     pub query: String,
@@ -104,6 +106,38 @@ pub fn listen_to(app: &mut App, ctx: &egui::Context, ear: Ear) {
         };
         ctx.request_repaint();
     });
+}
+
+/// Voice search, from pressing the microphone to what was heard.
+#[derive(Default, Clone)]
+pub enum Voice {
+    #[default]
+    Idle,
+    Listening,
+    Heard(String),
+    Failed(String),
+}
+
+/// The search bar's microphone was pressed: listen in the background (Windows does the hearing;
+/// DK.FM's thread only waits for its answer).
+pub fn voice(app: &mut App, ctx: &egui::Context) {
+    let slot = app.browser.web.voice.clone();
+    if matches!(*slot.lock(), Voice::Listening) {
+        return;
+    }
+    *slot.lock() = Voice::Listening;
+    let ctx = ctx.clone();
+    std::thread::Builder::new()
+        .name("voice".into())
+        .spawn(move || {
+            let r = crate::voice::listen();
+            *slot.lock() = match r {
+                Ok(t) => Voice::Heard(t),
+                Err(e) => Voice::Failed(e),
+            };
+            ctx.request_repaint();
+        })
+        .ok();
 }
 
 /// The search bar was typed in (`enter` = search now, else after a short pause).

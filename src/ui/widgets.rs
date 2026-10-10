@@ -147,11 +147,16 @@ pub fn copy_field(ui: &mut Ui, pal: &Pal, label: &str, text: &str) {
 
 // ------------------------------------------------------------------------------- cover textures
 
-/// Loads cover art on a background thread at the size it's shown, with a small LRU so memory
-/// stays bounded no matter how big the library is.
+/// Loads cover art on a background thread at the size it's shown. Memory stays bounded no matter
+/// how big the library is: covers not drawn for a while are let go, and past a budget the ones
+/// drawn longest ago go first.
 pub struct Covers {
-    map: HashMap<(String, u32), TextureHandle>,
-    order: VecDeque<(String, u32)>,
+    /// texture, its bytes, when it was last drawn (seconds, egui time)
+    map: HashMap<(String, u32), (TextureHandle, usize, f64)>,
+    bytes: usize,
+    /// when it last let go of idle covers, and the time of the last frame that drew one
+    swept: f64,
+    drawn: f64,
     pending: HashSet<(String, u32)>,
     tx: crossbeam_channel::Sender<((String, u32), Option<egui::ColorImage>)>,
     rx: crossbeam_channel::Receiver<((String, u32), Option<egui::ColorImage>)>,
@@ -188,34 +193,57 @@ impl Covers {
                 }
             })
             .ok();
-        Self { map: HashMap::new(), order: VecDeque::new(), pending: HashSet::new(), tx, rx, jobs, wake, ctx: None }
+        Self { map: HashMap::new(), bytes: 0, swept: 0.0, drawn: 0.0, pending: HashSet::new(), tx, rx, jobs, wake, ctx: None }
     }
 
     /// Forget every texture (they load again when shown).
     pub fn clear(&mut self) {
         self.map.clear();
-        self.order.clear();
+        self.bytes = 0;
+    }
+
+    fn drop_key(&mut self, k: &(String, u32)) {
+        if let Some((_, b, _)) = self.map.remove(k) {
+            self.bytes -= b;
+        }
     }
 
     /// Texture for a cover file at `size` px (None while loading).
     pub fn get(&mut self, ctx: &egui::Context, path: PathBuf, name: &str, size: u32) -> Option<egui::TextureId> {
+        /// covers kept at most (pixels: 16 MB is ~110 covers at 192 px)
+        const BUDGET: usize = 16 << 20;
+        /// a cover not drawn for this long is let go (it loads again from disk in a moment)
+        const IDLE: f64 = 90.0;
+        let now = ctx.input(|i| i.time);
         while let Ok((key, img)) = self.rx.try_recv() {
             self.pending.remove(&key);
             if let Some(img) = img {
+                let b = img.pixels.len() * 4;
                 let tex = ctx.load_texture(format!("{}@{}", key.0, key.1), img, egui::TextureOptions::LINEAR);
-                self.map.insert(key.clone(), tex);
-                self.order.push_back(key);
-                let cap = 260;
-                while self.order.len() > cap {
-                    if let Some(old) = self.order.pop_front() {
-                        self.map.remove(&old);
-                    }
+                self.drop_key(&key);
+                self.map.insert(key, (tex, b, now));
+                self.bytes += b;
+                while self.bytes > BUDGET && self.map.len() > 1 {
+                    let Some(old) = self.map.iter().min_by(|a, b| a.1 .2.total_cmp(&b.1 .2)).map(|e| e.0.clone()) else { break };
+                    self.drop_key(&old);
                 }
             }
         }
+        // (measured from the last frame drawn, not now: after a long pause with nothing redrawn, the
+        // covers on screen were drawn in that frame and stay)
+        if now - self.swept > 5.0 {
+            let cut = self.drawn - IDLE;
+            self.swept = now;
+            let stale: Vec<(String, u32)> = self.map.iter().filter(|e| e.1 .2 < cut).map(|e| e.0.clone()).collect();
+            for k in &stale {
+                self.drop_key(k);
+            }
+        }
+        self.drawn = now;
         let key = (name.to_string(), size);
-        if let Some(t) = self.map.get(&key) {
-            return Some(t.id());
+        if let Some(t) = self.map.get_mut(&key) {
+            t.2 = now;
+            return Some(t.0.id());
         }
         if self.pending.insert(key.clone()) {
             let _ = &self.tx;

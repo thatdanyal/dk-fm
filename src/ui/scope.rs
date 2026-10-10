@@ -71,7 +71,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if resp.clicked() {
         app.scope.cycle(&app.player);
     }
-    let (w, h) = ((r.width() / 2.0).max(1.0) as usize, (r.height() / 2.0).max(1.0) as usize);
+    // (half resolution; never past the 2048 px textures are capped at)
+    let (w, h) = ((r.width() / 2.0).clamp(1.0, 2048.0) as usize, (r.height() / 2.0).clamp(1.0, 2048.0) as usize);
     let s = &mut app.scope;
     let col = Cols::new(&pal, s.colors);
     if s.w != w || s.h != h {

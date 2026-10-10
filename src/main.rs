@@ -25,6 +25,7 @@ mod spotify_auth;
 mod store;
 mod system;
 mod ui;
+mod voice;
 mod watcher;
 mod ytdlp;
 

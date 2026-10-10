@@ -272,7 +272,9 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                 if k >= 1.0 {
                     st.glide = None;
                 } else {
-                    ui.ctx().request_repaint();
+                    // 30 frames a second is smooth for this half-second glide (the screen's
+                    // full rate, 60-144, only cost CPU)
+                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 }
             }
             // wake up in time for the next glide, and to light the next line the moment it starts

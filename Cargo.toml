@@ -70,9 +70,9 @@ type_complexity = "allow"
 needless_range_loop = "allow"
 
 [profile.release]
-# optimize for size: measured no CPU difference while playing; the audio decoders and resampler
-# stay at full speed below (import + analysis speed)
-opt-level = "s"
+# optimize for size ("z": 1.6 MB smaller than "s"; frames ~0.25 ms slower, CPU while playing the
+# same); the audio decoders and resampler stay at full speed below (import + analysis speed)
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 # unwind: a panic in a background thread (media keys, a damaged music file, a download) stops

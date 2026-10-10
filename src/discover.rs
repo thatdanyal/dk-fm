@@ -386,6 +386,25 @@ pub fn square(b: Vec<u8>) -> Vec<u8> {
     }
 }
 
+/// A web cover made square (see `square`) and no bigger than `max` pixels: covers of songs you
+/// don't have are shown small, so keeping them at 1200 px only filled the disk.
+pub fn small_square(b: Vec<u8>, max: u32) -> Vec<u8> {
+    let b = square(b);
+    let Ok(img) = image::load_from_memory(&b) else { return b };
+    if img.width() <= max && img.height() <= max {
+        return b;
+    }
+    let mut out = Vec::new();
+    let small = img.resize(max, max, image::imageops::FilterType::Triangle).to_rgb8();
+    match image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 86).encode_image(&small) {
+        Ok(()) => out,
+        Err(_) => b,
+    }
+}
+
+/// How big covers of songs you don't have are kept (they're shown at up to about 190 points).
+pub const WEB_COVER: u32 = 360;
+
 /// Folder for downloaded covers of things you don't have (new releases, artist pages).
 pub fn covers_dir() -> std::path::PathBuf {
     store::data_dir().join("discover")
@@ -399,6 +418,32 @@ fn prune_covers() {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// Covers of songs you don't have saved before they were kept small: made small, once
+/// (background thread; files already small are skipped without being opened).
+pub fn shrink_web_covers() {
+    std::thread::Builder::new()
+        .name("shrink-covers".into())
+        .spawn(|| {
+            for e in std::fs::read_dir(covers_dir()).into_iter().flatten().flatten() {
+                let p = e.path();
+                // (a 360 px JPEG is about 20-30 KB)
+                if e.metadata().map(|m| m.len() < 30_000).unwrap_or(true) || p.extension().map(|x| x != "jpg").unwrap_or(true) {
+                    continue;
+                }
+                let Ok(b) = std::fs::read(&p) else { continue };
+                let small = small_square(b.clone(), WEB_COVER);
+                if small.len() < b.len() {
+                    let tmp = p.with_extension("part");
+                    if std::fs::write(&tmp, &small).is_ok() {
+                        let _ = std::fs::rename(&tmp, &p);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        })
+        .ok();
 }
 
 #[cfg(test)]

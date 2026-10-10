@@ -275,7 +275,7 @@ pub(super) fn remote_tex(app: &mut App, ctx: &egui::Context, url: Option<&String
             std::thread::spawn(move || {
                 let _ = std::fs::create_dir_all(discover::covers_dir());
                 let tmp = path.with_extension("part");
-                if crate::net::get_bytes(&url).ok().filter(|b| !b.is_empty()).map(discover::square).map(|b| std::fs::write(&tmp, b).is_ok() && std::fs::rename(&tmp, &path).is_ok()).unwrap_or(false) {
+                if crate::net::get_bytes(&url).ok().filter(|b| !b.is_empty()).map(|b| discover::small_square(b, discover::WEB_COVER)).map(|b| std::fs::write(&tmp, b).is_ok() && std::fs::rename(&tmp, &path).is_ok()).unwrap_or(false) {
                     ready.lock().insert(name);
                     ctx.request_repaint();
                 }

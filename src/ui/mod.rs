@@ -483,6 +483,10 @@ impl App {
             if s.upgrade("played-sort") {
                 s.playlist_sort = "played".into();
             }
+            // covers of songs you don't have were kept at up to 1200 px: made small, once
+            if s.upgrade("small-web-covers") {
+                crate::discover::shrink_web_covers();
+            }
             // one Liked: Spotify's Liked Songs playlist becomes ♥ in DK.FM's own (also after
             // restoring an old backup), and syncs there from now on
             if lib.merge_spotify_liked().is_some() {

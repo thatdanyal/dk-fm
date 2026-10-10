@@ -180,7 +180,7 @@ fn fetch(t: &ITrack, id: &str, covers: &std::path::Path) -> Result<Track, String
         return Err("Couldn't get a preview of that song".into());
     }
     // its cover, so the deck shows it
-    let cover = t.cover.as_ref().and_then(|u| crate::net::get_bytes(u).ok()).map(crate::discover::square).and_then(|b| {
+    let cover = t.cover.as_ref().and_then(|u| crate::net::get_bytes(u).ok()).map(|b| crate::discover::small_square(b, 640)).and_then(|b| {
         let name = format!("{id}.jpg");
         std::fs::write(covers.join(&name), b).ok().map(|_| name)
     });

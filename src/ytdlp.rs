@@ -174,10 +174,26 @@ fn install_yt(version: Option<&str>) -> Result<(), String> {
     } else {
         net::download(&format!("{base}/{asset}"), &stage.join("yt-dlp"), false)?;
     }
+    prune_yt(&stage);
     let _ = std::fs::remove_dir_all(yt_dir());
     std::fs::rename(&stage, yt_dir()).map_err(|e| e.to_string())?;
     make_exec(&yt_path());
     Ok(())
+}
+
+/// Parts of yt-dlp's folder build DK.FM never uses (about 5 MB): browser imitation (curl_cffi,
+/// for sites other than YouTube and SoundCloud), reading browser cookies (sqlite) and live-stream
+/// chat (websockets). yt-dlp loads each only if it's there, so without them it works as before.
+fn prune_yt(dir: &Path) {
+    const UNUSED: [&str; 6] = ["curl_cffi", "_cffi_backend", "websockets", "sqlite3.dll", "_sqlite3", "libsqlite3"];
+    let Ok(rd) = std::fs::read_dir(dir.join("_internal")) else { return };
+    for e in rd.flatten() {
+        let n = e.file_name().to_string_lossy().into_owned();
+        if UNUSED.iter().any(|u| n.starts_with(u)) {
+            let p = e.path();
+            let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+        }
+    }
 }
 
 fn latest_version() -> Option<String> {
@@ -207,6 +223,8 @@ pub fn ensure() -> Result<String, String> {
         } else {
             shrink_ffmpeg();
         }
+        // (a yt-dlp installed before it was trimmed)
+        prune_yt(&yt_dir());
         if !qjs_path().exists() {
             net::download(&qjs_url(), &qjs_path(), false)?;
             make_exec(&qjs_path());

@@ -61,8 +61,8 @@ cd "ffmpeg-$FFMPEG"
   --enable-decoder=aac,aac_latm,opus,vorbis,mp3,mp3float,flac,alac,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,mjpeg,png,webp,vp8 \
   --enable-encoder=aac,libmp3lame,flac,alac,pcm_s16le,mjpeg,png \
   --enable-parser=aac,mpegaudio,flac,opus,vorbis,mjpeg,png,webp,vp8 \
-  --enable-bsf=aac_adtstoasc \
-  --enable-filter=aresample,aformat,anull,null,format,scale,crop,copy,acopy,volume \
+  --enable-bsf=aac_adtstoasc,mjpeg2jpeg,null,setts \
+  --enable-filter=aresample,aformat,anull,null,format,scale,crop,copy,acopy,volume,setpts,asetpts,trim,atrim \
   --enable-swresample --enable-swscale
 make -j4
 STRIP=strip

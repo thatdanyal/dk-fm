@@ -1,0 +1,61 @@
+# Builds DK.FM's small audio-only ffmpeg (scripts/build-ffmpeg.sh) for each OS and publishes it
+# as the "ffmpeg-audio-1" release, which DK.FM downloads instead of a full 80 MB ffmpeg. Runs
+# only when the build script or this file changes (bump TAG here and in src/ytdlp.rs for a new one).
+name: ffmpeg
+
+on:
+  push:
+    paths: ['scripts/build-ffmpeg.sh', '.github/workflows/ffmpeg.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  TAG: ffmpeg-audio-1
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: windows-x64
+          - os: ubuntu-22.04
+            target: linux-x64
+          - os: ubuntu-22.04-arm
+            target: linux-arm64
+          - os: macos-latest
+            target: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y nasm pkg-config ${{ matrix.target == 'windows-x64' && 'mingw-w64' || '' }}
+      - name: Tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm pkg-config || true
+      - name: Build
+        run: bash scripts/build-ffmpeg.sh ${{ matrix.target }} out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: out/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la out
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --title "Audio-only ffmpeg for DK.FM" --notes "Small ffmpeg builds DK.FM downloads (audio only; built by scripts/build-ffmpeg.sh). Not a DK.FM release."
+          gh release upload "$TAG" out/*.gz -R "$GITHUB_REPOSITORY" --clobber

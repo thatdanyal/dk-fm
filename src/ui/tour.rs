@@ -9,10 +9,10 @@ use eframe::egui::{self, Align2, Id, LayerId, Order, Pos2, Rect};
 
 /// Bump with every update that adds steps: people who update are offered a tour of just the
 /// steps newer than the last tour they were offered.
-pub const TOUR_VERSION: u32 = 4;
+pub const TOUR_VERSION: u32 = 5;
 
 /// (what it points at, title, explanation, the TOUR_VERSION that added it)
-pub const STEPS: [(&str, &str, &str, u32); 19] = [
+pub const STEPS: [(&str, &str, &str, u32); 21] = [
     ("homepanel", "HOME", "Home, Discover, Songs, Albums, Artists, Recent, Top and Stats have their own HOME tab, next to LIBRARY (your playlists).", 2),
     ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
     ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
@@ -30,6 +30,8 @@ pub const STEPS: [(&str, &str, &str, u32); 19] = [
     ("homepanel", "MADE FOR YOU", "Home's MADE FOR YOU mixes have your songs and new ones you don't have yet, side by side: double-click one to play it, + GET keeps it.", 4),
     ("theater", "THEATER, YOUR WAY", "Hover THEATER to pick one of your three versions (CLASSIC, KARAOKE, PARTY); a click opens your default. Inside, LAYOUT adds, removes and moves what's shown, renames a version and makes it the default. 1, 2, 3 switch; Esc leaves.", 4),
     ("settings", "LYRICS IN YOUR LANGUAGE", "Lyrics in another language are translated into yours, under each line. Pick your language in Settings > Language.", 4),
+    ("theater", "SING ALONG", "THEATER's KARAOKE version sings along: words light up as they're sung, with a 3-2-1 countdown before the singing starts. Turn it on for any version in THEATER > LAYOUT.", 5),
+    ("theme", "KEEP THESE COLOURS", "Like how the Album Cover theme looks with this song? THEME > + SAVE THESE COLOURS keeps it as a theme of yours.", 5),
     ("refresh", "REFRESH", "↻ checks for a DK.FM update and syncs your Spotify playlists right now.", 2),
     ("settings", "SETTINGS", "Settings has a search box: type what you're looking for, like \"quality\" or \"spotify\".", 2),
 ];

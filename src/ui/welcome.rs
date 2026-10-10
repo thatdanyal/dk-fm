@@ -210,17 +210,26 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
     let open = window(pal, ctx, "SET UP DK.FM", Vec2::new(560.0, 600.0), false, |ui| {
         dim(ui, &pal, "Pick these once. You can change them any time in Settings.");
         ui.add_space(10.0);
-        caption(ui, &pal, "1. YOUR LANGUAGE");
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("setup-lang").selected_text(crate::lang::name(&lang)).width(260.0).show_ui(ui, |ui| {
-                for (code, name) in crate::lang::LANGS {
-                    ui.selectable_value(&mut lang, code.to_string(), *name);
-                }
+        // (an English computer isn't asked: DK.FM is in English, and so are its lyrics' translations)
+        let ask_lang = crate::lang::system() != "en";
+        let mut n = 0;
+        let mut num = |s: &str| {
+            n += 1;
+            format!("{n}. {s}")
+        };
+        if ask_lang {
+            caption(ui, &pal, &num("YOUR LANGUAGE"));
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("setup-lang").selected_text(crate::lang::name(&lang)).width(260.0).show_ui(ui, |ui| {
+                    for (code, name) in crate::lang::LANGS {
+                        ui.selectable_value(&mut lang, code.to_string(), *name);
+                    }
+                });
             });
-        });
-        dim(ui, &pal, "Lyrics in other languages are translated into it, line by line.");
-        ui.add_space(10.0);
-        caption(ui, &pal, "2. SOUND QUALITY OF YOUR DOWNLOADS");
+            dim(ui, &pal, "Lyrics in other languages are translated into it, line by line.");
+            ui.add_space(10.0);
+        }
+        caption(ui, &pal, &num("SOUND QUALITY OF YOUR DOWNLOADS"));
         ui.horizontal(|ui| {
             for (f, label) in [("standard", "STANDARD"), ("high", "HIGH (RECOMMENDED)")] {
                 if button(ui, &pal, label, quality == f, true).clicked() {
@@ -238,7 +247,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         }
         dim(ui, &pal, "Lossless (FLAC, ALAC, WAV) can't be downloaded: YouTube doesn't have it. Add your own lossless files any time and DK.FM plays them as they are.");
         ui.add_space(10.0);
-        caption(ui, &pal, "3. EQUALIZER");
+        caption(ui, &pal, &num("EQUALIZER"));
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("setup-eq").selected_text(if eq == "Flat" { "Flat (off: songs as they were made)".to_string() } else { eq.clone() }).width(260.0).show_ui(ui, |ui| {
                 for (name, _) in super::eqpanel::PRESETS {
@@ -248,7 +257,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         });
         dim(ui, &pal, "Bass Boost for headphones that sound thin, Vocal for podcasts, Late Night for quiet listening. The EQ panel fine-tunes it.");
         ui.add_space(10.0);
-        caption(ui, &pal, "4. WHERE YOUR SONGS ARE SAVED");
+        caption(ui, &pal, &num("WHERE YOUR SONGS ARE SAVED"));
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&dir).color(pal.text));
             if button(ui, &pal, "CHANGE", false, true).clicked() {
@@ -265,7 +274,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         dim(ui, &pal, if ask { "Before each download you pick the folder." } else { "A folder per playlist or album in there (you can still pick another one when you download)." });
         if !cfg!(target_os = "linux") {
             ui.add_space(10.0);
-            caption(ui, &pal, "5. THE X BUTTON");
+            caption(ui, &pal, &num("THE X BUTTON"));
             ui.horizontal(|ui| {
                 for (m, label) in [("quit", "QUITS DK.FM"), ("playing", "KEEPS MUSIC PLAYING (TRAY)")] {
                     if button(ui, &pal, label, close == m, true).clicked() {
@@ -295,7 +304,9 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         app.edit_settings(|s| {
             s.download_format = quality.clone();
             s.ask_folder = ask;
-            s.language = lang.clone();
+            if crate::lang::system() != "en" {
+                s.language = lang.clone();
+            }
             if !cfg!(target_os = "linux") {
                 s.close_mode = close.clone();
             }

@@ -23,13 +23,14 @@ pub enum SetTab {
     Spotify,
     Playback,
     Keys,
+    Share,
     Backup,
     System,
     Updates,
     About,
 }
 
-const TABS: [(SetTab, &str); 16] = [
+const TABS: [(SetTab, &str); 17] = [
     (SetTab::Look, "Look"),
     (SetTab::Language, "Language"),
     (SetTab::Layouts, "Layouts"),
@@ -42,6 +43,7 @@ const TABS: [(SetTab, &str); 16] = [
     (SetTab::Spotify, "Spotify"),
     (SetTab::Playback, "Playback"),
     (SetTab::Keys, "Shortcuts"),
+    (SetTab::Share, "Share codes"),
     (SetTab::Backup, "Backup"),
     (SetTab::System, "System"),
     (SetTab::Updates, "Updates"),
@@ -73,6 +75,8 @@ pub struct SetUi {
     backups: Option<(std::time::Instant, Vec<backup::Entry>)>,
     /// the search box above the tabs
     query: String,
+    /// Share codes: the code being pasted
+    paste: String,
 }
 
 enum Confirm {
@@ -241,6 +245,11 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
 
 fn run_prompt(app: &mut App, action: PromptAction, text: String) {
     match action {
+        PromptAction::SaveTheme(p) => {
+            let mut key = String::new();
+            app.edit_settings(|s| key = crate::share::add_theme(s, p.to_custom(text.trim())));
+            app.toast(format!("Saved \"{}\": it's under THEME now", key.trim_start_matches(theme::CUSTOM)));
+        }
         PromptAction::NewPlaylist(ids) => {
             let n = ids.len();
             let id = app.lib.new_playlist(&text, ids);
@@ -330,6 +339,8 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Playback, "Leveler", "compressor quiet loud"),
     (SetTab::Playback, "Private listening", "history stats incognito"),
     (SetTab::Keys, "Keyboard shortcuts", "hotkeys keys bindings"),
+    (SetTab::Share, "Paste a code from a friend", "share code theme layout theater playlist import friend dkfm"),
+    (SetTab::Share, "Share your theme, layout, THEATER or settings", "copy code send friend"),
     (SetTab::Backup, "Automatic backups", "restore save"),
     (SetTab::Backup, "Your backups: restore, export, import", "undo recover"),
     (SetTab::Backup, "Move to a new PC / give a friend your DK.FM", "transfer copy whole"),
@@ -414,6 +425,7 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
                 SetTab::Spotify => spotify(app, ui),
                 SetTab::Playback => playback(app, ui),
                 SetTab::Language => language(app, ui),
+                SetTab::Share => share_tab(app, ui),
                 SetTab::Keys => keys(app, ui),
                 SetTab::Backup => backups(app, ui),
                 SetTab::System => system_tab(app, ui),
@@ -520,6 +532,9 @@ fn look(app: &mut App, ui: &mut Ui) {
         let name = theme::all_themes(&s).into_iter().find(|t| t.0 == s.theme).map(|t| t.1).unwrap_or_default();
         let sh = super::sharing::theme_share(app, &s.theme);
         super::sharing::copy(app, ui.ctx(), &sh, &format!("theme \"{name}\""));
+    }
+    if button(ui, &pal, "+ SAVE THESE COLOURS AS A THEME…", false, true).on_hover_text("Keep the colours on screen now (e.g. the Album Cover theme's for this song) as a theme of yours, listed under THEME").clicked() {
+        app.ask_save_theme();
     }
     spacer(ui);
     caption(ui, &pal, "ACCENT COLOR");
@@ -1476,6 +1491,59 @@ fn spotify(app: &mut App, ui: &mut Ui) {
     dim(ui, &pal, "The API costs nothing, but Spotify requires the app's owner to have Premium, and allows up to 5 accounts per app (add others under User Management).");
 }
 
+/// Share codes: paste a friend's code (or open a .dkfm file), and copy codes of your own.
+fn share_tab(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    caption(ui, &pal, "PASTE A CODE FROM A FRIEND");
+    dim(ui, &pal, "Themes, layouts, THEATER versions, settings and playlists. You see what it is before anything changes. (Ctrl+V anywhere in DK.FM works too.)");
+    ui.add(egui::TextEdit::multiline(&mut app.setui.paste).hint_text("Click here, then Ctrl+V the code (DKFM1:…)").desired_rows(3).desired_width(ui.available_width().min(560.0)).font(vt(17.0)));
+    let mut open = false;
+    ui.horizontal(|ui| {
+        open = button(ui, &pal, "OPEN", true, !app.setui.paste.trim().is_empty()).clicked();
+        if button(ui, &pal, "OPEN A .DKFM FILE…", false, true).clicked() {
+            app.modal = None;
+            super::sharing::pick_file(app);
+        }
+    });
+    if open {
+        let text = std::mem::take(&mut app.setui.paste);
+        if super::sharing::receive(app, &text) {
+            app.modal = None; // (the friend's code shows on its own)
+        } else {
+            app.setui.paste = text;
+            app.toast_err("There's no DK.FM code in that text. Codes start with DKFM1:");
+        }
+    }
+    spacer(ui);
+    caption(ui, &pal, "SHARE YOURS");
+    dim(ui, &pal, "Copies a code: send it to a friend, they paste it into their DK.FM.");
+    let (theme_key, names) = { let s = app.settings.lock(); (s.theme.clone(), s.theater.iter().map(|t| t.name.clone()).collect::<Vec<_>>()) };
+    ui.horizontal_wrapped(|ui| {
+        if button(ui, &pal, "THIS THEME", false, true).clicked() {
+            let sh = super::sharing::theme_share(app, &theme_key);
+            super::sharing::copy(app, ui.ctx(), &sh, "this theme");
+        }
+        if button(ui, &pal, "THIS LAYOUT", false, true).clicked() {
+            if let Some(sh) = super::sharing::layout_share(app, None) {
+                super::sharing::copy(app, ui.ctx(), &sh, "this layout");
+            }
+        }
+        if button(ui, &pal, "MY SETTINGS", false, true).on_hover_text("Look and behaviour only: never your Spotify login, folders or library").clicked() {
+            let sh = super::sharing::settings_share(app);
+            super::sharing::copy(app, ui.ctx(), &sh, "your settings");
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        for (i, n) in names.iter().enumerate() {
+            if button(ui, &pal, &format!("THEATER: {n}"), false, true).clicked() {
+                let sh = super::sharing::theater_share(app, i);
+                super::sharing::copy(app, ui.ctx(), &sh, &format!("THEATER \"{n}\""));
+            }
+        }
+    });
+    dim(ui, &pal, "Playlists: right-click one > Share (copy code).");
+}
+
 fn language(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let s = app.settings.lock().clone();
@@ -1885,7 +1953,8 @@ fn about(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     caption(ui, &pal, "DK.FM");
     ui.label(egui::RichText::new(format!("v{} · native · {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS)).color(pal.text));
-    ui.label(egui::RichText::new("Made by Danyal Khan").font(px(8.0)).color(pal.accent));
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Made by Danyal Khan").font(vt(44.0)).color(pal.accent));
     ui.add_space(4.0);
     dim(ui, &pal, "Retro desktop music player. Plays your local library and imports Spotify / YouTube / SoundCloud playlists.");
     dim(ui, &pal, "Lyrics from LRCLIB · downloads powered by yt-dlp, FFmpeg and QuickJS · fonts VT323 & Press Start 2P (OFL).");

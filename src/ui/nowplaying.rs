@@ -318,7 +318,7 @@ fn part(app: &mut App, ui: &mut Ui, r: Rect, k: &str, preset: &TheaterPreset) {
             frame_rect(ui.painter(), r, 2.0, pal.line);
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r.shrink(4.0)), |ui| {
                 ui.set_clip_rect(r.shrink(2.0));
-                super::lyrics::show_sized(app, ui, preset.lyrics_size);
+                super::lyrics::show_sized(app, ui, preset.lyrics_size, preset.singalong);
             });
         }
         "visualizer" => {
@@ -487,6 +487,7 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
                 ui.label(egui::RichText::new("LYRICS SIZE").font(px(6.0)).color(pal.text));
                 ui.add(egui::Slider::new(&mut p.lyrics_size, 0.7..=2.6).show_value(false));
             });
+            ui.checkbox(&mut p.singalong, egui::RichText::new("Sing-along: words light up as they're sung, with a 3-2-1 countdown before the singing starts").font(vt(18.0)));
             ui.checkbox(&mut p.auto_hide, egui::RichText::new("Hide the buttons and the mouse when it rests (3 s)").font(vt(18.0)));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -497,6 +498,10 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) {
                     reset = true;
                 }
             });
+            if button(ui, &pal, "COPY SHARE CODE", false, true).on_hover_text("Copy a code for this version to send to a friend: they paste it into DK.FM (Ctrl+V, or Settings > Share codes)").clicked() {
+                let sh = super::sharing::theater_share(app, i);
+                super::sharing::copy(app, ui.ctx(), &sh, &format!("THEATER \"{}\"", p.name));
+            }
         });
     });
     if reset {

@@ -102,6 +102,8 @@ pub enum PromptAction {
     /// a new playlist for a song about to be downloaded (and whether it's a preview being kept)
     /// (the song, a preview being kept, the folder picked for it)
     NewPlaylistGet(Box<crate::sources::ITrack>, bool, Option<std::path::PathBuf>),
+    /// the colours on screen now (e.g. the Album Cover theme's for this song) as a theme of yours
+    SaveTheme(Box<Pal>),
 }
 
 pub struct App {
@@ -681,6 +683,16 @@ impl App {
         self.toast(if on { "Private listening on: plays and history aren't recorded" } else { "Private listening off" });
     }
 
+    /// Asks for a name, then saves the colours on screen as a theme (listed under THEME).
+    pub fn ask_save_theme(&mut self) {
+        let name = if self.theme_key == covertheme::KEY {
+            self.current_track().map(|t| if t.album.is_empty() { t.title } else { t.album }).unwrap_or_else(|| "My colours".into())
+        } else {
+            "My theme".into()
+        };
+        self.modal = Some(Modal::Prompt { title: "SAVE THESE COLOURS AS A THEME".into(), text: name, action: PromptAction::SaveTheme(Box::new(self.pal)) });
+    }
+
     pub fn set_theme(&mut self, ctx: &egui::Context) {
         let (k, pal) = { let s = self.settings.lock(); (s.theme.clone(), theme::resolve(&s)) };
         self.theme_key = k;
@@ -1010,6 +1022,7 @@ impl App {
                     if r.clicked() {
                         ui.memory_mut(|m| m.toggle_popup(tid));
                     }
+                    let mut save_theme = false;
                     egui::popup::popup_below_widget(ui, tid, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
                         ui.set_min_width(180.0);
                         let s = self.settings.lock().clone();
@@ -1023,7 +1036,12 @@ impl App {
                                 chosen = Some(k);
                             }
                         }
+                        ui.separator();
+                        save_theme = ui.button("   + SAVE THESE COLOURS…").on_hover_text("Keep the colours on screen now as a theme of yours (great with Album Cover: keep a song's look)").clicked();
                     });
+                    if save_theme {
+                        self.ask_save_theme();
+                    }
                     if let Some(k) = chosen {
                         self.edit_settings(|s| s.theme = k);
                         self.set_theme(ctx);

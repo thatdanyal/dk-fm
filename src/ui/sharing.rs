@@ -25,6 +25,8 @@ pub struct Incoming {
     pick: [bool; 4],
     /// a whole DK.FM: songs already here
     have_all: usize,
+    /// THEATER: which of your three versions it replaces
+    slot: usize,
 }
 
 // ------------------------------------------------------------------------------- sending
@@ -60,6 +62,11 @@ pub fn layout_share(app: &App, name: Option<&str>) -> Option<Share> {
         m.remove("translations"); // the receiver uses its own (keeps codes short)
     }
     Some(Share::Layout(crate::store::NamedLayout { name: name.unwrap_or("My layout").to_string(), dock }))
+}
+
+/// One of your THEATER versions.
+pub fn theater_share(app: &App, i: usize) -> Share {
+    Share::Theater(app.settings.lock().theater[i.min(2)].clone())
 }
 
 pub fn settings_share(app: &App) -> Share {
@@ -136,6 +143,7 @@ fn open(app: &mut App, s: Share) {
         }
         Share::Layout(l) => (Vec::new(), l.name.clone(), super::load_dock(&l.dock)),
         Share::Theme(t) => (Vec::new(), t.name.clone(), None),
+        Share::Theater(t) => (Vec::new(), t.name.clone(), None),
         Share::Settings(_) => (Vec::new(), String::new(), None),
         Share::Everything(a) => (Vec::new(), a.name.clone(), None),
     };
@@ -148,7 +156,8 @@ fn open(app: &mut App, s: Share) {
     };
     app.palette = None;
     app.pick = None;
-    app.incoming = Some(Incoming { share: s, owned, name, dock, pick: [true; 4], have_all });
+    let slot = if app.nowplaying { app.theater.preset } else { 2 };
+    app.incoming = Some(Incoming { share: s, owned, name, dock, pick: [true; 4], have_all, slot });
 }
 
 pub fn show(app: &mut App, ctx: &egui::Context) {
@@ -157,6 +166,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let (title, size) = match &inc.share {
         Share::Theme(_) => ("SHARED THEME", Vec2::new(480.0, 330.0)),
         Share::Layout(_) => ("SHARED LAYOUT", Vec2::new(480.0, 330.0)),
+        Share::Theater(_) => ("SHARED THEATER", Vec2::new(520.0, 400.0)),
         Share::Settings(_) => ("SHARED SETTINGS", Vec2::new(560.0, 420.0)),
         Share::Playlist(_) => ("SHARED PLAYLIST", Vec2::new(600.0, 470.0)),
         Share::Everything(_) => ("A WHOLE DK.FM", Vec2::new(560.0, 420.0)),
@@ -182,6 +192,23 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 }
                 ui.add_space(6.0);
                 dim(ui, &pal, "APPLY saves it to your layouts (Settings → Layouts) and switches to it.");
+                "APPLY"
+            }
+            Share::Theater(t) => {
+                heading(ui, &pal, &format!("THEATER \"{}\" from a friend", t.name));
+                ui.add_space(6.0);
+                theater_preview(ui, &pal, t);
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new("PUT IT IN PLACE OF").font(px(6.0)).color(pal.text));
+                let names: Vec<String> = app.settings.lock().theater.iter().map(|x| x.name.clone()).collect();
+                ui.horizontal(|ui| {
+                    for (i, n) in names.iter().enumerate() {
+                        if button(ui, &pal, &format!("{}. {n}", i + 1), inc.slot == i, true).clicked() {
+                            inc.slot = i;
+                        }
+                    }
+                });
+                dim(ui, &pal, "APPLY replaces that version of THEATER with this one (your other two stay). Hover THEATER to open it.");
                 "APPLY"
             }
             Share::Settings(s) => {
@@ -284,6 +311,28 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// A THEATER version drawn small: its two columns with their parts.
+fn theater_preview(ui: &mut Ui, pal: &Pal, t: &crate::store::TheaterPreset) {
+    let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 170.0), Sense::hover());
+    fill(ui.painter(), r, pal.bg);
+    frame_rect(ui.painter(), r, 2.0, pal.line);
+    let cols: Vec<&Vec<String>> = [&t.left, &t.right].into_iter().filter(|c| !c.is_empty()).collect();
+    let w = (r.width() - 12.0 - 8.0 * (cols.len().max(1) - 1) as f32) / cols.len().max(1) as f32;
+    for (ci, col) in cols.iter().enumerate() {
+        let x = r.left() + 6.0 + ci as f32 * (w + 8.0);
+        let h = ((r.height() - 12.0) / col.len().max(1) as f32 - 4.0).min(30.0);
+        for (i, k) in col.iter().enumerate() {
+            let b = Rect::from_min_size(Pos2::new(x, r.top() + 6.0 + i as f32 * (h + 4.0)), Vec2::new(w, h));
+            fill(ui.painter(), b, pal.panel_hi);
+            frame_rect(ui.painter(), b, 1.0, pal.line_hi);
+            let name = crate::ui::nowplaying::PARTS.iter().find(|p| p.0 == k).map(|p| p.1).unwrap_or("?");
+            ui.painter().text(b.center(), Align2::CENTER_CENTER, name, px(6.0), pal.text);
+        }
+    }
+    let extras = [Some(format!("BACKGROUND: {}", t.backdrop.to_uppercase())), t.singalong.then(|| "SING-ALONG".to_string()), t.auto_hide.then(|| "HIDES BUTTONS".to_string())];
+    dim(ui, pal, &extras.into_iter().flatten().collect::<Vec<_>>().join(" · "));
+}
+
 fn heading(ui: &mut Ui, pal: &Pal, text: &str) {
     ui.label(egui::RichText::new(text).font(vt(24.0)).color(pal.text));
 }
@@ -318,6 +367,11 @@ fn apply(app: &mut App, ctx: &egui::Context, inc: Incoming) {
             app.toast("Your friend's settings are applied (your old ones are in Settings → Backup)");
         }
         Share::Everything(a) => bring_in_all(app, ctx, &a, inc.pick),
+        Share::Theater(t) => {
+            let (slot, name) = (inc.slot.min(2), t.name.clone());
+            app.edit_settings(|s| s.theater[slot] = t);
+            app.toast(format!("THEATER \"{name}\" is your version {}: hover THEATER to open it", slot + 1));
+        }
         Share::Playlist(p) => {
             let name = inc.name.trim().to_string();
             let missing = import_playlist(app, &p, &name, &inc.owned, "a friend");

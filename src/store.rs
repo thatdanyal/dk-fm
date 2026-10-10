@@ -94,11 +94,11 @@ fn d_balanced() -> String { "balanced".into() }
 fn d_played() -> String { "played".into() }
 fn d_under() -> String { "under".into() }
 pub fn d_theater() -> Vec<TheaterPreset> {
-    let p = |name: &str, left: &[&str], right: &[&str], backdrop: &str, lyrics_size: f32| TheaterPreset { name: name.into(), left: left.iter().map(|s| s.to_string()).collect(), right: right.iter().map(|s| s.to_string()).collect(), backdrop: backdrop.into(), lyrics_size, auto_hide: false };
+    let p = |name: &str, left: &[&str], right: &[&str], backdrop: &str, lyrics_size: f32, singalong: bool| TheaterPreset { name: name.into(), left: left.iter().map(|s| s.to_string()).collect(), right: right.iter().map(|s| s.to_string()).collect(), backdrop: backdrop.into(), lyrics_size, auto_hide: false, singalong };
     vec![
-        p("CLASSIC", &["cover", "info", "seek", "controls"], &["lyrics"], "plain", 1.35),
-        p("KARAOKE", &["info", "lyrics", "seek", "controls"], &[], "glow", 1.8),
-        p("PARTY", &["cover", "info", "seek", "controls"], &["clock", "next", "visualizer"], "glow", 1.0),
+        p("CLASSIC", &["cover", "info", "seek", "controls"], &["lyrics"], "plain", 1.35, false),
+        p("KARAOKE", &["info", "lyrics", "seek", "controls"], &[], "glow", 1.8, true),
+        p("PARTY", &["cover", "info", "seek", "controls"], &["clock", "next", "visualizer"], "glow", 1.0, false),
     ]
 }
 
@@ -115,6 +115,9 @@ pub struct TheaterPreset {
     #[serde(default = "d_one")] pub lyrics_size: f32,
     /// buttons fade away when the mouse rests for a few seconds
     #[serde(default)] pub auto_hide: bool,
+    /// sing-along: the line being sung lights up word by word, with a 3-2-1 countdown before
+    /// the singing starts (and after a long break)
+    #[serde(default)] pub singalong: bool,
 }
 /// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)
 fn d_hidden_tabs() -> Vec<String> { ["recent", "top"].map(String::from).to_vec() }
@@ -344,6 +347,15 @@ impl Settings {
             s.theater.truncate(3);
         }
         s.theater_default = s.theater_default.min(2);
+        // (KARAOKE from before sing-along existed sings along, unless it was changed)
+        if !s.upgrades.iter().any(|u| u == "theater-sing") {
+            s.upgrades.push("theater-sing".into());
+            let mut old = d_theater()[1].clone();
+            old.singalong = false;
+            if s.theater[1] == old {
+                s.theater[1].singalong = true;
+            }
+        }
         if s.eq.preset.is_empty() {
             s.eq.preset = "Flat".into();
         }

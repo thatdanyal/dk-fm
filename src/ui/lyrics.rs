@@ -5,7 +5,7 @@ use super::theme::{px, vt};
 use super::App;
 pub use crate::lyricsrc::Lyr;
 use crate::lyricsrc::Source;
-use eframe::egui::{self, Ui};
+use eframe::egui::{self, Pos2, Ui};
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,11 +48,70 @@ impl LyricsState {
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
-    show_sized(app, ui, 1.0);
+    show_sized(app, ui, 1.0, false);
 }
 
-/// Lyrics at `scale` times the size that fits the panel (full-screen now playing uses bigger ones).
-pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
+/// About how long a line is sung for: a little per letter, never past the next line.
+fn sung_for(text: &str, gap: f64) -> f64 {
+    let letters = text.chars().filter(|c| c.is_alphanumeric()).count() as f64;
+    (letters * 0.085 + 0.45).min(gap - 0.2).max(0.5)
+}
+
+/// Sing-along: the colour of words already sung, the accent that stands out most from the text
+/// (in a black-and-white theme the main accent can be close to the text colour).
+fn sung_color(pal: &super::theme::Pal) -> egui::Color32 {
+    let d = |a: egui::Color32| {
+        let b = pal.text;
+        (a.r() as i32 - b.r() as i32).abs() + (a.g() as i32 - b.g() as i32).abs() + (a.b() as i32 - b.b() as i32).abs()
+    };
+    if d(pal.accent) >= 120 || d(pal.accent) >= d(pal.accent2) { pal.accent } else { pal.accent2 }
+}
+
+/// Sing-along: how far into `text` the singer is (`t` seconds into a line sung for `dur`), as a
+/// byte position. Each word gets time by its length; the word being sung fills letter by letter.
+fn sung_upto(text: &str, t: f64, dur: f64) -> usize {
+    if t <= 0.0 {
+        return 0;
+    }
+    if t >= dur {
+        return text.len();
+    }
+    let words: Vec<(usize, usize)> = {
+        let mut v = Vec::new();
+        let mut start = None;
+        for (i, c) in text.char_indices() {
+            match (c.is_whitespace(), start) {
+                (false, None) => start = Some(i),
+                (true, Some(s)) => {
+                    v.push((s, i));
+                    start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(s) = start {
+            v.push((s, text.len()));
+        }
+        v
+    };
+    let weight = |w: &(usize, usize)| text[w.0..w.1].chars().count() as f64 + 1.5;
+    let total: f64 = words.iter().map(weight).sum();
+    let mut at = t / dur * total;
+    for w in &words {
+        let k = weight(w);
+        if at < k {
+            let chars: Vec<usize> = text[w.0..w.1].char_indices().map(|(i, _)| w.0 + i).chain([w.1]).collect();
+            let n = ((at / k) * (chars.len() - 1) as f64).round() as usize;
+            return chars[n.min(chars.len() - 1)];
+        }
+        at -= k;
+    }
+    text.len()
+}
+
+/// Lyrics at `scale` times the size that fits the panel (THEATER uses bigger ones). `sing`:
+/// sing-along (the line lights up word by word, a 3-2-1 countdown before the singing starts).
+pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
     let pal = app.pal;
     let Some(t) = app.current_track() else {
         ui.centered_and_justified(|ui| ui.label(egui::RichText::new("NO LYRICS").color(pal.dim)));
@@ -242,7 +301,24 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                             _ if text.is_empty() => "♪",
                             _ => text.as_str(),
                         };
-                        let mut r = ui.add(egui::Label::new(egui::RichText::new(txt).font(vt(size)).color(color)).wrap().sense(egui::Sense::click()));
+                        let label = if sing && Some(i) == active && !text.is_empty() {
+                            // sing-along: what's been sung is lit, the rest waits in plain text
+                            let gap = lines.get(i + 1).map(|l| l.0 - lt).unwrap_or(8.0);
+                            let dur = sung_for(txt, gap);
+                            let cut = sung_upto(txt, pos - lt, dur);
+                            if cut < txt.len() && status.playing {
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(45));
+                            }
+                            let mut job = egui::text::LayoutJob::default();
+                            let f = |c: egui::Color32| egui::TextFormat { font_id: vt(size), color: c, ..Default::default() };
+                            job.append(&txt[..cut], 0.0, f(sung_color(&pal)));
+                            job.append(&txt[cut..], 0.0, f(pal.text));
+                            job.halign = egui::Align::Center;
+                            egui::WidgetText::LayoutJob(job)
+                        } else {
+                            egui::RichText::new(txt).font(vt(size)).color(color).into()
+                        };
+                        let mut r = ui.add(egui::Label::new(label).wrap().sense(egui::Sense::click()));
                         // its translation right under it, smaller (lit with it)
                         if let (Some(u), false) = (&under, only) {
                             let gap = ui.spacing().item_spacing.y;
@@ -264,6 +340,35 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                 });
                 ui.add_space(view_h * 0.5);
             });
+            // sing-along: 3, 2, 1 before the singing starts (and after a long break)
+            if sing && status.playing {
+                let next = lines.iter().enumerate().skip(active.map(|a| a + 1).unwrap_or(0)).find(|(_, l)| !l.1.trim().is_empty());
+                if let Some((n, (at, _))) = next {
+                    let prev = active.map(|a| lines[a].0);
+                    let quiet = match active {
+                        None => true,
+                        Some(a) => lines[a].1.trim().is_empty() || at - prev.unwrap_or(0.0) >= 8.0 && pos - prev.unwrap_or(0.0) > sung_for(&lines[a].1, at - prev.unwrap_or(0.0)) + 1.0,
+                    };
+                    let left = at - pos;
+                    if quiet && n < lines.len() && left > 0.0 && left <= 3.0 {
+                        let area = out.inner_rect;
+                        let bh = (size * 3.4).min(area.height() * 0.45);
+                        let k = bh / (size * 3.4);
+                        let c = Pos2::new(area.center().x, area.top() + 10.0 + bh / 2.0);
+                        let p = ui.painter();
+                        let r = egui::Rect::from_center_size(c, egui::vec2(size * 4.2 * k, bh));
+                        let size = size * k;
+                        p.rect_filled(r, 0.0, super::widgets::with_alpha(pal.bg2, 235));
+                        p.rect_stroke(r, 0.0, egui::Stroke::new(2.0_f32, pal.accent), egui::StrokeKind::Inside);
+                        p.text(c - egui::vec2(0.0, size * 0.35), egui::Align2::CENTER_CENTER, format!("{}", left.ceil() as u32), vt(size * 2.6), pal.accent);
+                        p.text(c + egui::vec2(0.0, size * 1.15), egui::Align2::CENTER_CENTER, "GET READY", px((size * 0.3).max(6.0)), pal.text);
+                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((left - left.floor()).max(0.02)));
+                    } else if quiet && left > 3.0 && left < 30.0 {
+                        // wake up for the countdown
+                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(left - 3.0));
+                    }
+                }
+            }
             let st = &mut app.lyrics;
             st.offset = out.state.offset.y;
             let first = st.line_y.is_empty();
@@ -299,4 +404,34 @@ fn tr_footer(ui: &mut Ui, pal: &super::theme::Pal, tr: Option<&crate::lang::Tran
 
 fn center(ui: &mut Ui, s: &str, pal: &super::theme::Pal) {
     ui.centered_and_justified(|ui| ui.label(egui::RichText::new(s).font(px(8.0)).color(pal.dim)));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sing_along_fills_word_by_word() {
+        let line = "Never gonna give you up";
+        let dur = sung_for(line, 6.0);
+        assert!(dur > 1.0 && dur < 3.0, "{dur}");
+        // not started, done, and always on a character boundary in between, moving forward
+        assert_eq!(sung_upto(line, -0.1, dur), 0);
+        assert_eq!(sung_upto(line, dur + 0.1, dur), line.len());
+        let mut last = 0;
+        for k in 0..=40 {
+            let at = sung_upto(line, dur * k as f64 / 40.0, dur);
+            assert!(at >= last && line.is_char_boundary(at));
+            last = at;
+        }
+        // half way through the time: about half way through the words
+        let mid = sung_upto(line, dur / 2.0, dur);
+        assert!((8..=16).contains(&mid), "{mid}");
+        // never runs past the next line
+        assert!(sung_for(line, 1.0) <= 0.8 + 1e-9);
+        // other alphabets
+        let jp = "君の名は 希望";
+        let at = sung_upto(jp, 0.5, 1.0);
+        assert!(jp.is_char_boundary(at) && at > 0 && at < jp.len());
+    }
 }

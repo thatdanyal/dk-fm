@@ -292,6 +292,8 @@ pub enum Share {
     Layout(NamedLayout),
     Settings(Box<SharedSettings>),
     Playlist(SharedPlaylist),
+    /// one of your THEATER versions
+    Theater(crate::store::TheaterPreset),
     /// your whole DK.FM (files only: too big for a code)
     Everything(Box<SharedAll>),
 }
@@ -303,6 +305,7 @@ impl Share {
             Share::Layout(_) => "layout",
             Share::Settings(_) => "settings",
             Share::Playlist(_) => "playlist",
+            Share::Theater(_) => "theater",
             Share::Everything(_) => "all",
         }
     }
@@ -312,6 +315,7 @@ impl Share {
             Share::Layout(l) => serde_json::to_value(l),
             Share::Settings(s) => serde_json::to_value(s),
             Share::Playlist(p) => serde_json::to_value(p),
+            Share::Theater(t) => serde_json::to_value(t),
             Share::Everything(a) => serde_json::to_value(a),
         }
         .unwrap_or(Value::Null)
@@ -391,6 +395,10 @@ fn parse(kind: &str, v: Value) -> Result<Share, String> {
             crate::ui::load_dock(&l.dock).ok_or(BAD)?;
             Ok(Share::Layout(NamedLayout { name: short(&l.name, 60).or_if_empty("Shared layout"), dock: l.dock }))
         }
+        "theater" => {
+            let t: crate::store::TheaterPreset = serde_json::from_value(v).map_err(|_| BAD)?;
+            Ok(Share::Theater(clean_theater(t)))
+        }
         "settings" => serde_json::from_value::<SharedSettings>(v).map(|s| Share::Settings(Box::new(s.sanitize()))).map_err(|_| BAD.into()),
         "playlist" => {
             let p: SharedPlaylist = serde_json::from_value(v).map_err(|_| BAD)?;
@@ -441,6 +449,23 @@ fn parse(kind: &str, v: Value) -> Result<Share, String> {
 // ------------------------------------------------------------------------------- validation
 
 /// Printable text, at most `max` characters.
+/// A friend's THEATER version, keeping only parts and settings DK.FM knows.
+fn clean_theater(t: crate::store::TheaterPreset) -> crate::store::TheaterPreset {
+    let mut seen = std::collections::HashSet::new();
+    let mut keep = |v: Vec<String>| -> Vec<String> { v.into_iter().filter(|k| crate::ui::nowplaying::PARTS.iter().any(|p| p.0 == k) && seen.insert(k.clone())).collect() };
+    let left = keep(t.left);
+    let right = keep(t.right);
+    crate::store::TheaterPreset {
+        name: short(&t.name, 20).to_uppercase().or_if_empty("SHARED"),
+        left,
+        right,
+        backdrop: if ["plain", "glow", "cover"].contains(&t.backdrop.as_str()) { t.backdrop } else { "plain".into() },
+        lyrics_size: if t.lyrics_size.is_finite() { t.lyrics_size.clamp(0.7, 2.6) } else { 1.35 },
+        auto_hide: t.auto_hide,
+        singalong: t.singalong,
+    }
+}
+
 fn short(s: &str, max: usize) -> String {
     s.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string()
 }
@@ -811,5 +836,25 @@ mod tests {
         let Share::Everything(back) = from_file_bytes(&bytes).unwrap() else { panic!() };
         assert_eq!((back.name.as_str(), back.song_count(), back.songs[0].title.as_str()), ("Dany", 4, "Digital Love"));
         assert!(back.songs[0].youtube.is_some());
+    }
+}
+#[cfg(test)]
+mod theater_tests {
+    use super::*;
+
+    #[test]
+    fn theater_codes_round_trip_and_stay_safe() {
+        let mut t = crate::store::d_theater()[2].clone();
+        t.name = "my party".into();
+        let back = decode(&encode(&Share::Theater(t.clone()))).unwrap();
+        let Share::Theater(b) = back else { panic!() };
+        assert_eq!(b.name, "MY PARTY");
+        assert_eq!((b.left.clone(), b.right.clone()), (t.left, t.right));
+        // unknown parts, repeats and silly values are dropped or fixed
+        let bad = serde_json::json!({ "name": "", "left": ["cover", "hack", "cover"], "right": ["lyrics"], "backdrop": "x", "lyricsSize": 99.0 });
+        let Share::Theater(c) = parse("theater", bad).unwrap() else { panic!() };
+        assert_eq!(c.left, vec!["cover"]);
+        assert_eq!(c.right, vec!["lyrics"]);
+        assert_eq!((c.backdrop.as_str(), c.lyrics_size, c.name.as_str()), ("plain", 2.6, "SHARED"));
     }
 }

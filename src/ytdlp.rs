@@ -1,5 +1,5 @@
 //! Download tools, fetched only the first time someone imports: yt-dlp (fast-starting folder
-//! build on Windows/macOS), ffmpeg, and QuickJS (2 MB JavaScript runtime yt-dlp needs for YouTube).
+//! build on Windows/macOS), ffmpeg (DK.FM's own small audio-only build), and QuickJS (2 MB JavaScript runtime yt-dlp needs for YouTube).
 //! yt-dlp is checked for updates daily so YouTube changes don't break downloads.
 use crate::net;
 use crate::store::data_dir;
@@ -52,10 +52,80 @@ fn yt_asset() -> &'static str {
         _ => "yt-dlp_linux",
     }
 }
+/// A full ffmpeg (about 80 MB): for computers the small one isn't built for.
 fn ffmpeg_url() -> String {
     let os = match std::env::consts::OS { "windows" => "win32", "macos" => "darwin", o => o };
     let arch = match std::env::consts::ARCH { "x86_64" => "x64", "aarch64" => "arm64", a => a };
     format!("https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-{os}-{arch}.gz")
+}
+
+/// DK.FM's own audio-only ffmpeg (about 4 MB instead of 80; scripts/build-ffmpeg.sh, published
+/// by .github/workflows/ffmpeg.yml), if there's one for this computer.
+const SMALL_FFMPEG: &str = "ffmpeg-audio-1";
+fn small_ffmpeg_url() -> Option<String> {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "windows-x64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("macos", "aarch64") => "darwin-arm64",
+        _ => return None,
+    };
+    Some(format!("https://github.com/thatdanyal/dk-fm/releases/download/{SMALL_FFMPEG}/ffmpeg-audio-{target}.gz"))
+}
+
+/// Says which ffmpeg is installed (the small one's name), so it's swapped in once.
+fn ffmpeg_stamp() -> PathBuf {
+    bin_dir().join("ffmpeg.version")
+}
+
+/// Downloads the small ffmpeg next to the old one and checks it runs; returns its path.
+fn fetch_small_ffmpeg() -> Result<PathBuf, String> {
+    let url = small_ffmpeg_url().ok_or("no small ffmpeg for this computer")?;
+    let new = bin_dir().join(format!("ffmpeg.new{EXE}"));
+    net::download(&url, &new, true)?;
+    make_exec(&new);
+    let ok = command(&new).arg("-version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
+        let _ = std::fs::remove_file(&new);
+        return Err("the small ffmpeg didn't start".into());
+    }
+    Ok(new)
+}
+
+/// ffmpeg for a new install: the small one, else the full one.
+fn install_ffmpeg() -> Result<(), String> {
+    match fetch_small_ffmpeg() {
+        Ok(new) => {
+            std::fs::rename(&new, ffmpeg_path()).map_err(|e| e.to_string())?;
+            let _ = std::fs::write(ffmpeg_stamp(), SMALL_FFMPEG);
+        }
+        Err(e) => {
+            eprintln!("small ffmpeg: {e}; getting the full one");
+            net::download(&ffmpeg_url(), &ffmpeg_path(), true)?;
+            make_exec(&ffmpeg_path());
+        }
+    }
+    Ok(())
+}
+
+/// An install with the old 80 MB ffmpeg gets the small one instead (once; if the old one is
+/// busy converting a song right now, next time).
+fn shrink_ffmpeg() {
+    if small_ffmpeg_url().is_none() || std::fs::read_to_string(ffmpeg_stamp()).map(|s| s.trim() == SMALL_FFMPEG).unwrap_or(false) {
+        return;
+    }
+    let Ok(new) = fetch_small_ffmpeg() else { return };
+    let old = bin_dir().join(format!("ffmpeg.old{EXE}"));
+    let _ = std::fs::remove_file(&old);
+    if std::fs::rename(ffmpeg_path(), &old).is_ok() {
+        if std::fs::rename(&new, ffmpeg_path()).is_ok() {
+            let _ = std::fs::write(ffmpeg_stamp(), SMALL_FFMPEG);
+            let _ = std::fs::remove_file(&old);
+        } else {
+            let _ = std::fs::rename(&old, ffmpeg_path());
+        }
+    }
+    let _ = std::fs::remove_file(&new);
 }
 fn qjs_url() -> String {
     let name = match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -133,8 +203,9 @@ pub fn ensure() -> Result<String, String> {
     let res = (|| {
         if !ffmpeg_path().exists() {
             set_status("installing", "", "");
-            net::download(&ffmpeg_url(), &ffmpeg_path(), true)?;
-            make_exec(&ffmpeg_path());
+            install_ffmpeg()?;
+        } else {
+            shrink_ffmpeg();
         }
         if !qjs_path().exists() {
             net::download(&qjs_url(), &qjs_path(), false)?;

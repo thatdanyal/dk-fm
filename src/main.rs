@@ -8,6 +8,7 @@ mod downloader;
 mod fastlink;
 #[cfg(windows)]
 mod install;
+mod lang;
 mod library;
 mod lyricsrc;
 mod net;

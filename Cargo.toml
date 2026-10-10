@@ -51,6 +51,7 @@ auto-launch = "0.5"
 raw-window-handle = "0.6"
 souvlaki = { version = "0.7", default-features = false, features = ["use_zbus"] }
 unicode-normalization = "0.1"
+sys-locale = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]

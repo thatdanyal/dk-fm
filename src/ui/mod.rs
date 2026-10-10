@@ -86,7 +86,7 @@ pub enum Modal {
     /// the once-only notice after an update
     WhatsNew,
     /// a new install's sound setup (after the welcome and any tour): quality, EQ, folder, X button
-    Setup { quality: String, eq: String, close: String, ask: bool },
+    Setup { quality: String, eq: String, close: String, ask: bool, lang: String },
 }
 
 #[derive(Clone)]
@@ -151,6 +151,8 @@ pub struct App {
     pub explore: explore::Explore,
     /// THEATER (the song big: cover, lyrics, controls)
     pub nowplaying: bool,
+    /// which version of THEATER, and its LAYOUT editor
+    pub theater: nowplaying::TheaterUi,
     /// the library view last shown (`browser.nav`)
     seen_nav: u64,
     /// songs being fetched / played just to listen before downloading
@@ -554,6 +556,7 @@ impl App {
             recs: Default::default(),
             explore: Default::default(),
             nowplaying: false,
+            theater: Default::default(),
             seen_nav: 0,
             previews: Default::default(),
             layout_undo: None,
@@ -966,8 +969,17 @@ impl App {
                     if room(ui, 300.0 + later) {
                         let r = tb_button(ui, &pal, "THEATER", self.nowplaying);
                         self.mark("theater", r.rect);
-                        if r.on_hover_text("THEATER: the cover, the lyrics and the controls, big (F11; Esc leaves)").clicked() {
-                            self.nowplaying = !self.nowplaying && !self.mini;
+                        // hovering lists your three versions; a click opens your default
+                        match nowplaying::hover_menu(self, ui, &r) {
+                            Some(Some(i)) => self.open_theater(Some(i)),
+                            Some(None) => {
+                                self.open_theater(None);
+                                self.theater.edit = true;
+                            }
+                            None => {}
+                        }
+                        if r.clicked() {
+                            if self.nowplaying { self.nowplaying = false } else { self.open_theater(None) }
                         }
                     }
                     let r = tb_button(ui, &pal, "PANELS", false);
@@ -1002,10 +1014,9 @@ impl App {
                         ui.set_min_width(180.0);
                         let s = self.settings.lock().clone();
                         for (k, name) in theme::all_themes(&s) {
-                            let sw = theme::theme_pal(&s, &k).accent;
                             let resp = ui.horizontal(|ui| {
                                 let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                                fill(ui.painter(), r, sw);
+                                theme::swatch(ui.painter(), r, &s, &k);
                                 ui.button(format!("{} {name}", if self.theme_key == k { "•" } else { " " }))
                             });
                             if resp.inner.clicked() {
@@ -1184,7 +1195,9 @@ impl App {
                 let on = !self.lib.private.load(Ordering::Relaxed);
                 self.set_private(on);
             }
-            "nowplaying" => self.nowplaying = !self.nowplaying && !self.mini,
+            "nowplaying" => {
+                if self.nowplaying { self.nowplaying = false } else { self.open_theater(None) }
+            }
             _ => {}
         }
     }
@@ -1303,12 +1316,19 @@ impl App {
             match std::env::var("DKFM_VIEW").unwrap_or_default().as_str() {
                 "stats" => self.browser.set_view(browser::View::Stats),
                 "home" => self.browser.set_view(browser::View::Home),
-                // the first "Made from your library" mix
+                // the first "Made for You" mix
                 "mix" => {
                     self.home.mixes = crate::discover::mixes(&self.lib.data.read(), &self.home.genres.lock(), crate::store::now_ms());
                     if let Some(m) = self.home.mixes.first() { self.browser.set_view(browser::View::Mix(m.id.clone())); }
                 }
-                "nowplaying" => self.nowplaying = true,
+                "nowplaying" => self.open_theater(None),
+                // nowplaying2 / nowplaying3: another version of THEATER; theaterlayout: its editor
+                "nowplaying2" => self.open_theater(Some(1)),
+                "nowplaying3" => self.open_theater(Some(2)),
+                "theaterlayout" => {
+                    self.open_theater(None);
+                    self.theater.edit = true;
+                }
                 // artist=<name>: that artist's page; artist: your top artist's
                 v if v.starts_with("artist") => {
                     let k = v.strip_prefix("artist=").map(|n| n.to_lowercase()).or_else(|| crate::discover::top_artists(&self.lib.data.read(), 1).first().map(|a| a.0.clone()));

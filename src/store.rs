@@ -92,6 +92,30 @@ fn d_all() -> String { "all".into() }
 fn d_daily() -> String { "daily".into() }
 fn d_balanced() -> String { "balanced".into() }
 fn d_played() -> String { "played".into() }
+fn d_under() -> String { "under".into() }
+pub fn d_theater() -> Vec<TheaterPreset> {
+    let p = |name: &str, left: &[&str], right: &[&str], backdrop: &str, lyrics_size: f32| TheaterPreset { name: name.into(), left: left.iter().map(|s| s.to_string()).collect(), right: right.iter().map(|s| s.to_string()).collect(), backdrop: backdrop.into(), lyrics_size, auto_hide: false };
+    vec![
+        p("CLASSIC", &["cover", "info", "seek", "controls"], &["lyrics"], "plain", 1.35),
+        p("KARAOKE", &["info", "lyrics", "seek", "controls"], &[], "glow", 1.8),
+        p("PARTY", &["cover", "info", "seek", "controls"], &["clock", "next", "visualizer"], "glow", 1.0),
+    ]
+}
+
+/// One of your THEATER versions: what's on screen, in two columns (an empty right column = one
+/// wide column), top to bottom.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct TheaterPreset {
+    pub name: String,
+    #[serde(default)] pub left: Vec<String>,
+    #[serde(default)] pub right: Vec<String>,
+    /// "plain" | "glow" (the cover's colours behind everything) | "cover" (the cover, dimmed)
+    #[serde(default)] pub backdrop: String,
+    #[serde(default = "d_one")] pub lyrics_size: f32,
+    /// buttons fade away when the mouse rests for a few seconds
+    #[serde(default)] pub auto_hide: bool,
+}
 /// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)
 fn d_hidden_tabs() -> Vec<String> { ["recent", "top"].map(String::from).to_vec() }
 pub fn d_columns() -> Vec<String> { ["num", "like", "title", "artist", "time"].map(String::from).to_vec() }
@@ -208,6 +232,14 @@ pub struct Settings {
     #[serde(default = "d_comfy")] pub density: String,
     /// lyrics text size on top of fitting the panel (Ctrl+scroll over the lyrics)
     #[serde(default = "d_one")] pub lyrics_zoom: f32,
+    /// your language ("" = the computer's): lyrics in other languages are translated into it
+    #[serde(default)] pub language: String,
+    /// lyrics in another language: "under" (its translation under each line), "only" (just the
+    /// translation) or "off"
+    #[serde(default = "d_under")] pub translate: String,
+    /// THEATER: your three versions of it, and the one THEATER (F11) opens
+    #[serde(default = "d_theater")] pub theater: Vec<TheaterPreset>,
+    #[serde(default)] pub theater_default: usize,
     /// album covers next to song titles in lists
     #[serde(default = "d_true")] pub list_covers: bool,
     #[serde(default)] pub custom_themes: Vec<CustomTheme>,
@@ -306,10 +338,20 @@ impl Settings {
         if s.eq.gains.len() != 10 {
             s.eq.gains = vec![0.0; 10];
         }
+        if s.theater.len() != 3 {
+            let d = d_theater();
+            s.theater.extend(d.into_iter().skip(s.theater.len()));
+            s.theater.truncate(3);
+        }
+        s.theater_default = s.theater_default.min(2);
         if s.eq.preset.is_empty() {
             s.eq.preset = "Flat".into();
         }
         s
+    }
+    /// Your language (the computer's until you pick one).
+    pub fn language(&self) -> String {
+        if self.language.is_empty() { crate::lang::system() } else { self.language.clone() }
     }
     pub fn save(&self) {
         save_json(&data_dir().join("settings.json"), self);

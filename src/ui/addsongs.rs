@@ -364,6 +364,38 @@ pub fn get_in(app: &mut App, t: &ITrack, target: Option<String>, name: Option<St
     app.toast(match name { Some(n) => format!("Downloading \"{}\" into \"{n}\"", t.title), None => format!("Downloading \"{}\" to your library", t.title) });
 }
 
+/// + GET (or its download progress) for one online song, in `br`. Asks where it goes.
+pub fn get_button(app: &mut App, ui: &mut Ui, br: Rect, t: &ITrack) {
+    let pal = app.pal;
+    let job = format!("track-{}", col_id(t));
+    let st = app.dl.jobs.lock().iter().find(|j| j.id == job).and_then(|j| j.tracks.first().map(|x| (x.status.clone(), x.progress)));
+    let (label, on) = match st {
+        Some((TStatus::Queued, _)) => ("QUEUED".to_string(), false),
+        Some((TStatus::Searching, _)) => ("STARTING".to_string(), false),
+        Some((TStatus::Downloading, p)) => (format!("{p:.0}%"), false),
+        Some((TStatus::Tagging | TStatus::Done, _)) => ("SAVING".to_string(), false),
+        Some((TStatus::Cancelled | TStatus::Skipped, _)) | None => ("+ GET".to_string(), true),
+        Some(_) => ("FAILED ↻".to_string(), true),
+    };
+    if !on {
+        ui.ctx().request_repaint_after(Duration::from_millis(400));
+    }
+    let resp = ui.interact(br, ui.id().with(("get", &t.source_key)), Sense::click());
+    let p = ui.painter();
+    fill(p, br, if on && resp.hovered() { pal.accent } else { pal.bg });
+    if on {
+        frame_rect(p, br, 2.0, pal.accent);
+    }
+    p.text(br.center(), Align2::CENTER_CENTER, label, px(6.0), if on && resp.hovered() { pal.ink } else if on { pal.accent2 } else { pal.dim });
+    if on && resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if on && resp.on_hover_text("Download it: you pick where it goes (library, Liked or a playlist)").clicked() {
+        let pos = ui.ctx().pointer_latest_pos().unwrap_or(br.left_bottom());
+        super::dest::open(app, t, pos, false);
+    }
+}
+
 /// Download job id for a result ("yt" + video id, or "sc" + SoundCloud id).
 fn col_id(t: &ITrack) -> String {
     t.source_key.replace(':', "")

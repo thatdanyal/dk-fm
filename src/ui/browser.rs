@@ -23,7 +23,7 @@ pub enum View {
     Artist(String),
     /// an artist's songs as a list (from their page)
     ArtistSongs(String),
-    /// a "Made from your library" mix on Home
+    /// a "Made for You" mix on Home
     Mix(String),
     Playlist(String),
     Stats,
@@ -975,11 +975,13 @@ pub fn playlist_menu_ui(app: &mut App, ui: &mut Ui, p: &crate::store::Playlist) 
 // ------------------------------------------------------------------------------- song lists
 
 /// `liked`: the Liked screen, where "date added" is when you liked the song (like Spotify).
-fn sort_ids(app: &App, ids: &mut Vec<String>, s: Option<(SortKey, bool)>, liked: bool) {
+/// `extra`: songs that aren't in the library (a mix's online songs).
+fn sort_ids(app: &App, ids: &mut Vec<String>, s: Option<(SortKey, bool)>, liked: bool, extra: Option<&super::home::MixList>) {
     let Some((k, asc)) = s else { return };
     let d = app.lib.data.read();
+    let blank = Track::default();
     let key = |id: &String| -> (String, f64) {
-        let t = &d.tracks[id];
+        let t = d.tracks.get(id).or_else(|| extra.and_then(|m| m.extra.get(id)).map(|e| &e.0)).unwrap_or(&blank);
         let st = d.stats.get(id).cloned().unwrap_or_default();
         match k {
             SortKey::Title => (t.title.to_lowercase(), 0.0),
@@ -1043,6 +1045,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     let view = app.browser.view.clone();
     let extra = extra_copies(app, gen);
     let downloaded = if view == View::Downloaded { downloaded_ids(app) } else { Default::default() };
+    // a mix: your songs and the new ones it adds, woven together
+    let mixl = match &view { View::Mix(k) => Some(super::home::mix_list(app, k)), _ => None };
     let cfg = {
         let d = app.lib.data.read();
         let all = || d.tracks.values().filter(|t| !extra.contains(&t.id));
@@ -1069,8 +1073,9 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     app.browser.set_view(View::Home);
                     return;
                 };
-                let ids: Vec<String> = m.ids.iter().filter(|id| d.tracks.contains_key(*id)).cloned().collect();
-                (ids, ListCfg { title: m.name.to_uppercase(), sub: format!("MADE FROM YOUR LIBRARY · {}", m.sub), cover: None, playlist: None, default_sort: None, back: Some(View::Home) })
+                let ml = mixl.as_ref().unwrap();
+                let finding = if ml.finding { " · FINDING NEW SONGS…" } else { "" };
+                (ml.ids.clone(), ListCfg { title: m.name.to_uppercase(), sub: format!("MADE FOR YOU · {}{finding}", m.sub), cover: None, playlist: None, default_sort: None, back: Some(View::Home) })
             }
             View::Playlist(pid) => {
                 let Some(p) = d.playlists.iter().find(|p| p.id == *pid).cloned() else {
@@ -1084,6 +1089,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
             _ => (Vec::new(), ListCfg { title: String::new(), sub: String::new(), cover: None, playlist: None, default_sort: None, back: None }),
         };
+        // (a mix's list changes when its new songs arrive)
+        let gen = gen.wrapping_add(mixl.as_ref().map(|m| (m.extra.len() as u64) << 40).unwrap_or(0));
         let key = (view.clone(), app.browser.search.clone(), app.browser.sort.or(cfg.default_sort), gen);
         if app.browser.list_key.as_ref() != Some(&key) {
             let toks: Vec<String> = app.browser.search.to_lowercase().split_whitespace().map(String::from).collect();
@@ -1093,13 +1100,13 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     if toks.is_empty() {
                         return true;
                     }
-                    let t = &d.tracks[id];
+                    let Some(t) = d.tracks.get(id).or_else(|| mixl.as_ref().and_then(|m| m.extra.get(id)).map(|e| &e.0)) else { return false };
                     let hay = format!("{} {} {} {}", t.title, t.artist, t.album, t.genre).to_lowercase();
                     toks.iter().all(|k| hay.contains(k))
                 })
                 .collect();
             drop(d);
-            sort_ids(app, &mut ids, key.2, key.0 == View::Liked);
+            sort_ids(app, &mut ids, key.2, key.0 == View::Liked, mixl.as_ref());
             app.browser.list = ids;
             app.browser.list_key = Some(key);
         }
@@ -1107,7 +1114,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     };
     let ids = app.browser.list.clone();
     let active_sort = app.browser.sort.or(cfg.default_sort);
-    let secs: f64 = ids.iter().filter_map(|id| app.lib.data.read().tracks.get(id).map(|t| t.duration)).sum();
+    let secs: f64 = ids.iter().filter_map(|id| app.lib.data.read().tracks.get(id).map(|t| t.duration).or_else(|| mixl.as_ref().and_then(|m| m.extra.get(id)).map(|e| e.0.duration))).sum();
 
     // ---- header
     egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
@@ -1286,9 +1293,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     let reorder = cfg.playlist.is_some() && active_sort.is_none() && app.browser.search.is_empty();
     // "Recommended" below a playlist's songs (fetched once it scrolls into view)
     let recs = cfg.playlist.as_ref().filter(|_| app.browser.search.is_empty() && app.settings.lock().recommend).cloned();
-    // a mix: the online songs it adds, below yours
-    let mix = match &view { View::Mix(k) if app.browser.search.is_empty() => Some(k.clone()), _ => None };
-    let extra = recs.as_ref().map(|p| super::recs::height(app, &p.id)).or(mix.as_ref().map(|k| super::home::mix_section_height(app, k))).unwrap_or(0.0);
+    let extra = recs.as_ref().map(|p| super::recs::height(app, &p.id)).unwrap_or(0.0);
     egui::ScrollArea::vertical().id_salt(("tracks", format!("{view:?}"))).auto_shrink([false; 2]).show_viewport(ui, |ui, vp| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let total = row_h * ids.len() as f32;
@@ -1301,11 +1306,14 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             ui.skip_ahead_auto_ids(first);
             for i in first..last {
                 let id = &ids[i];
-                let Some(t) = app.lib.track(id) else { continue };
+                // a mix's new song (not in your library): + GET at the right end
+                let online = mixl.as_ref().and_then(|m| m.extra.get(id)).cloned();
+                let Some(t) = online.as_ref().map(|o| o.0.clone()).or_else(|| app.lib.track(id)) else { continue };
                 let st = app.lib.stat(id);
-                let (r, resp) = ui.allocate_exact_size(Vec2::new(w, row_h), Sense::click_and_drag());
+                let (r, resp) = ui.allocate_exact_size(Vec2::new(w, row_h), if online.is_some() { Sense::click() } else { Sense::click_and_drag() });
+                let get_r = Rect::from_center_size(Pos2::new(r.right() - 52.0, r.center().y), Vec2::new(86.0, (row_h - 6.0).min(22.0)));
                 let sel = app.browser.selection.contains(id);
-                if resp.drag_started() {
+                if resp.drag_started() && online.is_none() {
                     let songs: Vec<String> = if sel { ids.iter().filter(|x| app.browser.selection.contains(*x)).cloned().collect() } else { vec![id.clone()] };
                     resp.dnd_set_drag_payload(DragSongs(songs));
                 }
@@ -1334,7 +1342,15 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 let cy = r.center().y;
                 for (c, cw) in &cols {
                     let right = c.right;
-                    let cr = Rect::from_min_max(Pos2::new(x, r.top()), Pos2::new(x + cw, r.bottom()));
+                    let mut cr = Rect::from_min_max(Pos2::new(x, r.top()), Pos2::new(x + cw, r.bottom()));
+                    if online.is_some() {
+                        // (columns under + GET make room for it)
+                        cr.max.x = cr.max.x.min(get_r.left() - 8.0);
+                        if cr.width() < 12.0 || c.id == "like" {
+                            x += cw + 8.0;
+                            continue;
+                        }
+                    }
                     let clip = p.with_clip_rect(cr);
                     let (txt, color): (String, Color32) = match c.id {
                         // hovering a row: ▶ here plays it with one click
@@ -1358,7 +1374,13 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                         let side = row_h - 8.0;
                         let tr = Rect::from_min_size(Pos2::new(cr.left(), cy - side / 2.0), Vec2::splat(side));
                         fill(&clip, tr, pal.bg);
-                        if let Some(cv) = t.thumb.as_ref().or(t.cover.as_ref()) {
+                        if let Some(o) = &online {
+                            if let Some(tex) = super::home::remote_tex(app, ui.ctx(), o.1.cover.as_ref()) {
+                                clip.image(tex, tr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                            } else {
+                                clip.text(tr.center(), Align2::CENTER_CENTER, "♫", vt(side * 0.6), pal.faint);
+                            }
+                        } else if let Some(cv) = t.thumb.as_ref().or(t.cover.as_ref()) {
                             if let Some(tex) = app.covers.get(ui.ctx(), app.lib.cover_path(cv), cv, 64) {
                                 clip.image(tex, tr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), if st.hidden { with_alpha(Color32::WHITE, 90) } else { Color32::WHITE });
                             }
@@ -1378,6 +1400,15 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                         act = Some(RowAct::Play(i));
                     }
                     x += cw + 8.0;
+                }
+                if let Some(o) = &online {
+                    // a new song: play it (double-click or ▶), + GET keeps it; no library menu
+                    super::addsongs::get_button(app, ui, get_r, &o.1);
+                    crate::fastlink::warm(&o.1); // so it starts right away
+                    if resp.double_clicked() {
+                        act = Some(RowAct::Play(i));
+                    }
+                    continue;
                 }
                 if resp.clicked() && act.is_none() {
                     let m = ui.input(|i| i.modifiers);
@@ -1427,12 +1458,6 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r), |ui| super::recs::show(app, ui, p));
             }
         }
-        if let Some(k) = &mix {
-            if vp.max.y > total && extra > 0.0 {
-                let r = Rect::from_min_size(Pos2::new(ui.max_rect().left(), top + total), Vec2::new(w, extra));
-                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r), |ui| super::home::mix_section(app, ui, k));
-            }
-        }
     });
     // what's being dragged follows the pointer
     if let (Some(d), Some(pos)) = (egui::DragAndDrop::payload::<DragSongs>(ui.ctx()), ui.ctx().pointer_hover_pos()) {
@@ -1453,6 +1478,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
         }
         Some(RowAct::Like(id)) => app.lib.toggle_like(&id),
+        Some(RowAct::Play(i)) if mixl.is_some() => super::home::play_mix_at(app, mixl.as_ref().unwrap(), ids.clone(), i),
         Some(RowAct::Play(i)) => {
             app.player.play_pick(ids.clone(), i, None);
             if let Some(p) = &cfg.playlist {
@@ -1489,7 +1515,10 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         }
         if enter {
             if let Some(i) = ids.iter().position(|x| app.browser.selection.contains(x)) {
-                app.player.play_pick(ids.clone(), i, None);
+                match &mixl {
+                    Some(m) => super::home::play_mix_at(app, m, ids.clone(), i),
+                    None => app.player.play_pick(ids.clone(), i, None),
+                }
             }
         }
         if del && view == View::Downloaded {

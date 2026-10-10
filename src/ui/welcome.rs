@@ -197,20 +197,30 @@ pub fn setup_modal(app: &App) -> Option<Modal> {
     }
     let quality = if s.download_format == "standard" { s.download_format.clone() } else { "high".into() };
     let eq = { let e = app.player.st.lock().eq.clone(); if e.enabled { e.preset } else { "Flat".into() } };
-    Some(Modal::Setup { quality, eq, close: s.close_mode().to_string(), ask: s.ask_folder })
+    Some(Modal::Setup { quality, eq, close: s.close_mode().to_string(), ask: s.ask_folder, lang: s.language() })
 }
 
 /// "SET UP YOUR SOUND": sound quality for every download, the EQ, where songs are saved and what
 /// the X button does. SAVE applies them; KEEP DEFAULTS changes nothing. Either way it's done.
-pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut eq: String, mut close: String, mut ask: bool) -> Option<Modal> {
+pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut eq: String, mut close: String, mut ask: bool, mut lang: String) -> Option<Modal> {
     let pal = app.pal;
     let (mut save, mut skip) = (false, false);
     let dir = app.settings.lock().download_dir.clone();
     let mut change_dir = false;
-    let open = window(pal, ctx, "SET UP YOUR SOUND", Vec2::new(560.0, 540.0), false, |ui| {
-        dim(ui, &pal, "Pick these once: they apply to everything you download from now on. You can change them any time in Settings.");
+    let open = window(pal, ctx, "SET UP DK.FM", Vec2::new(560.0, 600.0), false, |ui| {
+        dim(ui, &pal, "Pick these once. You can change them any time in Settings.");
         ui.add_space(10.0);
-        caption(ui, &pal, "1. SOUND QUALITY OF YOUR DOWNLOADS");
+        caption(ui, &pal, "1. YOUR LANGUAGE");
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("setup-lang").selected_text(crate::lang::name(&lang)).width(260.0).show_ui(ui, |ui| {
+                for (code, name) in crate::lang::LANGS {
+                    ui.selectable_value(&mut lang, code.to_string(), *name);
+                }
+            });
+        });
+        dim(ui, &pal, "Lyrics in other languages are translated into it, line by line.");
+        ui.add_space(10.0);
+        caption(ui, &pal, "2. SOUND QUALITY OF YOUR DOWNLOADS");
         ui.horizontal(|ui| {
             for (f, label) in [("standard", "STANDARD"), ("high", "HIGH (RECOMMENDED)")] {
                 if button(ui, &pal, label, quality == f, true).clicked() {
@@ -228,7 +238,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         }
         dim(ui, &pal, "Lossless (FLAC, ALAC, WAV) can't be downloaded: YouTube doesn't have it. Add your own lossless files any time and DK.FM plays them as they are.");
         ui.add_space(10.0);
-        caption(ui, &pal, "2. EQUALIZER");
+        caption(ui, &pal, "3. EQUALIZER");
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("setup-eq").selected_text(if eq == "Flat" { "Flat (off: songs as they were made)".to_string() } else { eq.clone() }).width(260.0).show_ui(ui, |ui| {
                 for (name, _) in super::eqpanel::PRESETS {
@@ -238,7 +248,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         });
         dim(ui, &pal, "Bass Boost for headphones that sound thin, Vocal for podcasts, Late Night for quiet listening. The EQ panel fine-tunes it.");
         ui.add_space(10.0);
-        caption(ui, &pal, "3. WHERE YOUR SONGS ARE SAVED");
+        caption(ui, &pal, "4. WHERE YOUR SONGS ARE SAVED");
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new(&dir).color(pal.text));
             if button(ui, &pal, "CHANGE", false, true).clicked() {
@@ -255,7 +265,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         dim(ui, &pal, if ask { "Before each download you pick the folder." } else { "A folder per playlist or album in there (you can still pick another one when you download)." });
         if !cfg!(target_os = "linux") {
             ui.add_space(10.0);
-            caption(ui, &pal, "4. THE X BUTTON");
+            caption(ui, &pal, "5. THE X BUTTON");
             ui.horizontal(|ui| {
                 for (m, label) in [("quit", "QUITS DK.FM"), ("playing", "KEEPS MUSIC PLAYING (TRAY)")] {
                     if button(ui, &pal, label, close == m, true).clicked() {
@@ -285,6 +295,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         app.edit_settings(|s| {
             s.download_format = quality.clone();
             s.ask_folder = ask;
+            s.language = lang.clone();
             if !cfg!(target_os = "linux") {
                 s.close_mode = close.clone();
             }
@@ -303,7 +314,7 @@ pub fn show_setup(app: &mut App, ctx: &egui::Context, mut quality: String, mut e
         app.edit_settings(|s| s.setup_pending = false);
         return None;
     }
-    Some(Modal::Setup { quality, eq, close, ask })
+    Some(Modal::Setup { quality, eq, close, ask, lang })
 }
 
 /// The tour steps this person was last offered (from before this was remembered: the first

@@ -88,7 +88,7 @@ fn tidy(app: &mut App) {
     }
 }
 
-fn id_of(t: &ITrack) -> String {
+pub fn id_of(t: &ITrack) -> String {
     let key: String = t.source_key.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
     format!("{PREVIEW}{key}")
 }
@@ -107,6 +107,29 @@ pub fn toggle(app: &mut App, t: &ITrack) {
     }
 }
 
+/// An online song as a song of DK.FM (no file yet: it's fetched when it's played).
+pub fn as_track(t: &ITrack) -> Track {
+    Track {
+        id: id_of(t),
+        title: t.title.clone(),
+        artist: t.artists.join(", "),
+        album: if t.album.is_empty() { "Online (not downloaded)".into() } else { t.album.clone() },
+        duration: t.duration_ms.map(|d| d as f64 / 1000.0).unwrap_or(0.0),
+        youtube_id: t.youtube_id.clone(),
+        ..Default::default()
+    }
+}
+
+/// A song's cover as a texture: its cover file, or for an online song not fetched yet (a mix's new
+/// songs in the queue) its cover from the web.
+pub fn cover_tex(app: &mut App, ctx: &egui::Context, t: &Track, size: u32) -> Option<egui::TextureId> {
+    if let Some(c) = t.thumb.as_ref().filter(|_| size <= 64).or(t.cover.as_ref()).or(t.thumb.as_ref()) {
+        return app.covers.get(ctx, app.lib.cover_path(c), c, size);
+    }
+    let url = app.previews.items.get(&t.id).and_then(|i| i.cover.clone())?;
+    super::home::remote_tex(app, ctx, Some(&url))
+}
+
 /// Online songs for the queue (a mix's): each is fetched when its turn comes or while the song
 /// before it plays, and deleted once played unless you KEEP it. Returns their queue ids.
 pub fn queue_online(app: &mut App, songs: &[ITrack]) -> Vec<String> {
@@ -114,15 +137,7 @@ pub fn queue_online(app: &mut App, songs: &[ITrack]) -> Vec<String> {
     for t in songs {
         let id = id_of(t);
         app.previews.items.insert(id.clone(), t.clone());
-        app.lib.previews.write().entry(id.clone()).or_insert_with(|| Track {
-            id: id.clone(),
-            title: t.title.clone(),
-            artist: t.artists.join(", "),
-            album: "Online (not downloaded)".into(),
-            duration: t.duration_ms.map(|d| d as f64 / 1000.0).unwrap_or(0.0),
-            youtube_id: t.youtube_id.clone(),
-            ..Default::default()
-        });
+        app.lib.previews.write().entry(id.clone()).or_insert_with(|| as_track(t));
         crate::fastlink::warm(t);
         ids.push(id);
     }

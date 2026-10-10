@@ -311,6 +311,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     frame_rect(ui.painter(), ic, 1.0, pal.line_hi);
                     let tex = it.cover.as_ref().and_then(|c| app.covers.get(ctx, app.lib.cover_path(c), c, 64));
                     match tex {
+                        _ if matches!(&it.act, Act::Theme(k) if k == super::covertheme::KEY) => super::covertheme::rainbow(ui.painter(), ic.shrink(7.0)),
                         Some(t) => {
                             ui.painter().image(t, ic, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                         }

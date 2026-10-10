@@ -21,6 +21,8 @@ pub struct LyricsState {
     offset: f32,
     song: String,
     last_pos: f64,
+    /// translations: (song, language) -> None while it's being made
+    tr: Arc<Mutex<HashMap<(String, String), Option<Result<crate::lang::Translation, String>>>>>,
 }
 
 /// How long before a line starts the text glides to it, so it's centred right as it's sung.
@@ -37,6 +39,10 @@ impl LyricsState {
         let mut c = self.cache.lock();
         if c.len() > 8 {
             c.retain(|_, l| matches!(l.0, Lyr::Loading));
+        }
+        let mut t = self.tr.lock();
+        if t.len() > 8 {
+            t.retain(|_, v| v.is_none());
         }
     }
 }
@@ -88,6 +94,43 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
             (Lyr::Loading, Source::Lrclib)
         }
     };
+    // lyrics in another language: translated into yours (once per song, in the background)
+    let (mode, to) = { let s = app.settings.lock(); (s.translate.clone(), s.language()) };
+    let tr: Option<crate::lang::Translation> = match (&lyr, mode.as_str()) {
+        (_, "off") => None,
+        (Lyr::Synced(_) | Lyr::Plain(_), _) => {
+            let key = (t.id.clone(), to.clone());
+            let have = app.lyrics.tr.lock().get(&key).cloned();
+            match have {
+                Some(Some(Ok(tr))) if !tr.is_empty() => Some(tr),
+                Some(_) => None,
+                None => {
+                    app.lyrics.tr.lock().insert(key.clone(), None);
+                    let lines: Vec<String> = match &lyr {
+                        Lyr::Synced(v) => v.iter().map(|l| l.1.clone()).collect(),
+                        Lyr::Plain(s) => s.lines().map(String::from).collect(),
+                        _ => Vec::new(),
+                    };
+                    let (slot, ctx) = (app.lyrics.tr.clone(), ui.ctx().clone());
+                    std::thread::Builder::new()
+                        .name("translate".into())
+                        .spawn(move || {
+                            let r = crate::lang::translate(&key.0, &lines, &key.1);
+                            if let Ok(t) = &r {
+                                super::cjk::ensure(&ctx, &t.lines.iter().flatten().cloned().collect::<String>());
+                            }
+                            slot.lock().insert(key, Some(r));
+                            ctx.request_repaint();
+                        })
+                        .ok();
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    let only = mode == "only";
+    let mut cycle = false;
     let mut retry = false;
     match lyr {
         Lyr::Loading => center(ui, "SEARCHING…", &pal),
@@ -103,9 +146,31 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
         Lyr::Plain(s) => {
             egui::ScrollArea::vertical().auto_shrink([false; 2]).id_salt("lyr").show(ui, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                    ui.label(egui::RichText::new(s).font(vt(19.0 * scale)).color(pal.text));
+                    match &tr {
+                        Some(tr) => {
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            for (i, line) in s.lines().enumerate() {
+                                let under = tr.lines.get(i).cloned().flatten();
+                                match (&under, only) {
+                                    (Some(u), true) => {
+                                        ui.label(egui::RichText::new(u).font(vt(19.0 * scale)).color(pal.text));
+                                    }
+                                    _ => {
+                                        ui.label(egui::RichText::new(line).font(vt(19.0 * scale)).color(pal.text));
+                                        if let Some(u) = &under {
+                                            ui.label(egui::RichText::new(u).font(vt(16.0 * scale)).color(pal.accent2));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            ui.label(egui::RichText::new(s).font(vt(19.0 * scale)).color(pal.text));
+                        }
+                    }
                     ui.add_space(10.0);
                     ui.label(egui::RichText::new(source.label()).font(px(5.0)).color(pal.faint));
+                    cycle = tr_footer(ui, &pal, tr.as_ref(), only);
                 });
             });
         }
@@ -171,8 +236,20 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                     ui.spacing_mut().item_spacing.y = 8.0 * scale;
                     for (i, (lt, text)) in lines.iter().enumerate() {
                         let color = if Some(i) == active { pal.accent } else { pal.dim };
-                        let txt = if text.is_empty() { "♪" } else { text.as_str() };
-                        let r = ui.add(egui::Label::new(egui::RichText::new(txt).font(vt(size)).color(color)).wrap().sense(egui::Sense::click()));
+                        let under = tr.as_ref().and_then(|t| t.lines.get(i).cloned().flatten());
+                        let txt = match (&under, only) {
+                            (Some(u), true) => u.as_str(),
+                            _ if text.is_empty() => "♪",
+                            _ => text.as_str(),
+                        };
+                        let mut r = ui.add(egui::Label::new(egui::RichText::new(txt).font(vt(size)).color(color)).wrap().sense(egui::Sense::click()));
+                        // its translation right under it, smaller (lit with it)
+                        if let (Some(u), false) = (&under, only) {
+                            let gap = ui.spacing().item_spacing.y;
+                            ui.add_space(-gap + 1.0);
+                            let c = if Some(i) == active { pal.accent2 } else { pal.faint };
+                            r = r.union(ui.add(egui::Label::new(egui::RichText::new(u).font(vt(size * 0.78)).color(c)).wrap().sense(egui::Sense::click())));
+                        }
                         ys.push(r.rect.center().y - top);
                         if r.clicked() {
                             app.player.seek(*lt);
@@ -183,6 +260,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
                     }
                     ui.add_space(16.0);
                     ui.label(egui::RichText::new(source.label()).font(px(5.0)).color(pal.faint));
+                    cycle = tr_footer(ui, &pal, tr.as_ref(), only);
                 });
                 ui.add_space(view_h * 0.5);
             });
@@ -197,10 +275,26 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32) {
             }
         }
     }
+    if cycle {
+        app.edit_settings(|s| s.translate = if s.translate == "only" { "under".into() } else { "only".into() });
+    }
     if retry {
         crate::lyricsrc::forget(&t.id);
         app.lyrics.cache.lock().remove(&t.id);
     }
+}
+
+/// "TRANSLATED FROM SPANISH · TRANSLATION ONLY / SHOW THE ORIGINAL TOO" under translated lyrics.
+/// True when clicked (switches between the two).
+fn tr_footer(ui: &mut Ui, pal: &super::theme::Pal, tr: Option<&crate::lang::Translation>, only: bool) -> bool {
+    let Some(tr) = tr else { return false };
+    ui.add_space(4.0);
+    let label = format!("TRANSLATED FROM {} · {}", crate::lang::short_name(&tr.from), if only { "SHOW THE ORIGINAL TOO" } else { "TRANSLATION ONLY" });
+    let r = ui.add(egui::Label::new(egui::RichText::new(label).font(px(5.0)).color(pal.accent2)).sense(egui::Sense::click()));
+    if r.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    r.on_hover_text("Lyrics in another language are translated into yours (Settings > Language)").clicked()
 }
 
 fn center(ui: &mut Ui, s: &str, pal: &super::theme::Pal) {

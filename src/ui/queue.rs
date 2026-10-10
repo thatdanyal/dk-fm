@@ -64,10 +64,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             // cover: hovering shows a play button, one click plays the song
             let thumb = Rect::from_min_size(r.min + Vec2::new(8.0, 6.0), Vec2::splat(30.0));
             fill(p, thumb, pal.bg);
-            if let Some(c) = t.thumb.clone().or(t.cover.clone()) {
-                if let Some(tex) = app.covers.get(ui.ctx(), app.lib.cover_path(&c), &c, 64) {
-                    ui.painter().image(tex, thumb, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::from_white_alpha(alpha));
-                }
+            if let Some(tex) = super::preview::cover_tex(app, ui.ctx(), &t, 64) {
+                ui.painter().image(tex, thumb, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::from_white_alpha(alpha));
             }
             frame_rect(ui.painter(), thumb, 1.0, pal.line_hi);
             if hovered && dragging.is_none() {

@@ -63,7 +63,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 app.set_private(!private);
             }
             if icon(ui, &pal, "🗖", false).on_hover_text("THEATER: the song big, with its lyrics (F11)").clicked() {
-                app.nowplaying = true;
+                app.open_theater(None);
             }
             sleep_button(app, ui);
         });
@@ -156,7 +156,7 @@ pub(super) fn repeat_btn(ui: &mut Ui, pal: &super::theme::Pal, size: Vec2, mode:
 }
 
 /// Mute button + volume slider + percentage, leaving `reserve` px for what follows.
-fn volume(app: &mut App, ui: &mut Ui, reserve: f32) {
+pub(super) fn volume(app: &mut App, ui: &mut Ui, reserve: f32) {
     let pal = app.pal;
     let (muted, mut vol) = { let s = app.player.st.lock(); (s.muted, s.opts.volume) };
     if icon(ui, &pal, if muted || vol == 0.0 { "🔇" } else { "🔊" }, muted).on_hover_text(if muted { "Unmute" } else { "Mute" }).clicked() {
@@ -295,7 +295,7 @@ pub fn show_mini(app: &mut App, ui: &mut Ui) {
 fn cover(app: &mut App, ui: &mut Ui, r: Rect, t: Option<&crate::store::Track>, size: u32) {
     let pal = app.pal;
     fill(ui.painter(), r, pal.bg);
-    let tex = t.and_then(|t| t.cover.clone()).and_then(|c| app.covers.get(ui.ctx(), app.lib.cover_path(&c), &c, size));
+    let tex = t.and_then(|t| super::preview::cover_tex(app, ui.ctx(), t, size));
     match tex {
         Some(id) => {
             ui.painter().image(id, r.shrink(2.0), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);

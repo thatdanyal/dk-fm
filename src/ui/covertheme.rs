@@ -1,7 +1,9 @@
 //! THEME > Album Cover: Red Retro coloured by the song playing. The accents take the cover's
 //! main colours, kept to a brightness and strength that always reads well (a muddy or neon cover
-//! can't make DK.FM ugly); backgrounds and text only take a tint of it. Grey and black-and-white
-//! covers leave Red Retro as it is. Colours glide from one song to the next.
+//! can't make DK.FM ugly); backgrounds and text only take a tint of it. Black-and-white and grey
+//! covers turn DK.FM monochrome: white and light grey for a white cover, black and dark grey for a
+//! dark one, with a hint of whatever little colour the cover has. Colours glide from one song to
+//! the next.
 use super::theme::{self, Pal};
 use super::App;
 use eframe::egui::{self, Color32};
@@ -21,15 +23,23 @@ pub fn strength(key: &str) -> f32 {
 /// A cover's main colour and, if it has one, a second clearly different one.
 pub type Colors = (Color32, Option<Color32>);
 
+/// What a cover looks like, for the theme.
+#[derive(Clone, Copy, Debug)]
+pub enum Look {
+    Color(Colors),
+    /// black and white / grey: how light it is overall (0..1) and its faint colour, if any
+    Mono(f32, Option<Color32>),
+}
+
 /// Album Cover theme state, kept on the App.
 #[derive(Default)]
 pub struct State {
     /// what the palette was last made for: (cover file, strength)
     applied: Option<(Option<String>, String)>,
-    /// colours per cover file (None: a grey cover)
-    cache: HashMap<String, Option<Colors>>,
-    /// colours worked out in the background: (cover file, colours)
-    pending: Arc<Mutex<Option<(String, Option<Colors>)>>>,
+    /// how each cover file looks (None: it couldn't be read)
+    cache: HashMap<String, Option<Look>>,
+    /// worked out in the background: (cover file, look)
+    pending: Arc<Mutex<Option<(String, Option<Look>)>>>,
     loading: Option<String>,
     /// the glide between two palettes: (from, to, started at)
     glide: Option<(Pal, Pal, f64)>,
@@ -65,7 +75,8 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
         let target = match &cover {
             None => Some(base),
             Some(c) => match app.album.cache.get(c) {
-                Some(Some(cols)) => Some(tint(&base, *cols, strength(&strength_key))),
+                Some(Some(Look::Color(cols))) => Some(tint(&base, *cols, strength(&strength_key))),
+                Some(Some(Look::Mono(light, hint))) => Some(mono(*light, *hint, strength(&strength_key))),
                 Some(None) => Some(base),
                 None => {
                     // work the colours out in the background; keep the current ones meanwhile
@@ -73,7 +84,7 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
                         app.album.loading = Some(c.clone());
                         let (path, slot, file, ctx) = (app.lib.cover_path(c), app.album.pending.clone(), c.clone(), ctx.clone());
                         std::thread::spawn(move || {
-                            let cols = image::open(&path).ok().and_then(|im| cover_colors(&im.thumbnail(48, 48).to_rgb8()));
+                            let cols = image::open(&path).ok().map(|im| cover_look(&im.thumbnail(48, 48).to_rgb8()));
                             *slot.lock() = Some((file, cols));
                             ctx.request_repaint();
                         });
@@ -145,6 +156,94 @@ pub fn cover_colors(img: &image::RgbImage) -> Option<Colors> {
     };
     let second = (0..BINS).filter(|b| apart(*b)).max_by(|a, b| near(*a).total_cmp(&near(*b))).filter(|b| near(*b) >= near(first) * 0.25);
     Some((avg(first), second.map(avg)))
+}
+
+/// A cover's look: its colours, or for a black-and-white / grey one how light it is and the most
+/// common of the little colour it has.
+pub fn cover_look(img: &image::RgbImage) -> Look {
+    if let Some(c) = cover_colors(img) {
+        return Look::Color(c);
+    }
+    let n = (img.width() * img.height()).max(1) as f32;
+    let light = img.pixels().map(|p| (0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32) / 255.0).sum::<f32>() / n;
+    // its faint colour: the most common hue among pixels with any colour at all
+    const BINS: usize = 12;
+    let mut weight = [0f32; BINS];
+    let mut sum = [[0f32; 3]; BINS];
+    for p in img.pixels() {
+        let (h, s, l) = hsl(Color32::from_rgb(p[0], p[1], p[2]));
+        if s < 0.12 || !(0.08..=0.95).contains(&l) {
+            continue;
+        }
+        let b = ((h / 360.0 * BINS as f32) as usize).min(BINS - 1);
+        weight[b] += s;
+        for (k, v) in sum[b].iter_mut().zip([p[0], p[1], p[2]]) {
+            *k += s * v as f32;
+        }
+    }
+    let best = (0..BINS).max_by(|a, b| weight[*a].total_cmp(&weight[*b])).filter(|b| weight[*b] / n >= 0.004);
+    let hint = best.map(|b| Color32::from_rgb((sum[b][0] / weight[b]) as u8, (sum[b][1] / weight[b]) as u8, (sum[b][2] / weight[b]) as u8));
+    Look::Mono(light, hint)
+}
+
+/// Monochrome for a black-and-white cover: white and light greys for a white cover (`light` near
+/// 1), black and dark greys for a dark one, with a hint of `hint` (`s` = 0..1 how much).
+pub fn mono(light: f32, hint: Option<Color32>, s: f32) -> Pal {
+    let g = |v: f32| {
+        let v = v.round().clamp(0.0, 255.0) as u8;
+        Color32::from_rgb(v, v, v)
+    };
+    let mut p = theme::palette("mono", None);
+    if light >= 0.6 {
+        // white side: the whiter the cover, the whiter DK.FM
+        let w = ((light - 0.6) / 0.3).clamp(0.0, 1.0);
+        let at = |a: f32, b: f32| g(lerp(a, b, w));
+        (p.bg, p.bg2, p.panel, p.panel_hi) = (at(204.0, 246.0), at(192.0, 234.0), at(214.0, 252.0), at(196.0, 238.0));
+        (p.line, p.line_hi, p.faint) = (at(160.0, 204.0), at(108.0, 140.0), at(150.0, 182.0));
+        (p.text, p.dim, p.accent, p.accent2) = (g(18.0), at(78.0, 96.0), g(22.0), g(96.0));
+        (p.ink, p.lcd_bg, p.lcd, p.shadow) = (g(250.0), g(24.0), g(240.0), at(150.0, 186.0));
+        p.sel = Color32::from_rgba_unmultiplied(0, 0, 0, 30);
+        p.dark = false;
+    } else {
+        // dark side: black for a black cover, charcoal greys for a greyer one
+        let k = ((light - 0.08) / 0.5).clamp(0.0, 1.0);
+        let at = |a: f32, b: f32| g(lerp(a, b, k));
+        (p.bg, p.bg2, p.panel, p.panel_hi) = (at(5.0, 26.0), at(9.0, 32.0), at(13.0, 38.0), at(22.0, 50.0));
+        (p.line, p.line_hi, p.faint) = (at(40.0, 72.0), at(80.0, 112.0), at(56.0, 86.0));
+        (p.text, p.dim, p.accent, p.accent2) = (g(236.0), at(136.0, 152.0), g(242.0), g(158.0));
+        (p.ink, p.lcd_bg, p.lcd, p.shadow) = (g(0.0), at(14.0, 30.0), g(245.0), Color32::BLACK);
+        p.sel = Color32::from_rgba_unmultiplied(255, 255, 255, 26);
+        p.dark = true;
+    }
+    if let Some(h) = hint {
+        // the cover's bit of colour: the second accent, and a touch on the main one and the borders
+        let (hue, sat, _) = hsl(h);
+        let c = from_hsl(hue, sat.clamp(0.5, 0.85), if p.dark { 0.62 } else { 0.38 });
+        let s = s.clamp(0.0, 1.0);
+        let mix = |a: Color32, t: f32| lerp_pal_color(a, c, t);
+        p.accent2 = mix(p.accent2, 0.55 + 0.45 * s);
+        p.accent = mix(p.accent, 0.12 + 0.2 * s);
+        p.line_hi = mix(p.line_hi, 0.25 * s);
+        p.lcd = mix(p.lcd, 0.2 * s);
+        p.sel = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 40);
+    }
+    p
+}
+
+fn lerp_pal_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let m = |u: u8, v: u8| lerp(u as f32, v as f32, t).round() as u8;
+    Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// The Album Cover theme's swatch: a rainbow (it takes any cover's colours).
+pub fn rainbow(p: &egui::Painter, r: egui::Rect) {
+    const N: usize = 6;
+    let w = r.width() / N as f32;
+    for i in 0..N {
+        let x = r.left() + i as f32 * w;
+        let c = from_hsl(i as f32 * 360.0 / N as f32, 0.85, 0.58);
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, r.top()), egui::pos2(x + w + 0.5, r.bottom())), 0.0, c);
+    }
 }
 
 /// `base` coloured by a cover's colours, `s` = 0..1 how much.
@@ -252,8 +351,28 @@ mod tests {
         assert!(c1.b() > 150 && c1.r() < 80, "{c1:?}");
         let c2 = c2.unwrap();
         assert!(c2.r() > 200 && c2.b() < 80, "{c2:?}");
-        // black and white / grey: no colours (Red Retro stays)
+        // black and white / grey: no colours, it's monochrome
         assert!(cover_colors(&img(|x, _| if x % 2 == 0 { [10, 10, 10] } else { [200, 200, 200] })).is_none());
+    }
+
+    #[test]
+    fn black_and_white_covers_go_monochrome() {
+        // a white cover with a little red: light, white-ish DK.FM with a red hint
+        let white = cover_look(&img(|x, y| if x < 4 && y < 4 { [200, 30, 30] } else { [240, 240, 240] }));
+        let Look::Mono(l, Some(h)) = white else { panic!("{white:?}") };
+        assert!(l > 0.85 && h.r() > 150 && h.g() < 80, "{l} {h:?}");
+        let p = mono(l, Some(h), 0.65);
+        assert!(!p.dark && hsl(p.bg).2 > 0.9 && hsl(p.text).2 < 0.15);
+        let (hue, sat, _) = hsl(p.accent2);
+        assert!(sat > 0.4 && !(30.0..330.0).contains(&hue), "{:?}", p.accent2);
+        // a black cover: black and dark grey, no colour, light text
+        let black = cover_look(&img(|x, _| if x % 7 == 0 { [70, 70, 70] } else { [8, 8, 8] }));
+        let Look::Mono(l, None) = black else { panic!("{black:?}") };
+        let p = mono(l, None, 0.65);
+        assert!(p.dark && hsl(p.bg).2 < 0.04 && hsl(p.text).2 > 0.85 && hsl(p.accent).1 < 0.05);
+        // a mid-grey one is greyer than the black one
+        let q = mono(0.45, None, 0.65);
+        assert!(q.dark && hsl(q.bg).2 > hsl(p.bg).2);
     }
 
     #[test]

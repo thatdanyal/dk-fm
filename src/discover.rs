@@ -1,4 +1,4 @@
-//! Discovery without a server of our own: "Made from your library" mixes (built locally from your
+//! Discovery without a server of our own: "Made for You" mixes (built locally from your
 //! plays, playlists and genres) and new releases from your top artists (YouTube Music, checked at
 //! most once a day per artist, cached in releases.json).
 use crate::library::{main_artist, ta_key};
@@ -72,7 +72,7 @@ pub fn weave(a: &[&String], b: &[&String]) -> Vec<String> {
 
 const MIN_MIX: usize = 8;
 
-/// "Made from your library": a mix per top artist (their most played songs woven with artists that
+/// "Made for You": a mix per top artist (their most played songs woven with artists that
 /// share your playlists or their genre), per big genre, and forgotten favourites. Hidden songs are
 /// left out. Deterministic for the same library.
 /// Most played first (then by id, so it's stable).

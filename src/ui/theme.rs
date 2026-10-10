@@ -129,6 +129,15 @@ pub fn all_themes(s: &Settings) -> Vec<(String, String)> {
     THEMES.iter().map(|(k, n)| (k.to_string(), n.to_string())).chain(s.custom_themes.iter().map(|c| (format!("{CUSTOM}{}", c.name), c.name.clone()))).collect()
 }
 
+/// A theme's colour square in pickers (Album Cover's is a rainbow).
+pub fn swatch(p: &egui::Painter, r: egui::Rect, s: &Settings, key: &str) {
+    if key == super::covertheme::KEY {
+        super::covertheme::rainbow(p, r);
+    } else {
+        p.rect_filled(r, 0.0, theme_pal(s, key).accent);
+    }
+}
+
 pub fn theme_pal(s: &Settings, key: &str) -> Pal {
     // Album Cover changes with every song: shown with a sample cover's colours
     if key == super::covertheme::KEY {

@@ -12,6 +12,7 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, PartialEq)]
 pub enum SetTab {
     Look,
+    Language,
     Layouts,
     Lists,
     Sidebar,
@@ -28,8 +29,9 @@ pub enum SetTab {
     About,
 }
 
-const TABS: [(SetTab, &str); 15] = [
+const TABS: [(SetTab, &str); 16] = [
     (SetTab::Look, "Look"),
+    (SetTab::Language, "Language"),
     (SetTab::Layouts, "Layouts"),
     (SetTab::Lists, "Lists"),
     (SetTab::Sidebar, "Tabs & sidebar"),
@@ -177,8 +179,8 @@ pub fn show_modal(app: &mut App, ctx: &egui::Context) {
             }
             false
         }
-        Modal::Setup { quality, eq, close, ask } => {
-            app.modal = super::welcome::show_setup(app, ctx, quality, eq, close, ask);
+        Modal::Setup { quality, eq, close, ask, lang } => {
+            app.modal = super::welcome::show_setup(app, ctx, quality, eq, close, ask, lang);
             false
         }
         Modal::Update => {
@@ -287,6 +289,8 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Look, "Theme", "colors colours dark light red retro skin"),
     (SetTab::Look, "Album Cover theme: colours from the song playing", "adaptive artwork cover match dynamic influence"),
     (SetTab::Look, "Accent color", "colour highlight"),
+    (SetTab::Language, "Your language", "english spanish translate translation locale"),
+    (SetTab::Language, "Translate lyrics in other languages", "translation foreign meaning understand"),
     (SetTab::Look, "Font, text size and zoom", "pixel letters bigger smaller scale"),
     (SetTab::Look, "Song lists: compact or comfortable", "density rows spacing"),
     (SetTab::Look, "Album covers next to song titles", "art pictures"),
@@ -409,6 +413,7 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
                 SetTab::Downloads => downloads(app, ui),
                 SetTab::Spotify => spotify(app, ui),
                 SetTab::Playback => playback(app, ui),
+                SetTab::Language => language(app, ui),
                 SetTab::Keys => keys(app, ui),
                 SetTab::Backup => backups(app, ui),
                 SetTab::System => system_tab(app, ui),
@@ -479,7 +484,13 @@ fn look(app: &mut App, ui: &mut Ui) {
             fill(ui.painter(), r, tp.bg);
             for (i, c) in [tp.accent, tp.accent2, tp.text].iter().enumerate() {
                 let h = 14.0 + i as f32 * 10.0;
-                fill(ui.painter(), Rect::from_min_size(egui::pos2(r.left() + 8.0 + i as f32 * 38.0, r.top() + 50.0 - h), Vec2::new(34.0, h)), *c);
+                let bar = Rect::from_min_size(egui::pos2(r.left() + 8.0 + i as f32 * 38.0, r.top() + 50.0 - h), Vec2::new(34.0, h));
+                // Album Cover takes any cover's colours: a rainbow
+                if k == super::covertheme::KEY {
+                    super::covertheme::rainbow(ui.painter(), bar);
+                } else {
+                    fill(ui.painter(), bar, *c);
+                }
             }
             fill(ui.painter(), Rect::from_min_max(egui::pos2(r.left(), r.bottom() - 26.0), r.max), pal.panel);
             ui.painter().with_clip_rect(r).text(egui::pos2(r.left() + 8.0, r.bottom() - 13.0), Align2::LEFT_CENTER, &name, vt(17.0), pal.text);
@@ -502,7 +513,7 @@ fn look(app: &mut App, ui: &mut Ui) {
                 app.edit_settings(|s| s.cover_strength = v);
             }
         });
-        dim(ui, &pal, "DK.FM takes its colours from the cover of the song playing, toned down so they always look good: accents follow the cover, backgrounds and text only take a tint. Grey and black-and-white covers keep Red Retro.");
+        dim(ui, &pal, "DK.FM takes its colours from the cover of the song playing, toned down so they always look good: accents follow the cover, backgrounds and text only take a tint. Black-and-white covers make DK.FM monochrome (whiter for a white cover, blacker for a dark one) with a hint of the cover's bit of colour.");
     }
     ui.add_space(4.0);
     if button(ui, &pal, "SHARE CURRENT THEME…", false, true).on_hover_text("Copy a code for this theme (with your accent colour) to send to a friend").clicked() {
@@ -1143,7 +1154,7 @@ fn discover(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let s = app.settings.lock().clone();
     caption(ui, &pal, "HOME");
-    dim(ui, &pal, "Home (top of the sidebar) shows what you played lately, mixes made from your library right on this PC, your top songs this month and new releases. Make it your start screen in Lists > When DK.FM starts.");
+    dim(ui, &pal, "Home (top of the sidebar) shows what you played lately, mixes made for you (your songs with new ones you don't have yet), your top songs this month and new releases. Make it your start screen in Lists > When DK.FM starts.");
     let mut nr = s.new_releases;
     if switch(ui, &pal, &mut nr, "NEW RELEASES FROM YOUR ARTISTS") {
         app.edit_settings(|s| s.new_releases = nr);
@@ -1463,6 +1474,39 @@ fn spotify(app: &mut App, ui: &mut Ui) {
     ui.add_space(4.0);
     ui.label("3. On your new app's page, copy the Client ID into the box above, then click CONNECT SPOTIFY.");
     dim(ui, &pal, "The API costs nothing, but Spotify requires the app's owner to have Premium, and allows up to 5 accounts per app (add others under User Management).");
+}
+
+fn language(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let s = app.settings.lock().clone();
+    caption(ui, &pal, "YOUR LANGUAGE");
+    let mut lang = s.language();
+    row(ui, &pal, "Main language", |ui| {
+        egui::ComboBox::from_id_salt("set-lang").selected_text(crate::lang::name(&lang)).width(260.0).show_ui(ui, |ui| {
+            for (code, name) in crate::lang::LANGS {
+                ui.selectable_value(&mut lang, code.to_string(), *name);
+            }
+        });
+    });
+    if lang != s.language() {
+        app.edit_settings(|s| s.language = lang.clone());
+    }
+    dim(ui, &pal, "Lyrics in any other language are translated into this one.");
+    spacer(ui);
+    caption(ui, &pal, "LYRICS IN OTHER LANGUAGES");
+    ui.horizontal(|ui| {
+        for (m, label) in [("under", "TRANSLATION UNDER EACH LINE"), ("only", "TRANSLATION ONLY"), ("off", "DON'T TRANSLATE")] {
+            if button(ui, &pal, label, s.translate == m, true).clicked() {
+                app.edit_settings(|s| s.translate = m.into());
+            }
+        }
+    });
+    dim(ui, &pal, match s.translate.as_str() {
+        "off" => "Lyrics stay as they're sung.",
+        "only" => "You read the lyrics in your language (click TRANSLATED FROM … under them to see the original too).",
+        _ => "Each line as it's sung, with its translation under it in a smaller size, both lit as the song plays.",
+    });
+    dim(ui, &pal, "Translations come from Google Translate, once per song (saved with its lyrics). Songs already in your language are left as they are.");
 }
 
 fn playback(app: &mut App, ui: &mut Ui) {

@@ -1,4 +1,4 @@
-//! Home: jump back in, mixes made from your library, new releases from your artists, recently
+//! Home: jump back in, mixes made for you (your songs and new ones), new releases from your artists, recently
 //! played and this month's top songs. The local sections are rebuilt only when the library or the
 //! listening history changes; new releases come from a daily background check (discover.rs).
 //! Also artist pages: your top songs by them, their albums you have, and more of theirs online.
@@ -10,7 +10,7 @@ use crate::discover::{self, Mix, Releases, DAY};
 use crate::downloader::TStatus;
 use crate::library::{main_artist, ta_key};
 use crate::sources::{self, ArtistPage, ITrack, Release};
-use crate::store::{now_ms, now_secs, Playlist};
+use crate::store::{now_ms, now_secs, Playlist, Track};
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, TextureId, Ui, Vec2};
 use parking_lot::Mutex;
 use std::collections::{HashMap, HashSet};
@@ -98,8 +98,30 @@ pub fn mix_online(app: &App, id: &str) -> Option<Result<Vec<ITrack>, String>> {
     }))
 }
 
-/// Plays a mix: your songs, with its online songs woven in (one after every two of yours). The
-/// online ones are fetched as their turn comes and aren't saved unless you KEEP them.
+/// A mix as listed and played: your songs with its online songs woven in (one after every two of
+/// yours). Online ones have preview ids; `extra` has them as songs (title, artist, …) and as the
+/// online songs they are (for their cover and + GET).
+pub struct MixList {
+    pub ids: Vec<String>,
+    pub extra: HashMap<String, (Track, ITrack)>,
+    /// its online songs are still being looked for
+    pub finding: bool,
+}
+
+pub fn mix_list(app: &mut App, id: &str) -> MixList {
+    mixes_online(app);
+    let Some(m) = app.home.mixes.iter().find(|m| m.id == id) else { return MixList { ids: Vec::new(), extra: HashMap::new(), finding: false } };
+    let mine: Vec<String> = { let d = app.lib.data.read(); m.ids.iter().filter(|i| d.tracks.contains_key(*i)).cloned().collect() };
+    let finding = m.seed != discover::Seed::None && mix_online(app, id).is_none();
+    let online = mix_online(app, id).and_then(|r| r.ok()).unwrap_or_default();
+    let theirs: Vec<String> = online.iter().map(super::preview::id_of).collect();
+    let extra = theirs.iter().cloned().zip(online.into_iter().map(|t| (super::preview::as_track(&t), t))).collect();
+    let (a, b): (Vec<&String>, Vec<&String>) = (mine.iter().collect(), theirs.iter().collect());
+    MixList { ids: discover::weave(&a, &b), extra, finding }
+}
+
+/// Plays a mix (shuffled or in order). Online songs are fetched as their turn comes and aren't
+/// saved unless you KEEP or + GET them.
 pub fn play_mix(app: &mut App, id: &str, shuffle: bool) {
     let Some(m) = app.home.mixes.iter().find(|m| m.id == id).cloned() else { return };
     let mut mine: Vec<String> = m.ids.clone();
@@ -116,55 +138,11 @@ pub fn play_mix(app: &mut App, id: &str, shuffle: bool) {
     }
 }
 
-const SEC_ROW: f32 = 26.0;
-const SEC_HEAD: f32 = 70.0;
-
-/// Height of a mix's online section under its songs.
-pub fn mix_section_height(app: &App, id: &str) -> f32 {
-    if app.home.mixes.iter().any(|m| m.id == id && m.seed == discover::Seed::None) {
-        return 0.0;
-    }
-    let n = mix_online(app, id).and_then(|r| r.ok()).map(|v| v.len()).unwrap_or(0);
-    SEC_HEAD + n.max(1) as f32 * SEC_ROW + 24.0
-}
-
-/// Under a mix's songs: the online songs it adds, with ▶ (listen) and + GET.
-pub fn mix_section(app: &mut App, ui: &mut Ui, id: &str) {
-    let pal = app.pal;
-    mixes_online(app);
-    let Some(m) = app.home.mixes.iter().find(|m| m.id == id).cloned() else { return };
-    if m.seed == discover::Seed::None {
-        return;
-    }
-    egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 18, bottom: 8 }).show(ui, |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().top() - 8.0, egui::Stroke::new(2.0_f32, pal.line));
-        let sub = match &m.seed {
-            discover::Seed::Artist(a) => format!("{a}'s top songs you don't have yet"),
-            _ => "Songs like your favourites here, that you don't have yet".to_string(),
-        };
-        ui.label(egui::RichText::new("ALSO IN THIS MIX").font(px(9.0)).color(pal.text));
-        ui.label(egui::RichText::new(format!("{sub} · they play in the mix without being saved · + GET keeps one")).font(vt(17.0)).color(pal.dim));
-        ui.add_space(6.0);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        match mix_online(app, id) {
-            None => {
-                ui.label(egui::RichText::new("  FINDING SONGS…").font(px(6.0)).color(pal.accent));
-                ui.ctx().request_repaint_after(Duration::from_millis(500));
-            }
-            Some(Err(e)) => {
-                ui.label(egui::RichText::new(format!("  {e}")).font(vt(18.0)).color(pal.accent));
-            }
-            Some(Ok(v)) if v.is_empty() => {
-                ui.label(egui::RichText::new("  You have them all already").font(vt(18.0)).color(pal.dim));
-            }
-            Some(Ok(v)) => {
-                let w = ui.available_width();
-                let owned = vec![None; v.len()];
-                super::addsongs::result_rows(app, ui, None, &v, &owned, w);
-            }
-        }
-    });
+/// Plays a mix's list as shown (`ids`, e.g. sorted or searched) from song `i`.
+pub fn play_mix_at(app: &mut App, list: &MixList, ids: Vec<String>, i: usize) {
+    let online: Vec<ITrack> = ids.iter().filter_map(|id| list.extra.get(id).map(|e| e.1.clone())).collect();
+    super::preview::queue_online(app, &online);
+    app.player.play_pick(ids, i, None);
 }
 
 /// An artist page's local part (rebuilt when the library changes).
@@ -596,7 +574,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
             // ---- mixes
             if !app.home.mixes.is_empty() {
-                shelf(ui, &pal, "MADE FROM YOUR LIBRARY", "Mixes of your most played artists and genres · PLAY shuffles them");
+                shelf(ui, &pal, "MADE FOR YOU", "Mixes of your most played artists and genres, with new songs you don't have yet · PLAY shuffles them");
                 let mixes = app.home.mixes.clone();
                 cards(ui, mixes.len(), 2, |ui, i, cw| {
                     let m = &mixes[i];

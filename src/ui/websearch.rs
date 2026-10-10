@@ -68,6 +68,11 @@ pub struct WebState {
     pub stack: Vec<Open>,
     /// which results you already have: key -> (lib.gen, per song)
     owned: HashMap<String, (u64, Vec<Option<String>>)>,
+    /// LYRICS: your library's saved lyrics (read in the background, when it was read)
+    lyrics: Arc<Mutex<Option<(Instant, Arc<Vec<(String, Vec<(f64, String)>)>>)>>>,
+    lyrics_busy: Arc<std::sync::atomic::AtomicBool>,
+    /// looking up lyrics for the whole library: (done, of)
+    pub fill: Arc<Mutex<Option<(usize, usize)>>>,
 }
 
 /// SHAZAM was pressed: ask what to listen to (pressed again: never mind).
@@ -223,6 +228,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
         let res = app.browser.web.res.get(&key).cloned().unwrap_or(Res { busy: true, ..Default::default() });
         egui::ScrollArea::vertical().id_salt(("web-results", &key)).auto_shrink([false; 2]).show(ui, |ui| {
+            if cat == "lyrics" {
+                lyrics_mine(app, ui, &q);
+                ui.label(egui::RichText::new("ONLINE").font(px(8.0)).color(app.pal.accent2));
+                ui.label(egui::RichText::new("Songs with that line, from YouTube Music: ▶ to listen, + GET to keep").color(app.pal.dim));
+            }
             if cat == "all" {
                 all_results(app, ui, &res, &key);
             } else {
@@ -232,6 +242,131 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+}
+
+/// Words of a lyric line, for matching: lower case, letters and digits only, one space apart.
+fn words(s: &str) -> String {
+    s.chars().map(|c| if c.is_alphanumeric() { c.to_lowercase().next().unwrap_or(c) } else if c == '\'' || c == '’' { '\0' } else { ' ' }).filter(|c| *c != '\0').collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Your songs whose lyrics have `q`: (song id, the line, its time; -1 for plain lyrics). A line
+/// you remember can run over two lines of the lyrics.
+pub fn lyric_matches(saved: &[(String, Vec<(f64, String)>)], q: &str, max: usize) -> Vec<(String, String, f64)> {
+    let q = words(q);
+    if q.len() < 4 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for (id, lines) in saved {
+        let w: Vec<String> = lines.iter().map(|l| words(&l.1)).collect();
+        // the line itself first, else one that runs on into the next line
+        let hit = (0..lines.len()).find(|&i| w[i].contains(&q)).or_else(|| (0..lines.len().saturating_sub(1)).find(|&i| !w[i].is_empty() && format!("{} {}", w[i], w[i + 1]).contains(&q)));
+        if let Some(i) = hit {
+            out.push((id.clone(), lines[i].1.clone(), lines[i].0));
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// LYRICS: songs in your library whose lyrics have the line (click plays it from there), and
+/// looking up lyrics for the songs that have none saved yet.
+fn lyrics_mine(app: &mut App, ui: &mut Ui, q: &str) {
+    let pal = app.pal;
+    // your saved lyrics, re-read now and then (songs you play get theirs saved)
+    let fresh = app.browser.web.lyrics.lock().as_ref().map(|(t, _)| t.elapsed() < Duration::from_secs(60)).unwrap_or(false);
+    if !fresh && !app.browser.web.lyrics_busy.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let (slot, busy, ctx) = (app.browser.web.lyrics.clone(), app.browser.web.lyrics_busy.clone(), ui.ctx().clone());
+        std::thread::spawn(move || {
+            let all = crate::lyricsrc::all_saved();
+            *slot.lock() = Some((Instant::now(), Arc::new(all)));
+            busy.store(false, std::sync::atomic::Ordering::Relaxed);
+            ctx.request_repaint();
+        });
+    }
+    let saved = app.browser.web.lyrics.lock().as_ref().map(|(_, v)| v.clone());
+    ui.label(egui::RichText::new("IN YOUR LIBRARY").font(px(8.0)).color(pal.accent2));
+    let Some(saved) = saved else {
+        ui.label(egui::RichText::new("READING YOUR LYRICS…").font(px(6.0)).color(pal.accent));
+        return;
+    };
+    let hits = lyric_matches(&saved, q, 25);
+    if hits.is_empty() {
+        ui.label(egui::RichText::new("None of your songs' saved lyrics have that line.").color(pal.dim));
+    }
+    let mut play = None;
+    for (id, line, at) in &hits {
+        let Some(t) = app.lib.track(id) else { continue };
+        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+        if resp.hovered() {
+            fill(ui.painter(), r, pal.panel_hi);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let art = Rect::from_min_size(r.min + Vec2::new(4.0, 4.0), Vec2::splat(36.0));
+        fill(ui.painter(), art, pal.bg);
+        if let Some(tex) = super::preview::cover_tex(app, ui.ctx(), &t, 64) {
+            ui.painter().image(tex, art, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
+        }
+        let p = ui.painter().with_clip_rect(r);
+        p.text(Pos2::new(art.right() + 10.0, r.top() + 13.0), Align2::LEFT_CENTER, format!("{} · {}", t.title, t.artist), vt(19.0), pal.text);
+        p.text(Pos2::new(art.right() + 10.0, r.top() + 32.0), Align2::LEFT_CENTER, format!("“{line}”"), vt(18.0), pal.accent2);
+        if resp.on_hover_text(if *at >= 0.0 { "Play it from this line" } else { "Play it" }).clicked() {
+            play = Some((id.clone(), *at));
+        }
+    }
+    if let Some((id, at)) = play {
+        // a little before the line, so it's sung after you hear it come in
+        app.player.play_now_at(id, (at - 1.5).max(0.0));
+    }
+    // songs without saved lyrics yet: look them all up (LRCLIB, one at a time)
+    let missing = {
+        let have: std::collections::HashSet<&str> = saved.iter().map(|s| s.0.as_str()).collect();
+        app.lib.data.read().tracks.keys().filter(|id| !have.contains(id.as_str())).count()
+    };
+    let fill = *app.browser.web.fill.lock();
+    match fill {
+        Some((done, of)) => {
+            ui.label(egui::RichText::new(format!("LOOKING UP LYRICS… {done} / {of}")).font(px(6.0)).color(pal.accent));
+            ui.ctx().request_repaint_after(Duration::from_millis(700));
+        }
+        None if missing > 0 => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(format!("{missing} of your songs have no lyrics saved yet (lyrics are saved when a song plays).")).color(pal.dim));
+                if button(ui, &pal, "LOOK THEM ALL UP", false, true).on_hover_text("Finds lyrics for every song in the background (a few minutes for a big library), so a line finds any of your songs").clicked() {
+                    fill_lyrics(app, ui.ctx());
+                }
+            });
+        }
+        None => {}
+    }
+    ui.add_space(12.0);
+}
+
+/// Looks up lyrics for every song without saved ones, in the background, gently (LRCLIB is a
+/// free service): about two songs a second.
+pub fn fill_lyrics(app: &mut App, ctx: &egui::Context) {
+    let tracks: Vec<crate::store::Track> = {
+        let have: std::collections::HashSet<String> = crate::lyricsrc::all_saved().into_iter().map(|s| s.0).collect();
+        app.lib.data.read().tracks.values().filter(|t| !have.contains(&t.id)).cloned().collect()
+    };
+    let (fill, slot, ctx) = (app.browser.web.fill.clone(), app.browser.web.lyrics.clone(), ctx.clone());
+    *fill.lock() = Some((0, tracks.len()));
+    std::thread::Builder::new()
+        .name("lyrics-fill".into())
+        .spawn(move || {
+            let n = tracks.len();
+            for (i, t) in tracks.iter().enumerate() {
+                crate::lyricsrc::find_light(t);
+                *fill.lock() = Some((i + 1, n));
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            *fill.lock() = None;
+            *slot.lock() = None; // read them again
+            ctx.request_repaint();
+        })
+        .ok();
 }
 
 /// The songs a pasted link points to (a video, a song, a playlist…).
@@ -704,5 +839,27 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
     if let Some(e) = go {
         *app.browser.web.listen.lock() = Listen::Idle;
         listen_to(app, ctx, e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn finds_a_remembered_line() {
+        let saved = vec![
+            ("a".to_string(), vec![(1.0, "We're no strangers to love".to_string()), (4.0, "You know the rules, and so do I".to_string())]),
+            ("b".to_string(), vec![(-1.0, "Is this the real life?".to_string()), (-1.0, "Is this just fantasy?".to_string())]),
+        ];
+        // punctuation, case and apostrophes don't matter
+        assert_eq!(lyric_matches(&saved, "were no strangers", 5), vec![("a".to_string(), "We're no strangers to love".to_string(), 1.0)]);
+        // a line you remember can run over two lines of the lyrics
+        assert_eq!(lyric_matches(&saved, "real life is this just", 5)[0].0, "b");
+        assert_eq!(lyric_matches(&saved, "to love you know the rules", 5)[0].2, 1.0);
+        // a phrase that's all on one line finds that line, not the one before it
+        assert_eq!(lyric_matches(&saved, "you know the rules", 5)[0].2, 4.0);
+        assert!(lyric_matches(&saved, "nothing like this here", 5).is_empty());
+        assert!(lyric_matches(&saved, "is", 5).is_empty()); // too short to mean anything
     }
 }

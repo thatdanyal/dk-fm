@@ -120,6 +120,11 @@ pub fn as_track(t: &ITrack) -> Track {
     }
 }
 
+/// The cover (on the web) of an online song.
+pub fn cover_url(app: &App, id: &str) -> Option<String> {
+    app.previews.items.get(id).and_then(|t| t.cover.clone())
+}
+
 /// A song's cover as a texture: its cover file, or for an online song not fetched yet (a mix's new
 /// songs in the queue) its cover from the web.
 pub fn cover_tex(app: &mut App, ctx: &egui::Context, t: &Track, size: u32) -> Option<egui::TextureId> {

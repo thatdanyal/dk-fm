@@ -281,6 +281,8 @@ pub struct Settings {
     /// one-time changes already made to these settings and the library (see `Settings::upgrade`)
     #[serde(default)] pub upgrades: Vec<String>,
     #[serde(default = "d_true")] pub sidebar_covers: bool,
+    /// show the song playing on your Discord profile (Discord status)
+    #[serde(default)] pub discord_status: bool,
     // ---- private listening (plays, skips and history aren't recorded while on)
     #[serde(default)] pub private_listening: bool,
     /// keep it on after a restart (else it turns off)

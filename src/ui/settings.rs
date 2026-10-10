@@ -338,6 +338,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Playback, "Volume matching", "loudness normalize replaygain"),
     (SetTab::Playback, "Leveler", "compressor quiet loud"),
     (SetTab::Playback, "Private listening", "history stats incognito"),
+    (SetTab::Playback, "Discord status: show what you're playing", "rich presence profile friends listening"),
     (SetTab::Keys, "Keyboard shortcuts", "hotkeys keys bindings"),
     (SetTab::Share, "Paste a code from a friend", "share code theme layout theater playlist import friend dkfm"),
     (SetTab::Share, "Share your theme, layout, THEATER or settings", "copy code send friend"),
@@ -1596,6 +1597,15 @@ fn playback(app: &mut App, ui: &mut Ui) {
     ui.add_space(4.0);
     if switch(ui, &pal, &mut o.normalize, "LEVELER: COMPRESS LOUD/QUIET PARTS") {
         app.player.set_normalize(o.normalize);
+    }
+    if crate::discord::available() {
+        spacer(ui);
+        caption(ui, &pal, "DISCORD");
+        let mut on = app.settings.lock().discord_status;
+        if switch(ui, &pal, &mut on, "SHOW WHAT I'M PLAYING ON DISCORD") {
+            app.edit_settings(|s| s.discord_status = on);
+        }
+        dim(ui, &pal, "Your Discord profile shows \"Listening to DK.FM\" with the song, the artist, its cover and the time left, while Discord is open on this computer. Never during private listening.");
     }
     spacer(ui);
     caption(ui, &pal, "PRIVATE LISTENING");

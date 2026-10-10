@@ -3,11 +3,13 @@
 mod analysis;
 mod audio;
 mod backup;
+mod discord;
 mod discover;
 mod downloader;
 mod fastlink;
 #[cfg(windows)]
 mod install;
+mod karaoke;
 mod lang;
 mod library;
 mod lyricsrc;

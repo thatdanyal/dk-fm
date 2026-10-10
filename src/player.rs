@@ -234,6 +234,11 @@ impl Player {
 
     /// Play one song right now, keeping the queue: it goes in just after the current song.
     pub fn play_now(&self, id: String) {
+        self.play_now_at(id, 0.0);
+    }
+
+    /// `play_now` from `pos` seconds into the song (e.g. the lyric line you searched for).
+    pub fn play_now_at(&self, id: String, pos: f64) {
         let at = {
             let mut st = self.st.lock();
             if st.index < 0 || st.queue.is_empty() {
@@ -247,8 +252,13 @@ impl Player {
             }
         };
         match at {
-            Some(at) => self.load(at as isize, true, 0.0),
-            None => self.play_list(vec![id], 0, Some(false)),
+            Some(at) => self.load(at as isize, true, pos.max(0.0)),
+            None => {
+                self.play_list(vec![id], 0, Some(false));
+                if pos > 0.0 {
+                    self.seek(pos);
+                }
+            }
         }
     }
 

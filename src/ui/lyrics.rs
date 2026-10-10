@@ -52,7 +52,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 }
 
 /// About how long a line is sung for: a little per letter, never past the next line.
-fn sung_for(text: &str, gap: f64) -> f64 {
+pub(super) fn sung_for(text: &str, gap: f64) -> f64 {
     let letters = text.chars().filter(|c| c.is_alphanumeric()).count() as f64;
     (letters * 0.085 + 0.45).min(gap - 0.2).max(0.5)
 }
@@ -342,6 +342,11 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                 });
                 ui.add_space(view_h * 0.5);
             });
+            // sing-along score: grade the lines that ended, and show how it's going
+            if sing {
+                super::nowplaying::score_lines(app, &t.id, &lines, pos);
+                super::nowplaying::score_overlay(app, ui, out.inner_rect, true);
+            }
             // sing-along: 3, 2, 1 before the singing starts (and after a long break)
             if sing && status.playing {
                 let next = lines.iter().enumerate().skip(active.map(|a| a + 1).unwrap_or(0)).find(|(_, l)| !l.1.trim().is_empty());

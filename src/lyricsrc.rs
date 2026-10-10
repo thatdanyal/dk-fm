@@ -88,6 +88,45 @@ fn save(id: &str, l: &Lyr, source: Source) {
     crate::store::save_json(&cache_path(id), &s);
 }
 
+/// Every song's saved lyrics as (song id, lines): synced lines with their time, plain lyrics
+/// line by line with no time (-1). For searching your library by a line you remember.
+pub fn all_saved() -> Vec<(String, Vec<(f64, String)>)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(data_dir().join("lyrics")).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        // (translations are saved beside them as <id>.<language>.tr.json)
+        let Some(id) = name.strip_suffix(".json").filter(|n| !n.contains('.')) else { continue };
+        let Some(s) = std::fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<Saved>(&b).ok()) else { continue };
+        let lines = match s.kind.as_str() {
+            "synced" => s.lines,
+            "plain" => s.text.lines().map(|l| (-1.0, l.to_string())).collect(),
+            _ => continue,
+        };
+        out.push((id.to_string(), lines));
+    }
+    out
+}
+
+/// Look a song's lyrics up the light way (its file's tags, then LRCLIB; never YouTube captions,
+/// which need yt-dlp) and save them. For filling in a whole library: true if it has lyrics now.
+/// Nothing found isn't remembered, so playing it still tries everything.
+pub fn find_light(t: &Track) -> bool {
+    if let Some((l, _)) = load(&t.id) {
+        return !matches!(l, Lyr::None);
+    }
+    let found = match from_file(t) {
+        Some(l @ Lyr::Synced(_)) => Some((l, Source::File)),
+        file => lrclib(t).map(|l| (l, Source::Lrclib)).or(file.map(|l| (l, Source::File))),
+    };
+    match found {
+        Some((l, src)) => {
+            save(&t.id, &l, src);
+            !matches!(l, Lyr::Instrumental)
+        }
+        None => false,
+    }
+}
+
 /// Forget what was found for a song (to look again).
 pub fn forget(id: &str) {
     let _ = std::fs::remove_file(cache_path(id));

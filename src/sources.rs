@@ -777,7 +777,7 @@ fn parse_len(d: &str) -> Option<f64> {
 // ------------------------------------------------------------------------------- online catalog (FIND MUSIC)
 
 /// What FIND MUSIC searches: (id, tab label).
-pub const CATEGORIES: [(&str, &str); 10] = [("all", "ALL"), ("songs", "SONGS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("youtube", "YOUTUBE"), ("soundcloud", "SOUNDCLOUD"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
+pub const CATEGORIES: [(&str, &str); 11] = [("all", "ALL"), ("songs", "SONGS"), ("lyrics", "LYRICS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("youtube", "YOUTUBE"), ("soundcloud", "SOUNDCLOUD"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
 
 /// A YouTube video's picture, for songs that only have a video (no album cover).
 pub fn video_thumb(id: &str) -> String {
@@ -906,6 +906,9 @@ fn next_token(v: &Value) -> Option<String> {
 /// Search one category (`more` = the token from the page before, to load more).
 pub fn catalog(q: &str, cat: &str, more: Option<&str>) -> Result<HitPage, String> {
     match cat {
+        // a line of a song: YouTube Music's song search knows lyrics (tried: Rick Astley,
+        // Queen, 21 Savage, Luis Fonsi and Whitney Houston lines all found the song first)
+        "lyrics" => catalog(q, "songs", more),
         "all" => {
             // a few of each, fetched side by side
             let parts: Vec<(&'static str, usize)> = vec![("artists", 3), ("songs", 6), ("albums", 6), ("playlists", 4)];

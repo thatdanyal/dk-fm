@@ -155,6 +155,8 @@ pub struct App {
     pub nowplaying: bool,
     /// which version of THEATER, and its LAYOUT editor
     pub theater: nowplaying::TheaterUi,
+    /// what Discord was last told: (song, playing, when the song started in ms), or None (nothing)
+    discord_sent: Option<Option<(String, bool, i64)>>,
     /// the library view last shown (`browser.nav`)
     seen_nav: u64,
     /// songs being fetched / played just to listen before downloading
@@ -563,6 +565,7 @@ impl App {
             explore: Default::default(),
             nowplaying: false,
             theater: Default::default(),
+            discord_sent: None,
             seen_nav: 0,
             previews: Default::default(),
             layout_undo: None,
@@ -685,6 +688,33 @@ impl App {
         self.lib.private.store(on, Ordering::Relaxed);
         self.edit_settings(|s| s.private_listening = on);
         self.toast(if on { "Private listening on: plays and history aren't recorded" } else { "Private listening off" });
+    }
+
+    /// Discord status: tells Discord when the song, play / pause or the place in it changes.
+    fn discord_tick(&mut self) {
+        if !crate::discord::available() {
+            return;
+        }
+        let on = self.settings.lock().discord_status && !self.lib.private.load(Ordering::Relaxed);
+        let st = self.player.status();
+        let t = if on { self.current_track() } else { None };
+        let now_ms = crate::store::now_ms() as i64;
+        let key = t.as_ref().map(|t| (t.id.clone(), st.playing, now_ms - (st.position * 1000.0) as i64));
+        let same = match (&self.discord_sent, &key) {
+            (Some(None), None) => true,
+            // (the start time drifts a little while playing: only a seek moves it by seconds)
+            (Some(Some(a)), Some(b)) => a.0 == b.0 && a.1 == b.1 && (!b.1 || (a.2 - b.2).abs() < 3000),
+            _ => false,
+        };
+        if same {
+            return;
+        }
+        self.discord_sent = Some(key);
+        let now = t.map(|t| {
+            let cover = if t.id.starts_with(crate::library::PREVIEW) { preview::cover_url(self, &t.id) } else { None }.or_else(|| t.youtube_id.as_ref().map(|y| format!("https://i.ytimg.com/vi/{y}/hqdefault.jpg")));
+            crate::discord::Now { title: t.title, artist: t.artist, album: t.album, cover, playing: st.playing, position: st.position, duration: if st.duration > 0.0 { st.duration } else { t.duration } }
+        });
+        crate::discord::set(now);
     }
 
     /// Asks for a name, then saves the colours on screen as a theme (listed under THEME).
@@ -1347,6 +1377,13 @@ impl App {
                 // nowplaying2 / nowplaying3: another version of THEATER; theaterlayout: its editor
                 "nowplaying2" => self.open_theater(Some(1)),
                 "nowplaying3" => self.open_theater(Some(2)),
+                // FIND MUSIC > LYRICS for DKFM_QUERY
+                "lyrics-search" => websearch::search_for(self, std::env::var("DKFM_QUERY").unwrap_or_default(), "lyrics"),
+                // KARAOKE with the sing-along score on
+                "nowplaying-score" => {
+                    self.open_theater(Some(1));
+                    self.theater.score = Some(nowplaying::Score::start(self));
+                }
                 "theaterlayout" => {
                     self.open_theater(None);
                     self.theater.edit = true;
@@ -1553,6 +1590,10 @@ impl App {
         self.scope.drawn = false;
         self.check_alphabets(ctx);
         covertheme::update(self, ctx);
+        self.discord_tick();
+        if !self.nowplaying && self.theater.score.is_some() {
+            self.theater.score = None; // (the microphone stops)
+        }
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
         }

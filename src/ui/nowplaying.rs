@@ -30,6 +30,136 @@ fn part_name(k: &str) -> &'static str {
     PARTS.iter().find(|p| p.0 == k).map(|p| p.1).unwrap_or("?")
 }
 
+/// Sing-along scoring while it's on (the microphone is listening).
+pub struct Score {
+    listener: crate::karaoke::Listener,
+    /// the song being scored, and its first line not graded yet
+    song: String,
+    next: usize,
+    last_pos: f64,
+    grades: Vec<u32>,
+    /// your best for this song before now
+    best: Option<u32>,
+    /// the last line's grade (score, when)
+    last: Option<(u32, std::time::Instant)>,
+    /// the song's final score: (score, your best before it, when)
+    card: Option<(u32, Option<u32>, std::time::Instant)>,
+}
+
+impl Score {
+    pub fn start(app: &App) -> Self {
+        Score { listener: crate::karaoke::listen(app.player.engine.shared.clone()), song: String::new(), next: 0, last_pos: 0.0, grades: Vec::new(), best: None, last: None, card: None }
+    }
+    fn total(&self) -> Option<u32> {
+        (!self.grades.is_empty()).then(|| (self.grades.iter().sum::<u32>() as f32 / self.grades.len() as f32).round() as u32)
+    }
+}
+
+/// Sing-along scoring: grades the lines that just ended (called with the synced lyrics drawn).
+pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64) {
+    let Some(s) = app.theater.score.as_mut() else { return };
+    let err = s.listener.error.lock().take();
+    if let Some(e) = err {
+        app.theater.score = None;
+        app.toast_err(e);
+        return;
+    }
+    if s.song != id {
+        s.song = id.to_string();
+        s.best = crate::karaoke::best(id);
+        s.next = 0;
+        s.grades.clear();
+        s.last = None;
+        s.listener.ticks.lock().clear();
+    }
+    // a seek: grade from where the song is now (lines skipped don't count against you)
+    if pos < s.last_pos - 2.0 || pos > s.last_pos + 4.0 {
+        s.next = lines.iter().position(|l| l.0 >= pos).unwrap_or(lines.len());
+    }
+    s.last_pos = pos;
+    let last_sung = lines.iter().rposition(|l| !l.1.trim().is_empty());
+    while s.next < lines.len() {
+        let (at, text) = (&lines[s.next].0, &lines[s.next].1);
+        if text.trim().is_empty() {
+            s.next += 1;
+            continue;
+        }
+        let gap = lines.get(s.next + 1).map(|l| l.0 - at).unwrap_or(8.0);
+        let end = at + super::lyrics::sung_for(text, gap);
+        if pos < end {
+            break;
+        }
+        let heard: Vec<crate::karaoke::Tick> = s.listener.ticks.lock().iter().filter(|t| t.0 >= *at && t.0 <= end).copied().collect();
+        let g = crate::karaoke::line_score(&heard);
+        s.grades.push(g);
+        s.last = Some((g, std::time::Instant::now()));
+        if Some(s.next) == last_sung {
+            if let Some(total) = s.total() {
+                let before = crate::karaoke::save_best(id, total);
+                s.card = Some((total, before, std::time::Instant::now()));
+            }
+        }
+        s.next += 1;
+    }
+}
+
+/// Over the lyrics while scoring: your score so far, the last line's grade, and the final card.
+pub fn score_overlay(app: &mut App, ui: &mut Ui, area: Rect, synced: bool) {
+    let pal = app.pal;
+    let Some(s) = app.theater.score.as_ref() else { return };
+    // (on its own layer, above the lyrics scrolling under it)
+    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("karaoke-score"))).with_clip_rect(area);
+    let p = &p;
+    // top right: score so far
+    let badge = Rect::from_min_size(Pos2::new(area.right() - 150.0, area.top() + 8.0), Vec2::new(140.0, 46.0));
+    fill(p, badge.translate(Vec2::splat(3.0)), pal.shadow);
+    fill(p, badge, pal.panel);
+    frame_rect(p, badge, 2.0, pal.accent2);
+    match (synced, s.total()) {
+        (false, _) => {
+            p.text(badge.center(), Align2::CENTER_CENTER, "NEEDS SYNCED\nLYRICS", px(6.0), pal.dim);
+        }
+        (true, None) => {
+            p.text(badge.center() - Vec2::new(0.0, 8.0), Align2::CENTER_CENTER, "♪ SCORING", px(7.0), pal.accent2);
+            let sub = s.best.map(|b| format!("your best: {b}")).unwrap_or_else(|| "sing along!".into());
+            p.text(badge.center() + Vec2::new(0.0, 11.0), Align2::CENTER_CENTER, sub, vt(17.0), pal.dim);
+        }
+        (true, Some(t)) => {
+            p.text(badge.center() - Vec2::new(0.0, 9.0), Align2::CENTER_CENTER, format!("{t}"), vt(30.0), pal.accent2);
+            p.text(badge.center() + Vec2::new(0.0, 13.0), Align2::CENTER_CENTER, "SCORE", px(6.0), pal.dim);
+        }
+    }
+    // the line that just ended
+    if let Some((g, at)) = s.last {
+        let age = at.elapsed().as_secs_f32();
+        if age < 1.6 {
+            let a = (255.0 * (1.0 - (age / 1.6).powi(2))) as u8;
+            let c = if g >= 65 { pal.accent } else if g >= 40 { pal.accent2 } else { pal.dim };
+            p.text(Pos2::new(badge.center().x, badge.bottom() + 20.0), Align2::CENTER_CENTER, crate::karaoke::grade(g), px(8.0), with_alpha(c, a));
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+        }
+    }
+    // the song's final score
+    if let Some((total, before, at)) = s.card {
+        if at.elapsed().as_secs() < 10 {
+            let r = Rect::from_center_size(area.center(), Vec2::new(380.0_f32.min(area.width() - 20.0), 170.0));
+            fill(p, r.translate(Vec2::splat(5.0)), pal.shadow);
+            fill(p, r, pal.panel);
+            frame_rect(p, r, 3.0, pal.accent);
+            p.text(Pos2::new(r.center().x, r.top() + 24.0), Align2::CENTER_CENTER, "YOUR SCORE", px(8.0), pal.dim);
+            p.text(Pos2::new(r.center().x, r.top() + 70.0), Align2::CENTER_CENTER, format!("{total}"), vt(64.0), pal.accent);
+            p.text(Pos2::new(r.center().x, r.top() + 112.0), Align2::CENTER_CENTER, crate::karaoke::grade(total), px(9.0), pal.accent2);
+            let best = match before {
+                Some(b) if total > b => format!("NEW BEST! (was {b})"),
+                Some(b) => format!("YOUR BEST: {b}"),
+                None => "FIRST TIME SINGING THIS ONE".into(),
+            };
+            p.text(Pos2::new(r.center().x, r.top() + 146.0), Align2::CENTER_CENTER, best, vt(19.0), pal.text);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+    }
+}
+
 /// THEATER's state between frames.
 #[derive(Default)]
 pub struct TheaterUi {
@@ -39,6 +169,8 @@ pub struct TheaterUi {
     pub edit: bool,
     /// the mouse last moved: (where, when) (for hiding the buttons when it rests)
     idle: (Pos2, f64),
+    /// sing-along scoring (the microphone is on while this is Some)
+    pub score: Option<Score>,
 }
 
 impl App {
@@ -114,6 +246,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
     }
     let preset = { let s = app.settings.lock(); s.theater.get(app.theater.preset).cloned().unwrap_or_else(|| crate::store::d_theater()[0].clone()) };
+    if !preset.singalong {
+        app.theater.score = None;
+    }
     let full = ui.max_rect();
     backdrop(app, ui, full, &preset);
     // the parts, in one or two columns (room on the right for the editor while it's open)
@@ -151,6 +286,12 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
                 if tb_button(ui, &pal, "LAYOUT", app.theater.edit).on_hover_text("Add, remove and move what THEATER shows; name your three versions and pick the default").clicked() {
                     app.theater.edit = !app.theater.edit;
+                }
+                if preset.singalong && preset.left.iter().chain(&preset.right).any(|k| k == "lyrics") {
+                    let on = app.theater.score.is_some();
+                    if tb_button(ui, &pal, if on { "♪ SCORING · STOP" } else { "♪ SCORE ME" }, on).on_hover_text("Sing along and get a score: the microphone listens, and each line is graded on timing and on singing notes that fit the song. Headphones give a fair score (with speakers the microphone hears the song too). Nothing is recorded or saved but your best score.").clicked() {
+                        app.theater.score = if on { None } else { Some(Score::start(app)) };
+                    }
                 }
             });
         });

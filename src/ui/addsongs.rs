@@ -310,6 +310,9 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
         let sub = [t.artists.join(", "), t.album.clone()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ");
         let tg: &[&str] = tags.get(i).map(|v| v.as_slice()).unwrap_or(&[]);
         let (hit, full) = row(ui, &pal, w, &t.title, tg, &sub, t.duration_ms.map(|d| d as f64 / 1000.0), btn, tip);
+        if have.is_none() && ui.is_rect_visible(full) {
+            crate::fastlink::warm(t); // so ▶ starts right away
+        }
         // cover, and ▶ to listen before getting it
         let cr = Rect::from_min_size(Pos2::new(full.left() + 4.0, full.top() + 3.0), Vec2::splat(24.0));
         if let Some(tex) = super::home::remote_tex(app, ui.ctx(), t.cover.as_ref()) {

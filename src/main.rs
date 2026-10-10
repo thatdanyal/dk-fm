@@ -5,6 +5,7 @@ mod audio;
 mod backup;
 mod discover;
 mod downloader;
+mod fastlink;
 #[cfg(windows)]
 mod install;
 mod library;

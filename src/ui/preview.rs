@@ -27,6 +27,8 @@ pub struct Previews {
     kept: std::collections::HashSet<String>,
     /// the song playing when previews were last tidied
     last: Option<String>,
+    /// online songs fetched for the queue (a mix's), not by ▶: they don't jump in when ready
+    auto: std::collections::HashSet<String>,
 }
 
 fn dir() -> PathBuf {
@@ -53,14 +55,19 @@ fn tidy(app: &mut App) {
         return;
     }
     app.previews.last = cur.clone();
-    let gone: Vec<String> = app.lib.previews.read().keys().filter(|id| Some(*id) != cur.as_ref()).cloned().collect();
+    // (online songs still to come in the queue stay)
+    let upcoming: std::collections::HashSet<String> = {
+        let st = app.player.st.lock();
+        st.queue.iter().skip((st.index + 1).max(0) as usize).cloned().collect()
+    };
+    let gone: Vec<String> = app.lib.previews.read().keys().filter(|id| Some(*id) != cur.as_ref() && !upcoming.contains(*id)).cloned().collect();
     for id in gone {
         loop {
             let at = app.player.st.lock().queue.iter().position(|q| *q == id);
             let Some(i) = at else { break };
             app.player.remove_at(i);
         }
-        if let Some(t) = app.lib.previews.write().remove(&id) {
+        if let Some(t) = app.lib.previews.write().remove(&id).filter(|t| !t.path.is_empty()) {
             let mut files = vec![PathBuf::from(&t.path)];
             files.extend(t.cover.as_ref().map(|c| app.lib.cover_path(c)));
             // the player may still have the file open for a moment
@@ -76,6 +83,7 @@ fn tidy(app: &mut App) {
         }
         app.previews.items.remove(&id);
         app.previews.kept.remove(&id);
+        app.previews.auto.remove(&id);
         app.previews.state.retain(|_, v| !matches!(v, Some(Ok(x)) if *x == id));
     }
 }
@@ -97,6 +105,28 @@ pub fn toggle(app: &mut App, t: &ITrack) {
         Some(Some(Ok(id))) if app.lib.track(id).is_some() => app.player.play_now(id.clone()),
         _ => start(app, t),
     }
+}
+
+/// Online songs for the queue (a mix's): each is fetched when its turn comes or while the song
+/// before it plays, and deleted once played unless you KEEP it. Returns their queue ids.
+pub fn queue_online(app: &mut App, songs: &[ITrack]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for t in songs {
+        let id = id_of(t);
+        app.previews.items.insert(id.clone(), t.clone());
+        app.lib.previews.write().entry(id.clone()).or_insert_with(|| Track {
+            id: id.clone(),
+            title: t.title.clone(),
+            artist: t.artists.join(", "),
+            album: "Online (not downloaded)".into(),
+            duration: t.duration_ms.map(|d| d as f64 / 1000.0).unwrap_or(0.0),
+            youtube_id: t.youtube_id.clone(),
+            ..Default::default()
+        });
+        crate::fastlink::warm(t);
+        ids.push(id);
+    }
+    ids
 }
 
 fn start(app: &mut App, t: &ITrack) {
@@ -123,16 +153,19 @@ fn fetch(t: &ITrack, id: &str, covers: &std::path::Path) -> Result<Track, String
         .unwrap_or_else(|| format!("ytsearch1:{artist} {}", t.title));
     let d = dir();
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    // the small AAC stream: starts fast, never converted
-    let out = d.join(format!("{id}.%(ext)s"));
-    let args: Vec<String> = ["--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a", "-o"].iter().map(|s| s.to_string()).chain([out.display().to_string(), url]).collect();
-    crate::ytdlp::run_with(&args, None, None)?;
     let path = d.join(format!("{id}.m4a"));
+    // its link was looked up ahead (it was on screen): just the file, in under a second
+    if !matches!(crate::fastlink::fetch(t, &path, std::time::Duration::from_secs(20)), Some(Ok(()))) {
+        // the small AAC stream: starts fast, never converted
+        let out = d.join(format!("{id}.%(ext)s"));
+        let args: Vec<String> = ["--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a", "-o"].iter().map(|s| s.to_string()).chain([out.display().to_string(), url]).collect();
+        crate::ytdlp::run_with(&args, None, None)?;
+    }
     if !path.exists() {
         return Err("Couldn't get a preview of that song".into());
     }
     // its cover, so the deck shows it
-    let cover = t.cover.as_ref().and_then(|u| crate::net::get_bytes(u).ok()).and_then(|b| {
+    let cover = t.cover.as_ref().and_then(|u| crate::net::get_bytes(u).ok()).map(crate::discover::square).and_then(|b| {
         let name = format!("{id}.jpg");
         std::fs::write(covers.join(&name), b).ok().map(|_| name)
     });
@@ -216,18 +249,41 @@ pub fn active(app: &App, t: &ITrack) -> bool {
 /// Previews that finished: ready ones start playing. Old ones are deleted.
 pub fn poll(app: &mut App) {
     tidy(app);
+    // online songs in the queue the player wants now (or next)
+    let wants: Vec<String> = app.player.wants.lock().drain(..).collect();
+    for id in wants {
+        let Some(t) = app.previews.items.get(&id).cloned() else { continue };
+        if !matches!(app.previews.state.get(&t.source_key), Some(None)) && app.lib.track(&id).is_some_and(|x| x.path.is_empty()) {
+            app.previews.auto.insert(id);
+            start(app, &t);
+        }
+    }
     let done: Vec<_> = app.previews.done.lock().drain(..).collect();
     for (key, r) in done {
+        let id = r.as_ref().map(|t| t.id.clone()).unwrap_or_else(|_| app.previews.items.iter().find(|(_, t)| t.source_key == key).map(|(i, _)| i.clone()).unwrap_or_default());
+        let auto = app.previews.auto.contains(&id);
+        let now = app.player.current_id().as_deref() == Some(id.as_str());
         match r {
             Ok(track) => {
-                let id = track.id.clone();
                 app.lib.previews.write().insert(id.clone(), track);
-                app.player.play_now(id.clone());
-                app.previews.state.insert(key, Some(Ok(id)));
+                app.previews.state.insert(key, Some(Ok(id.clone())));
+                if !auto {
+                    app.player.play_now(id);
+                } else if now {
+                    let i = app.player.st.lock().index;
+                    app.player.play_index(i.max(0) as usize);
+                } else {
+                    app.player.preload_next();
+                }
             }
             Err(e) => {
-                app.toast_err(format!("Preview: {e}"));
-                app.previews.state.insert(key, Some(Err(e)));
+                app.previews.state.insert(key, Some(Err(e.clone())));
+                if !auto {
+                    app.toast_err(format!("Preview: {e}"));
+                } else if now {
+                    app.toast_err(format!("Couldn't play an online song in the mix: {e}"));
+                    app.player.next(true);
+                }
             }
         }
     }

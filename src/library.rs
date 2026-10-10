@@ -506,9 +506,32 @@ impl Library {
     }
 
     pub fn toggle_like(&self, id: &str) {
+        let liked = !self.stat(id).liked;
+        self.set_liked(&[id.to_string()], liked);
+    }
+
+    /// Remember (or forget) that you unliked these songs here, so Spotify sync leaves them unliked.
+    fn note_unliked(d: &mut LibraryData, ids: &[String], unliked: bool) {
+        let keys: Vec<String> = ids.iter().filter_map(|i| d.tracks.get(i)).flat_map(keys_of).collect();
+        d.unliked.retain(|k| !keys.contains(k));
+        if unliked {
+            d.unliked.extend(keys);
+            let n = d.unliked.len();
+            if n > 20000 {
+                d.unliked.drain(0..n - 20000);
+            }
+        }
+    }
+
+    /// Unliked on Spotify: unliked here too (and no longer remembered as unliked here).
+    pub fn unlike_from_spotify(&self, ids: &[String]) {
         let mut d = self.data.write();
-        let s = d.stats.entry(id.to_string()).or_default();
-        s.liked = !s.liked;
+        Self::note_unliked(&mut d, ids, false);
+        for id in ids {
+            if let Some(s) = d.stats.get_mut(id) {
+                s.liked = false;
+            }
+        }
         drop(d);
         self.changed();
     }
@@ -774,6 +797,7 @@ impl Library {
             }
             s.liked = liked;
         }
+        Self::note_unliked(&mut d, ids, !liked);
         drop(d);
         self.changed();
     }
@@ -784,7 +808,9 @@ impl Library {
         let mut d = self.data.write();
         let mut changed = false;
         for (id, at) in likes {
-            if !d.tracks.contains_key(id) {
+            // (unliked here: Spotify doesn't override that)
+            let Some(t) = d.tracks.get(id) else { continue };
+            if !d.unliked.is_empty() && keys_of(t).iter().any(|k| d.unliked.contains(k)) {
                 continue;
             }
             let s = d.stats.entry(id.clone()).or_default();
@@ -1134,6 +1160,11 @@ mod tests {
         assert!(lib.set_liked_at(&[("b".into(), 2e12), ("zz".into(), 1e12)]));
         assert!(!lib.set_liked_at(&[("b".into(), 2e12)]));
         assert!(lib.data.read().stats["b"].liked_at == 2e12 && !lib.data.read().stats.contains_key("zz"));
+        // unliked here: a sync doesn't like it again, until Spotify unlikes it too
+        lib.toggle_like("b");
+        assert!(!lib.set_liked_at(&[("b".into(), 3e12)]) && !lib.stat("b").liked);
+        lib.unlike_from_spotify(&["b".into()]);
+        assert!(lib.set_liked_at(&[("b".into(), 3e12)]) && lib.stat("b").liked);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

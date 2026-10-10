@@ -557,8 +557,9 @@ pub fn generic(url: &str, name: Option<String>, kind: Option<&str>, limit: usize
             duration_ms: e["duration"].as_f64().map(|d| (d * 1000.0) as u64),
             source_key: yid.as_ref().map(|i| format!("yt:{i}")).unwrap_or_else(|| format!("url:{}", page.clone().unwrap_or_default())),
             direct_url: page,
-            youtube_id: yid,
-            cover: if is_sc { best_thumb(e) } else { None },
+            youtube_id: yid.clone(),
+            // (YouTube: the video's small thumbnail, cut to the square cover in the middle)
+            cover: if is_sc { best_thumb(e) } else { yid.as_ref().map(|i| format!("https://i.ytimg.com/vi/{i}/mqdefault.jpg")) },
             ..Default::default()
         });
     }

@@ -301,8 +301,26 @@ pub fn add_home_tab(dock: &mut DockState<Tab>) {
 }
 
 pub fn default_dock() -> DockState<Tab> {
-    // the deck, equalizer and visualizer down the left; the library over the lyrics; the queue
-    // on the right (the visualizer starts off and the equalizer flat and off)
+    // the deck over the equalizer and visualizer (tabs) down the left; Home and the library over
+    // the lyrics; the queue on the right (the visualizer starts off, the equalizer flat and off)
+    dock_with(0.23, 0.45, 0.76, 0.62)
+}
+
+/// The default layout's shape with these splits: the left column's share of the width, the
+/// deck's share of that column's height, the middle's share of what's right of the column, and
+/// Home / the library's share of the middle's height.
+fn dock_with(left: f32, deck: f32, middle: f32, lib: f32) -> DockState<Tab> {
+    let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
+    let s = d.main_surface_mut();
+    let [lib_node, col] = s.split_left(NodeIndex::root(), left, vec![Tab::Deck]);
+    let _ = s.split_below(col, deck, vec![Tab::Eq, Tab::Scope]);
+    let [lib_node, _queue] = s.split_right(lib_node, middle, vec![Tab::Queue]);
+    let _ = s.split_below(lib_node, lib, vec![Tab::Lyrics]);
+    d
+}
+
+/// The default layout before October 2026 (to tell whether someone still has it).
+fn old_default_dock() -> DockState<Tab> {
     let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
     let s = d.main_surface_mut();
     let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
@@ -311,6 +329,31 @@ pub fn default_dock() -> DockState<Tab> {
     let [lib, _queue] = s.split_right(lib, 0.72, vec![Tab::Queue]);
     let _ = s.split_below(lib, 0.546, vec![Tab::Lyrics]);
     d
+}
+
+/// A layout's shape: every split (rounded) and every group of tabs, to recognise a layout.
+fn shape(d: &DockState<Tab>) -> Vec<String> {
+    let mut v: Vec<String> = d
+        .main_surface()
+        .iter()
+        .map(|n| match n {
+            Node::Leaf { tabs, .. } => format!("{tabs:?}"),
+            Node::Horizontal { fraction, .. } => format!("H{fraction:.2}"),
+            Node::Vertical { fraction, .. } => format!("V{fraction:.2}"),
+            _ => String::new(),
+        })
+        .collect();
+    while v.last().is_some_and(|s| s.is_empty()) {
+        v.pop();
+    }
+    v
+}
+
+/// The October 2026 default replaces a layout nobody chose (the old default) and the layout it
+/// was made from (DK.FM's owner's); anyone's own layout stays as it is.
+fn takes_new_default(d: &DockState<Tab>) -> bool {
+    let s = shape(d);
+    s == shape(&old_default_dock()) || s == shape(&dock_with(0.27, 0.54, 0.743, 0.539))
 }
 
 
@@ -426,6 +469,11 @@ impl App {
             let mut s = settings.lock();
             if s.upgrade("home-tab") {
                 add_home_tab(&mut dock);
+            }
+            // the new default layout (only where it was the default anyway: see takes_new_default)
+            if s.upgrade("layout-2026-10") && s.dock.is_some() && takes_new_default(&dock) {
+                dock = default_dock();
+                s.dock = serde_json::to_value(&dock).ok();
             }
             // the playlist you played last is at the top of the list (you can change it back)
             if s.upgrade("played-sort") {
@@ -1257,7 +1305,7 @@ impl App {
                 "home" => self.browser.set_view(browser::View::Home),
                 // the first "Made from your library" mix
                 "mix" => {
-                    self.home.mixes = crate::discover::mixes(&self.lib.data.read(), crate::store::now_ms());
+                    self.home.mixes = crate::discover::mixes(&self.lib.data.read(), &self.home.genres.lock(), crate::store::now_ms());
                     if let Some(m) = self.home.mixes.first() { self.browser.set_view(browser::View::Mix(m.id.clone())); }
                 }
                 "nowplaying" => self.nowplaying = true,
@@ -1760,6 +1808,22 @@ mod ticker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_default_layout_only_replaces_layouts_nobody_chose() {
+        let saved = |d: &DockState<Tab>| load_dock(&serde_json::to_value(d).unwrap()).unwrap();
+        assert!(takes_new_default(&saved(&old_default_dock())));
+        // the owner's layout (as saved, its splits dragged to these)
+        assert!(takes_new_default(&saved(&dock_with(0.27000001, 0.5398840308, 0.7430105209, 0.5387368202))));
+        if let Ok(f) = std::env::var("DKFM_DOCK_FILE") {
+            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
+            assert!(takes_new_default(&load_dock(&v).unwrap()), "the owner's saved layout");
+        }
+        // anyone's own layout stays
+        assert!(!takes_new_default(&saved(&dock_with(0.3, 0.54, 0.743, 0.539))));
+        assert!(!takes_new_default(&saved(&App::preset("Minimal").unwrap())));
+        assert!(!takes_new_default(&saved(&default_dock())), "nothing to do");
+    }
 
     #[test]
     fn every_panel_can_be_restored() {

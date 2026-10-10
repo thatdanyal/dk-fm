@@ -45,6 +45,8 @@ pub struct Player {
     pub settings_dirty: Arc<AtomicBool>,
     pub notices: Mutex<Vec<String>>,
     pub repaint: Mutex<Option<Box<dyn Fn() + Send>>>,
+    /// online songs in the queue (no file yet) that should be fetched: up now, or next
+    pub wants: Mutex<Vec<String>>,
 }
 
 impl Player {
@@ -90,6 +92,7 @@ impl Player {
             settings_dirty,
             notices: Mutex::new(Vec::new()),
             repaint: Mutex::new(None),
+            wants: Mutex::new(Vec::new()),
         });
         MATCH.get_or_init(|| match_flag);
         p.engine.set_volume(opts.volume);
@@ -155,6 +158,13 @@ impl Player {
             id
         };
         let Some(t) = self.lib.track(&id) else { return };
+        if t.path.is_empty() {
+            // an online song not fetched yet: it plays as soon as it's here
+            self.engine.send(Cmd::Stop);
+            self.wants.lock().push(id);
+            self.notify();
+            return;
+        }
         self.analyzer.request(&id);
         self.engine.send(Cmd::Play { id: id.clone(), path: PathBuf::from(&t.path), start, gain_db: self.gain_for(&id), autoplay });
         self.preload_next();
@@ -169,13 +179,18 @@ impl Player {
         first_unhidden(&self.lib.data.read(), &st.queue, st.index + 1, st.opts.repeat == "all")
     }
 
-    fn preload_next(&self) {
+    /// Gets the next song ready (an online one is fetched now, while this one plays).
+    pub fn preload_next(&self) {
         match self.next_index().and_then(|i| self.st.lock().queue.get(i as usize).cloned()) {
-            Some(id) => {
-                if let Some(t) = self.lib.track(&id) {
-                    self.engine.send(Cmd::Preload { id: id.clone(), path: PathBuf::from(&t.path), gain_db: self.gain_for(&id) });
+            Some(id) => match self.lib.track(&id) {
+                Some(t) if t.path.is_empty() => {
+                    self.wants.lock().push(id);
+                    self.engine.send(Cmd::ClearNext);
+                    self.notify();
                 }
-            }
+                Some(t) => self.engine.send(Cmd::Preload { id: id.clone(), path: PathBuf::from(&t.path), gain_db: self.gain_for(&id) }),
+                None => {}
+            },
             None => self.engine.send(Cmd::ClearNext),
         }
     }

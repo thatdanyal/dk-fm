@@ -17,6 +17,17 @@ pub struct Mix {
     pub name: String,
     pub sub: String,
     pub ids: Vec<String>,
+    /// where its online songs come from
+    pub seed: Seed,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Seed {
+    /// the artist's top songs on YouTube Music (name)
+    Artist(String),
+    /// songs like the genre's favourite: (title, artist, YouTube id)
+    Like(String, String, Option<String>),
+    None,
 }
 
 fn akey(a: &str) -> String {
@@ -42,7 +53,7 @@ pub fn top_artists(d: &LibraryData, n: usize) -> Vec<(String, String)> {
 }
 
 /// 2 of `a`, 1 of `b`, … (the list order; shuffle mixes it further).
-fn weave(a: &[&String], b: &[&String]) -> Vec<String> {
+pub fn weave(a: &[&String], b: &[&String]) -> Vec<String> {
     let (mut out, mut i, mut j) = (Vec::with_capacity(a.len() + b.len()), 0, 0);
     while i < a.len() || j < b.len() {
         for _ in 0..2 {
@@ -71,10 +82,14 @@ fn ranked<'a>(d: &LibraryData, mut v: Vec<&'a String>) -> Vec<&'a String> {
     v
 }
 
-pub fn mixes<'a>(d: &'a LibraryData, now_ms: f64) -> Vec<Mix> {
+pub fn mixes<'a>(d: &'a LibraryData, genres: &Genres, now_ms: f64) -> Vec<Mix> {
     let ok = |id: &String| !d.stats.get(id).map(|s| s.hidden).unwrap_or(false);
     let ranked = |v: Vec<&'a String>| ranked(d, v);
-    let genre = |g: &str| g.split([';', '/', ',']).next().unwrap_or("").trim().to_string();
+    // the file's own genre, or the artist's (looked up online: downloads carry none)
+    let genre_of = |t: &crate::store::Track| {
+        let g = t.genre.split([';', ',']).next().unwrap_or("").trim().to_string();
+        if g.is_empty() { genres.of(&akey(&t.artist)).unwrap_or("").to_string() } else { g }
+    };
     let mut by_artist: HashMap<String, (String, Vec<&String>)> = HashMap::new();
     let mut by_genre: HashMap<String, (String, Vec<&String>)> = HashMap::new();
     let mut artist_genres: HashMap<String, HashMap<String, usize>> = HashMap::new();
@@ -91,7 +106,7 @@ pub fn mixes<'a>(d: &'a LibraryData, now_ms: f64) -> Vec<Mix> {
     for t in uniq.values() {
         let a = akey(&t.artist);
         by_artist.entry(a.clone()).or_insert_with(|| (main_artist(&t.artist), Vec::new())).1.push(&t.id);
-        let g = genre(&t.genre);
+        let g = genre_of(t);
         if !g.is_empty() {
             by_genre.entry(g.to_lowercase()).or_insert_with(|| (g.clone(), Vec::new())).1.push(&t.id);
             *artist_genres.entry(a).or_default().entry(g.to_lowercase()).or_default() += 1;
@@ -124,7 +139,7 @@ pub fn mixes<'a>(d: &'a LibraryData, now_ms: f64) -> Vec<Mix> {
         }
         let names: Vec<&str> = near.iter().take(3).map(|(a, _)| by_artist[*a].0.as_str()).collect();
         let sub = if names.is_empty() { name.clone() } else { format!("{name}, {} and more", names.join(", ")) };
-        out.push(Mix { id: format!("mix:artist:{k}"), name: format!("{name} Mix"), sub, ids: weave(&mine, &theirs) });
+        out.push(Mix { id: format!("mix:artist:{k}"), name: format!("{name} Mix"), sub, ids: weave(&mine, &theirs), seed: Seed::Artist(name.clone()) });
     }
     let mut genres: Vec<(&String, &(String, Vec<&String>))> = by_genre.iter().filter(|(_, v)| v.1.len() >= 10).collect();
     genres.sort_by(|a, b| b.1 .1.len().cmp(&a.1 .1.len()).then(a.0.cmp(b.0)));
@@ -137,14 +152,87 @@ pub fn mixes<'a>(d: &'a LibraryData, now_ms: f64) -> Vec<Mix> {
                 arts.push(a);
             }
         }
-        out.push(Mix { id: format!("mix:genre:{k}"), name: format!("{name} Mix"), sub: format!("{} and more", arts.join(", ")), ids: ids.into_iter().take(50).cloned().collect() });
+        let seed = ids.first().and_then(|i| d.tracks.get(*i)).map(|t| Seed::Like(t.title.clone(), main_artist(&t.artist), t.youtube_id.clone())).unwrap_or(Seed::None);
+        out.push(Mix { id: format!("mix:genre:{k}"), name: format!("{name} Mix"), sub: format!("{} and more", arts.join(", ")), ids: ids.into_iter().take(50).cloned().collect(), seed });
     }
     let old = now_ms - (WINDOW * DAY * 1000) as f64;
     let forgotten: Vec<&String> = ranked(d.stats.iter().filter(|(id, s)| s.plays >= 3 && s.last_played > 0.0 && s.last_played < old && one.contains(id)).map(|(id, _)| id).collect());
     if forgotten.len() >= MIN_MIX {
-        out.push(Mix { id: "mix:forgotten".into(), name: "Forgotten Favourites".into(), sub: "Songs you loved but haven't played in a while".into(), ids: forgotten.into_iter().take(50).cloned().collect() });
+        out.push(Mix { id: "mix:forgotten".into(), name: "Forgotten Favourites".into(), sub: "Songs you loved but haven't played in a while".into(), ids: forgotten.into_iter().take(50).cloned().collect(), seed: Seed::None });
     }
     out
+}
+
+/// A mix's online songs (network): an artist's top songs on YouTube Music, or songs like a genre's
+/// favourite. Songs you have are left out later, where the library is known.
+pub fn mix_online(seed: &Seed) -> Result<Vec<sources::ITrack>, String> {
+    match seed {
+        Seed::Artist(name) => {
+            let id = sources::artist_id(name)?.ok_or("Not found on YouTube Music")?;
+            let mut songs = sources::artist_page(&id)?.songs;
+            let want = name.to_lowercase();
+            for t in sources::search(name, "songs", 20).unwrap_or_default() {
+                if t.artists.iter().any(|a| a.to_lowercase() == want) && !songs.iter().any(|s| s.youtube_id == t.youtube_id) {
+                    songs.push(t);
+                }
+            }
+            Ok(songs)
+        }
+        Seed::Like(title, artist, yid) => Ok(sources::radio(title, artist, yid.as_deref())?.tracks),
+        Seed::None => Ok(Vec::new()),
+    }
+}
+
+// ------------------------------------------------------------------------------- genres
+
+/// Artists' genres, from Apple's iTunes search (free, no account): files downloaded from YouTube
+/// carry no genre, and the genre mixes and Discover need one. Looked up once per artist (unknown
+/// ones again after 30 days), kept in genres.json.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+pub struct Genres {
+    /// artist key -> (genre, "" = unknown; when it was looked up)
+    #[serde(default)]
+    pub artists: BTreeMap<String, (String, i64)>,
+}
+
+impl Genres {
+    fn path() -> std::path::PathBuf {
+        store::data_dir().join("genres.json")
+    }
+    pub fn load() -> Self {
+        store::load_json(&Self::path())
+    }
+    pub fn save(&self) {
+        store::save_json(&Self::path(), self)
+    }
+    pub fn of(&self, artist_key: &str) -> Option<&str> {
+        self.artists.get(artist_key).map(|g| g.0.as_str()).filter(|g| !g.is_empty())
+    }
+    /// These artists still need looking up.
+    pub fn missing<'a>(&self, artists: &'a [(String, String)], now: i64) -> Vec<&'a (String, String)> {
+        artists.iter().filter(|(k, _)| !self.artists.get(k).is_some_and(|(g, at)| !g.is_empty() || now - at < 30 * DAY)).collect()
+    }
+}
+
+/// Looks up the genres not known yet, a few seconds apart (iTunes allows ~20 a minute), saving
+/// and calling `progress` after each. Stops at the first network error (offline: next time).
+pub fn fill_genres(artists: &[(String, String)], mut progress: impl FnMut(&Genres)) {
+    let mut g = Genres::load();
+    let now = store::now_secs();
+    let todo: Vec<(String, String)> = g.missing(artists, now).into_iter().cloned().collect();
+    for (k, name) in todo {
+        let Ok(genre) = itunes_genre(&name) else { break };
+        g.artists.insert(k, (genre, now));
+        g.save();
+        progress(&g);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+}
+
+fn itunes_genre(name: &str) -> Result<String, String> {
+    let v = crate::net::get_json(&format!("https://itunes.apple.com/search?term={}&entity=musicArtist&limit=5", crate::net::enc(name)), &[])?;
+    let want = name.to_lowercase();
+    Ok(v["results"].as_array().and_then(|r| r.iter().find(|a| a["artistName"].as_str().is_some_and(|n| n.to_lowercase() == want))).and_then(|a| a["primaryGenreName"].as_str()).unwrap_or("").to_string())
 }
 
 // ------------------------------------------------------------------------------- new releases
@@ -283,6 +371,21 @@ pub fn check_online(artists: &[(String, String)], mut progress: impl FnMut(&Rele
     (cache, r.err())
 }
 
+/// A wide picture (a YouTube thumbnail: the cover in the middle of a 16:9 frame) cut to the square
+/// in its middle; anything else as it is.
+pub fn square(b: Vec<u8>) -> Vec<u8> {
+    let Ok(img) = image::load_from_memory(&b) else { return b };
+    let (w, h) = (img.width(), img.height());
+    if w * 10 <= h * 12 {
+        return b;
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    match img.crop_imm((w - h) / 2, 0, h, h).to_rgb8().write_to(&mut out, image::ImageFormat::Jpeg) {
+        Ok(()) => out.into_inner(),
+        Err(_) => b,
+    }
+}
+
 /// Folder for downloaded covers of things you don't have (new releases, artist pages).
 pub fn covers_dir() -> std::path::PathBuf {
     store::data_dir().join("discover")
@@ -330,7 +433,7 @@ mod tests {
         }
         let top = top_artists(&d, 3);
         assert_eq!(top, vec![("sade".to_string(), "Sade".to_string()), ("drake".into(), "Drake".into()), ("anita baker".into(), "Anita Baker".into())]);
-        let m = mixes(&d, now);
+        let m = mixes(&d, &Genres::default(), now);
         let sade = m.iter().find(|x| x.id == "mix:artist:sade").expect("Sade mix");
         assert_eq!(sade.name, "Sade Mix");
         assert!(sade.sub.starts_with("Sade, Anita Baker"), "{}", sade.sub); // shares a playlist + genre: first
@@ -343,10 +446,10 @@ mod tests {
         assert!(!m.iter().any(|x| x.id == "mix:genre:hip-hop"));
         assert!(m.iter().any(|x| x.id == "mix:forgotten" && x.ids.len() == 8));
         // same library, same mixes
-        let again = mixes(&d, now);
+        let again = mixes(&d, &Genres::default(), now);
         assert_eq!(m.iter().map(|x| (&x.id, &x.ids)).collect::<Vec<_>>(), again.iter().map(|x| (&x.id, &x.ids)).collect::<Vec<_>>());
         // an empty library has none
-        assert!(mixes(&LibraryData::default(), now).is_empty());
+        assert!(mixes(&LibraryData::default(), &Genres::default(), now).is_empty());
     }
 
     fn rel(title: &str, artist: &str, year: u32, pl: &str) -> Release {
@@ -455,3 +558,4 @@ mod tests {
         assert!(radio.tracks.len() >= 10);
     }
 }
+

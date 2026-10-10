@@ -903,6 +903,9 @@ impl Downloader {
             let now = store::now_ms();
             let likes: Vec<(String, f64)> = col.tracks.iter().enumerate().filter_map(|(n, t)| Some((lookup(&idx, t)?.clone(), t.added_at.unwrap_or(now - n as f64 * 1000.0)))).collect();
             self.lib.set_liked_at(&likes);
+            if col.complete {
+                self.spotify_unlikes(col, &idx);
+            }
             return;
         }
         let pid = format!("sp-{}-{}", col.kind, col.id);
@@ -939,6 +942,69 @@ impl Downloader {
             }
             p.last_sync = Some(store::now_ms());
         });
+    }
+
+    /// Songs unliked on Spotify since the last sync are unliked here too. One that DK.FM downloaded
+    /// and that no playlist has goes to the Recycle Bin (music files you had yourself stay). Sync
+    /// can bring it back if you like it on Spotify again.
+    fn spotify_unlikes(&self, col: &Collection, idx: &HashMap<String, String>) {
+        let now: Vec<[String; 2]> = col
+            .tracks
+            .iter()
+            .map(|t| [t.spotify_id.as_ref().map(|s| format!("sp:{s}")).unwrap_or_else(|| t.source_key.clone()), ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)])
+            .collect();
+        let prev = std::mem::replace(&mut self.lib.data.write().spotify_likes, now.clone());
+        self.lib.changed();
+        if prev.is_empty() {
+            return; // the first sync: just remember what's liked
+        }
+        let still: HashSet<&String> = now.iter().map(|k| &k[0]).collect();
+        let gone: Vec<&[String; 2]> = prev.iter().filter(|k| !still.contains(&k[0])).collect();
+        if gone.is_empty() {
+            return;
+        }
+        // a sudden mass unlike is more likely a hiccup on Spotify's side: change nothing
+        if gone.len() > 25 && gone.len() * 2 > prev.len() {
+            self.lib.data.write().spotify_likes = prev;
+            return;
+        }
+        let mut unlike = Vec::new();
+        let mut bin: Vec<(String, PathBuf, [String; 2])> = Vec::new();
+        {
+            let d = self.lib.data.read();
+            for k in gone {
+                let Some(id) = idx.get(&k[0]).or_else(|| idx.get(&k[1])) else { continue };
+                let Some(t) = d.tracks.get(id) else { continue };
+                unlike.push(id.clone());
+                if !d.playlists.iter().any(|p| p.track_ids.contains(id)) && self.requalifiable(t) {
+                    bin.push((id.clone(), PathBuf::from(&t.path), k.clone()));
+                }
+            }
+        }
+        self.lib.unlike_from_spotify(&unlike);
+        let (mut removed, mut retry) = (Vec::new(), Vec::new());
+        for (id, path, k) in bin {
+            // (the song playing has its file open: tried again at the next sync)
+            if !path.exists() || crate::system::trash(&path).is_ok() {
+                removed.push(id);
+            } else {
+                retry.push(k);
+            }
+        }
+        for id in &removed {
+            self.lib.remove_track(id);
+        }
+        if !retry.is_empty() {
+            self.lib.data.write().spotify_likes.extend(retry);
+            self.lib.changed();
+        }
+        let (u, r) = (unlike.len(), removed.len());
+        if u > 0 {
+            self.notices.lock().push(match r {
+                0 => format!("Spotify sync: {u} song{} you unliked on Spotify {} unliked here too", if u == 1 { "" } else { "s" }, if u == 1 { "is" } else { "are" }),
+                r => format!("Spotify sync: {u} song{} you unliked on Spotify {} unliked here too; {r} that no playlist had went to the Recycle Bin", if u == 1 { "" } else { "s" }, if u == 1 { "is" } else { "are" }),
+            });
+        }
     }
 
     // ------------------------------------------------------------ auto-sync
@@ -1311,6 +1377,52 @@ mod tests {
         assert!(ilst.get(&atom).is_some());
         let back: lofty::tag::Tag = ilst.into();
         assert_eq!(crate::library::ids_from_tag(&back), (Some(sp.into()), Some(yt.into())));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unliked_on_spotify_is_unliked_here_and_only_lone_downloads_go() {
+        let (_profile, dir) = crate::store::test_profile("unliketest");
+        let music = dir.join("Music");
+        std::fs::create_dir_all(&music).unwrap();
+        let lib = Library::load();
+        let song = |id: &str, title: &str, path: PathBuf| {
+            std::fs::write(&path, b"not really audio").unwrap();
+            store::Track { id: id.into(), path: path.display().to_string(), artist: "Daft Punk".into(), title: title.into(), spotify_id: Some(format!("sp{id}")), youtube_id: Some(format!("yt{id}")), ..Default::default() }
+        };
+        {
+            let mut d = lib.data.write();
+            // a: downloaded, in no playlist · b: downloaded, in a playlist · c: your own file
+            for t in [song("a", "One", music.join("a.m4a")), song("b", "Two", music.join("b.m4a")), song("c", "Three", dir.join("c.m4a"))] {
+                d.tracks.insert(t.id.clone(), t);
+            }
+            d.playlists.push(Playlist { id: "mine".into(), name: "Mine".into(), track_ids: vec!["b".into()], ..Default::default() });
+        }
+        let settings = Arc::new(Mutex::new(Settings { download_dir: music.display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        let liked = |ids: &[&str]| Collection {
+            kind: "playlist".into(),
+            id: "liked".into(),
+            url: sources::LIKED_URL.into(),
+            complete: true,
+            tracks: ids.iter().map(|i| ITrack { title: i.to_string(), artists: vec!["Daft Punk".into()], spotify_id: Some(format!("sp{i}")), source_key: format!("sp:sp{i}"), ..Default::default() }).collect(),
+            ..Default::default()
+        };
+        dl.mirror(&liked(&["a", "b", "c"]));
+        assert!(["a", "b", "c"].iter().all(|i| lib.stat(i).liked));
+        // unliked here: the next sync leaves it unliked (Spotify still has it)
+        lib.toggle_like("c");
+        dl.mirror(&liked(&["a", "b", "c"]));
+        assert!(!lib.stat("c").liked);
+        // all three unliked on Spotify
+        dl.mirror(&liked(&[]));
+        assert!(["a", "b", "c"].iter().all(|i| !lib.stat(i).liked));
+        let d = lib.data.read();
+        assert!(!d.tracks.contains_key("a") && !music.join("a.m4a").exists(), "a lone download goes to the Recycle Bin");
+        assert!(d.tracks.contains_key("b") && music.join("b.m4a").exists(), "a song in a playlist stays");
+        assert!(d.tracks.contains_key("c") && dir.join("c.m4a").exists(), "your own file stays");
+        assert!(d.unliked.is_empty() && d.deleted.is_empty(), "liking it on Spotify again brings it back");
+        drop(d);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

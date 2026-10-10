@@ -349,6 +349,9 @@ fn collection(app: &mut App, ui: &mut Ui, c: &Collection) {
             let cy = r.center().y;
             // ▶ listen first (a temporary copy)
             let pr = Rect::from_center_size(Pos2::new(r.left() + 50.0, cy), Vec2::new(24.0, 22.0));
+            if !owned(&keys, t) && ui.is_rect_visible(r) {
+                crate::fastlink::warm(t); // so ▶ starts right away
+            }
             if !owned(&keys, t) && (ui.rect_contains_pointer(r) || super::preview::active(app, t)) {
                 super::preview::button(app, ui, pr, t);
             } else {

@@ -26,8 +26,15 @@ type Slot<T> = Arc<Mutex<Option<T>>>;
 
 #[derive(Default)]
 pub struct HomeState {
-    /// (lib.gen, history length) the local sections were built from
-    key: (u64, usize),
+    /// (lib.gen, history length, genres looked up) the local sections were built from
+    key: (u64, usize, u64),
+    /// artists' genres (discover::Genres), filled in the background
+    pub genres: Arc<Mutex<discover::Genres>>,
+    genres_gen: Arc<std::sync::atomic::AtomicU64>,
+    genres_started: bool,
+    /// a mix's online songs (mix id -> songs), fetched once per run
+    mix_online: Arc<Mutex<HashMap<String, Result<Vec<ITrack>, String>>>>,
+    mix_started: HashSet<String>,
     jump: Vec<Jump>,
     recent: Vec<String>,
     top: Vec<(String, u32)>,
@@ -57,6 +64,109 @@ struct RelState {
     next_try: Option<Instant>,
 }
 
+// ------------------------------------------------------------------------------- mixes, online
+
+/// Starts fetching the mixes' online songs (each once per run, one after another).
+fn mixes_online(app: &mut App) {
+    let todo: Vec<(String, discover::Seed)> = app.home.mixes.iter().filter(|m| m.seed != discover::Seed::None && !app.home.mix_started.contains(&m.id)).map(|m| (m.id.clone(), m.seed.clone())).collect();
+    if todo.is_empty() {
+        return;
+    }
+    app.home.mix_started.extend(todo.iter().map(|t| t.0.clone()));
+    let (slot, ctx) = (app.home.mix_online.clone(), app.covers.ctx.clone());
+    std::thread::spawn(move || {
+        for (id, seed) in todo {
+            let r = discover::mix_online(&seed);
+            slot.lock().insert(id, r);
+            if let Some(c) = &ctx {
+                c.request_repaint();
+            }
+        }
+    });
+}
+
+/// How many online songs a mix adds (on top of yours).
+const MIX_ONLINE: usize = 12;
+
+/// A mix's online songs you don't have yet (None: still being fetched).
+pub fn mix_online(app: &App, id: &str) -> Option<Result<Vec<ITrack>, String>> {
+    let r = app.home.mix_online.lock().get(id).cloned()?;
+    Some(r.map(|v| {
+        let owned = super::addsongs::owned_ids(app, &v);
+        let mut seen = HashSet::new();
+        v.into_iter().zip(owned).filter(|(t, o)| o.is_none() && seen.insert(ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title))).map(|(t, _)| t).take(MIX_ONLINE).collect()
+    }))
+}
+
+/// Plays a mix: your songs, with its online songs woven in (one after every two of yours). The
+/// online ones are fetched as their turn comes and aren't saved unless you KEEP them.
+pub fn play_mix(app: &mut App, id: &str, shuffle: bool) {
+    let Some(m) = app.home.mixes.iter().find(|m| m.id == id).cloned() else { return };
+    let mut mine: Vec<String> = m.ids.clone();
+    let mut online = mix_online(app, id).and_then(|r| r.ok()).unwrap_or_default();
+    if shuffle {
+        fastrand::shuffle(&mut mine);
+        fastrand::shuffle(&mut online);
+    }
+    let theirs = super::preview::queue_online(app, &online);
+    let (mine, theirs): (Vec<&String>, Vec<&String>) = (mine.iter().collect(), theirs.iter().collect());
+    let q = discover::weave(&mine, &theirs);
+    if !q.is_empty() {
+        app.player.play_list(q, 0, Some(false));
+    }
+}
+
+const SEC_ROW: f32 = 26.0;
+const SEC_HEAD: f32 = 70.0;
+
+/// Height of a mix's online section under its songs.
+pub fn mix_section_height(app: &App, id: &str) -> f32 {
+    if app.home.mixes.iter().any(|m| m.id == id && m.seed == discover::Seed::None) {
+        return 0.0;
+    }
+    let n = mix_online(app, id).and_then(|r| r.ok()).map(|v| v.len()).unwrap_or(0);
+    SEC_HEAD + n.max(1) as f32 * SEC_ROW + 24.0
+}
+
+/// Under a mix's songs: the online songs it adds, with ▶ (listen) and + GET.
+pub fn mix_section(app: &mut App, ui: &mut Ui, id: &str) {
+    let pal = app.pal;
+    mixes_online(app);
+    let Some(m) = app.home.mixes.iter().find(|m| m.id == id).cloned() else { return };
+    if m.seed == discover::Seed::None {
+        return;
+    }
+    egui::Frame::new().inner_margin(egui::Margin { left: 12, right: 12, top: 18, bottom: 8 }).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().top() - 8.0, egui::Stroke::new(2.0_f32, pal.line));
+        let sub = match &m.seed {
+            discover::Seed::Artist(a) => format!("{a}'s top songs you don't have yet"),
+            _ => "Songs like your favourites here, that you don't have yet".to_string(),
+        };
+        ui.label(egui::RichText::new("ALSO IN THIS MIX").font(px(9.0)).color(pal.text));
+        ui.label(egui::RichText::new(format!("{sub} · they play in the mix without being saved · + GET keeps one")).font(vt(17.0)).color(pal.dim));
+        ui.add_space(6.0);
+        ui.spacing_mut().item_spacing.y = 0.0;
+        match mix_online(app, id) {
+            None => {
+                ui.label(egui::RichText::new("  FINDING SONGS…").font(px(6.0)).color(pal.accent));
+                ui.ctx().request_repaint_after(Duration::from_millis(500));
+            }
+            Some(Err(e)) => {
+                ui.label(egui::RichText::new(format!("  {e}")).font(vt(18.0)).color(pal.accent));
+            }
+            Some(Ok(v)) if v.is_empty() => {
+                ui.label(egui::RichText::new("  You have them all already").font(vt(18.0)).color(pal.dim));
+            }
+            Some(Ok(v)) => {
+                let w = ui.available_width();
+                let owned = vec![None; v.len()];
+                super::addsongs::result_rows(app, ui, None, &v, &owned, w);
+            }
+        }
+    });
+}
+
 /// An artist page's local part (rebuilt when the library changes).
 struct ArtistCache {
     key: String,
@@ -80,6 +190,7 @@ struct Online {
 enum Act {
     Open(View),
     Play(Vec<String>, usize, bool),
+    PlayMix(String),
     PlayPlaylist(String),
     PlayAlbum(String),
     Get(Release),
@@ -186,7 +297,7 @@ pub(super) fn remote_tex(app: &mut App, ctx: &egui::Context, url: Option<&String
             std::thread::spawn(move || {
                 let _ = std::fs::create_dir_all(discover::covers_dir());
                 let tmp = path.with_extension("part");
-                if crate::net::get_bytes(&url).ok().filter(|b| !b.is_empty()).map(|b| std::fs::write(&tmp, b).is_ok() && std::fs::rename(&tmp, &path).is_ok()).unwrap_or(false) {
+                if crate::net::get_bytes(&url).ok().filter(|b| !b.is_empty()).map(discover::square).map(|b| std::fs::write(&tmp, b).is_ok() && std::fs::rename(&tmp, &path).is_ok()).unwrap_or(false) {
                     ready.lock().insert(name);
                     ctx.request_repaint();
                 }
@@ -208,11 +319,37 @@ fn ago(secs: i64) -> String {
 // ------------------------------------------------------------------------------- Home
 
 fn rebuild(app: &mut App) {
-    let key = (app.lib.gen.load(std::sync::atomic::Ordering::Relaxed), app.lib.history.read().events.len());
+    start_genres(app);
+    let key = (app.lib.gen.load(std::sync::atomic::Ordering::Relaxed), app.lib.history.read().events.len(), app.home.genres_gen.load(std::sync::atomic::Ordering::Relaxed));
     if app.home.key == key {
         return;
     }
     app.home.key = key;
+    rebuild_now(app);
+}
+
+/// Looks up your artists' genres in the background (once per run, only those not known yet).
+pub fn start_genres(app: &mut App) {
+    if !app.home.genres_started {
+        app.home.genres_started = true;
+        *app.home.genres.lock() = discover::Genres::load();
+        let artists = discover::top_artists(&app.lib.data.read(), 80);
+        if !app.home.genres.lock().missing(&artists, now_secs()).is_empty() {
+            let (g, gen, ctx) = (app.home.genres.clone(), app.home.genres_gen.clone(), app.covers.ctx.clone());
+            std::thread::spawn(move || {
+                discover::fill_genres(&artists, |got| {
+                    *g.lock() = got.clone();
+                    gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(c) = &ctx {
+                        c.request_repaint();
+                    }
+                })
+            });
+        }
+    }
+}
+
+fn rebuild_now(app: &mut App) {
     let n_artists = app.settings.lock().release_artists.clamp(1, 30) as usize;
     let d = app.lib.data.read();
     let h = app.lib.history.read();
@@ -242,7 +379,7 @@ fn rebuild(app: &mut App) {
     let mut top: Vec<(String, u32)> = count.into_iter().map(|(k, n)| (k.to_string(), n)).collect();
     top.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     top.truncate(10);
-    let mixes = discover::mixes(&d, now_ms());
+    let mixes = discover::mixes(&d, &app.home.genres.lock(), now_ms());
     let artists = discover::top_artists(&d, n_artists);
     drop((d, h));
     let s = &mut app.home;
@@ -384,6 +521,7 @@ fn run(app: &mut App, acts: Vec<Act>) {
         match a {
             Act::Open(v) => app.browser.set_view(v),
             Act::Play(ids, i, shuffle) => app.player.play_pick(ids, i, Some(shuffle)),
+            Act::PlayMix(id) => play_mix(app, &id, true),
             Act::PlayPlaylist(id) => {
                 let ids: Vec<String> = { let d = app.lib.data.read(); d.playlists.iter().find(|p| p.id == id).map(|p| p.track_ids.iter().filter(|t| d.tracks.contains_key(*t)).cloned().collect()).unwrap_or_default() };
                 if !ids.is_empty() {
@@ -407,6 +545,7 @@ fn run(app: &mut App, acts: Vec<Act>) {
 pub fn show(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     rebuild(app);
+    mixes_online(app);
     if app.lib.data.read().tracks.is_empty() {
         ui.add_space(30.0);
         ui.vertical_centered(|ui| {
@@ -465,7 +604,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     let t = tex(app, ui.ctx(), c.as_ref(), 192);
                     let (click, p, _, _) = card(ui, &pal, cw, &m.name, &m.sub, t, "✨", true, None);
                     if p {
-                        acts.push(Act::Play(m.ids.clone(), fastrand::usize(..m.ids.len().max(1)), true));
+                        acts.push(Act::PlayMix(m.id.clone()));
                     } else if click {
                         acts.push(Act::Open(View::Mix(m.id.clone())));
                     }

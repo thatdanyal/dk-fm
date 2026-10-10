@@ -433,6 +433,12 @@ pub struct LibraryData {
     /// songs that couldn't be downloaded (song key -> when, ms): sync leaves them alone for a few
     /// days instead of announcing them as new every time
     #[serde(default, skip_serializing_if = "HashMap::is_empty")] pub unfound: HashMap<String, f64>,
+    /// songs you unliked in DK.FM (song keys): Spotify sync doesn't like them again (it never
+    /// touches Spotify); forgotten once they're unliked on Spotify too
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub unliked: Vec<String>,
+    /// Spotify's Liked Songs at the last full sync, as [Spotify key, artist+title key]: a song
+    /// that's gone from it next time was unliked on Spotify
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub spotify_likes: Vec<[String; 2]>,
 }
 
 /// History rows: [trackId, startedAt (unix s), listened (s), skipped (0/1)].

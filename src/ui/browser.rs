@@ -1149,11 +1149,17 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if button(ui, &pal, "▶ PLAY", true, !ids.is_empty()).clicked() {
-                app.player.play_list(ids.clone(), 0, Some(false));
+                match &view {
+                    View::Mix(k) => super::home::play_mix(app, k, false),
+                    _ => app.player.play_list(ids.clone(), 0, Some(false)),
+                }
                 if let Some(p) = &cfg.playlist { app.lib.touch_playlist(&p.id); }
             }
             if button(ui, &pal, "SHUFFLE", false, !ids.is_empty()).clicked() {
-                app.player.play_list(ids.clone(), fastrand::usize(..ids.len().max(1)), Some(true));
+                match &view {
+                    View::Mix(k) => super::home::play_mix(app, k, true),
+                    _ => app.player.play_list(ids.clone(), fastrand::usize(..ids.len().max(1)), Some(true)),
+                }
                 if let Some(p) = &cfg.playlist { app.lib.touch_playlist(&p.id); }
             }
             if let View::Mix(k) = &view {
@@ -1280,7 +1286,9 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
     let reorder = cfg.playlist.is_some() && active_sort.is_none() && app.browser.search.is_empty();
     // "Recommended" below a playlist's songs (fetched once it scrolls into view)
     let recs = cfg.playlist.as_ref().filter(|_| app.browser.search.is_empty() && app.settings.lock().recommend).cloned();
-    let extra = recs.as_ref().map(|p| super::recs::height(app, &p.id)).unwrap_or(0.0);
+    // a mix: the online songs it adds, below yours
+    let mix = match &view { View::Mix(k) if app.browser.search.is_empty() => Some(k.clone()), _ => None };
+    let extra = recs.as_ref().map(|p| super::recs::height(app, &p.id)).or(mix.as_ref().map(|k| super::home::mix_section_height(app, k))).unwrap_or(0.0);
     egui::ScrollArea::vertical().id_salt(("tracks", format!("{view:?}"))).auto_shrink([false; 2]).show_viewport(ui, |ui, vp| {
         ui.spacing_mut().item_spacing.y = 0.0;
         let total = row_h * ids.len() as f32;
@@ -1417,6 +1425,12 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             if vp.max.y > total {
                 let r = Rect::from_min_size(Pos2::new(ui.max_rect().left(), top + total), Vec2::new(w, extra));
                 ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r), |ui| super::recs::show(app, ui, p));
+            }
+        }
+        if let Some(k) = &mix {
+            if vp.max.y > total && extra > 0.0 {
+                let r = Rect::from_min_size(Pos2::new(ui.max_rect().left(), top + total), Vec2::new(w, extra));
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(r), |ui| super::home::mix_section(app, ui, k));
             }
         }
     });

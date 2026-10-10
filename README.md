@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.png" alt="DK.FM, a retro desktop music player" width="100%"></p>
+
 # DK.FM
 
 A retro desktop music player for **Windows, macOS and Linux**. Plays your local library and turns
@@ -6,7 +8,8 @@ version of each song on YouTube Music.
 
 Native app written in Rust: **one ~8 MB program**, no bundled browser. On Windows it uses about
 25 MB of RAM while playing (around 1.4% CPU with the visualizer on screen) and close to nothing
-when it's idle or in the tray.
+when it's idle or in the tray. Its download tools (yt-dlp, a 4 MB audio-only ffmpeg built for
+DK.FM, QuickJS) are fetched the first time you import.
 
 ## Features
 

@@ -85,8 +85,8 @@ jobs:
           mkdir -p out DK.FM.app/Contents/MacOS DK.FM.app/Contents/Resources icon.iconset
           cp target/release/dkfm DK.FM.app/Contents/MacOS/DK.FM
           for s in 16 32 128 256 512; do
-            sips -z $s $s assets/icon.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
-            sips -z $((s*2)) $((s*2)) assets/icon.png --out icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+            sips -z $s $s docs/logo.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) docs/logo.png --out icon.iconset/icon_${s}x${s}@2x.png >/dev/null
           done
           iconutil -c icns icon.iconset -o DK.FM.app/Contents/Resources/AppIcon.icns
           cat > DK.FM.app/Contents/Info.plist <<EOF
@@ -115,7 +115,7 @@ jobs:
         if: matrix.name == 'linux'
         run: |
           mkdir -p out
-          convert_icon() { python3 -c "import sys; from PIL import Image; Image.open('assets/icon.png').resize((256,256)).save(sys.argv[1])" "$1"; }
+          convert_icon() { python3 -c "import sys; from PIL import Image; Image.open('docs/logo.png').resize((256,256)).save(sys.argv[1])" "$1"; }
           pip3 install --quiet pillow
 
           # AppImage (self-updating)

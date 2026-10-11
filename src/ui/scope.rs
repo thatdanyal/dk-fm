@@ -1,4 +1,5 @@
-//! Visualizer: LED spectrum bars, phosphor oscilloscope, twin analog VU meters, spectrogram.
+//! Visualizer: LED spectrum bars, phosphor oscilloscope, twin analog VU meters, and a colour
+//! waterfall (the sound falling from the top, bass in the middle, in the song's own colours).
 //! Draws into a small pixel buffer (half resolution) that is uploaded as one texture per frame.
 use super::theme::px;
 use super::widgets::{fill, frame_rect};
@@ -30,12 +31,18 @@ pub struct ScopeState {
     /// Settings > Look: custom colours (low, mid, peak) and bar count (0 = fit)
     pub colors: Option<[Color32; 3]>,
     pub bars: u32,
+    /// waterfall: rows still owed (it falls at a steady speed, however often it's drawn), when it
+    /// was last drawn, and the song's two hues (0..1) with the cover they're from
+    flow: f32,
+    last: Option<f64>,
+    hues: (f32, f32),
+    hues_for: Option<String>,
 }
 
 impl ScopeState {
     pub fn new() -> Self {
         let fft = Fft::new(FFT);
-        Self { mode: "bars".into(), drawn: false, tex: None, w: 0, h: 0, buf: Vec::new(), glow: Vec::new(), peaks: Vec::new(), vu: [0.0; 2], hold: [0; 2], fft, re: vec![0.0; FFT], im: vec![0.0; FFT], spec: vec![0.0; FFT / 2], loaded: false, colors: None, bars: 0 }
+        Self { mode: "bars".into(), drawn: false, tex: None, w: 0, h: 0, buf: Vec::new(), glow: Vec::new(), peaks: Vec::new(), vu: [0.0; 2], hold: [0; 2], fft, re: vec![0.0; FFT], im: vec![0.0; FFT], spec: vec![0.0; FFT / 2], loaded: false, colors: None, bars: 0, flow: 0.0, last: None, hues: (0.5, 0.75), hues_for: None }
     }
     pub fn invalidate(&mut self) {
         self.w = 0;
@@ -58,6 +65,9 @@ impl ScopeState {
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     app.scope.drawn = true;
+    if app.scope.mode == "spectro" {
+        song_hues(app);
+    }
     if !app.scope.loaded {
         app.scope.mode = app.player.st.lock().opts.visualizer.clone();
         app.scope.loaded = true;
@@ -89,7 +99,17 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             "vu" => vu(s, &frames, &col),
             "spectro" => {
                 spectrum(s, &frames);
-                spectro(s, &col, sr)
+                // a steady fall: rows by the clock, not by how often the screen is drawn
+                let now = ui.input(|i| i.time);
+                let playing = app.player.engine.status().playing;
+                let dt = s.last.map(|l| (now - l) as f32).unwrap_or(0.0).clamp(0.0, 0.25);
+                s.last = Some(now);
+                if playing {
+                    s.flow += dt * FALL;
+                }
+                let rows = s.flow as usize;
+                s.flow -= rows as f32;
+                waterfall(s, sr, rows);
             }
             _ => {
                 spectrum(s, &frames);
@@ -106,6 +126,17 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     if let Some(t) = &s.tex {
         ui.painter().image(t.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+    }
+    if s.mode == "spectro" {
+        // older rows fade as they fall
+        let mut m = eframe::egui::Mesh::default();
+        let (clear, bg) = (Color32::TRANSPARENT, super::widgets::with_alpha(pal.lcd_bg, 235));
+        for (p, c) in [(r.left_top(), clear), (r.right_top(), clear), (r.right_bottom(), bg), (r.left_bottom(), bg)] {
+            m.colored_vertex(p, c);
+        }
+        m.add_triangle(0, 1, 2);
+        m.add_triangle(0, 2, 3);
+        ui.painter().add(m);
     }
     if s.mode == "off" {
         ui.painter().text(r.center(), eframe::egui::Align2::CENTER_CENTER, "VISUALIZER OFF · CLICK TO TURN ON", px(6.0), pal.faint);
@@ -332,14 +363,76 @@ fn vu(s: &mut ScopeState, frames: &[[f32; 2]], c: &Cols) {
     }
 }
 
-fn spectro(s: &mut ScopeState, c: &Cols, sr: f32) {
-    let (w, h) = (s.w, s.h);
-    for y in 0..h {
-        s.buf.copy_within(y * w + 1..y * w + w, y * w);
+/// Waterfall rows a second (half-resolution pixels: twice that on screen).
+const FALL: f32 = 60.0;
+
+/// The song's two hues (0..1): its cover's main colours, or (no colourful cover) picked from the
+/// song itself, so every song looks a little different.
+fn song_hues(app: &mut App) {
+    let t = app.current_track();
+    let key = t.as_ref().map(|t| format!("{}|{}", t.id, t.thumb.clone().or(t.cover.clone()).unwrap_or_default()));
+    if key == app.scope.hues_for {
+        return;
     }
-    for y in 0..h {
-        let v = band(s, h - 1 - y, h, sr);
-        s.buf[y * w + w - 1] = c.heat[(v.powf(1.4) * 255.0) as usize];
+    app.scope.hues_for = key;
+    let Some(t) = t else { return };
+    if let Some([a, b, _]) = app.scope.colors {
+        app.scope.hues = (hue(a), hue(b));
+        return;
+    }
+    let from_cover = t.thumb.as_ref().or(t.cover.as_ref()).and_then(|c| image::open(app.lib.cover_path(c)).ok()).and_then(|img| super::covertheme::cover_colors(&img.resize_exact(48, 48, image::imageops::FilterType::Triangle).to_rgb8()));
+    app.scope.hues = match from_cover {
+        Some((a, Some(b))) => (hue(a), hue(b)),
+        Some((a, None)) => (hue(a), (hue(a) + 0.18) % 1.0),
+        None => {
+            let h = t.id.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+            let a = (h % 360) as f32 / 360.0;
+            (a, (a + 0.25) % 1.0)
+        }
+    };
+}
+
+fn hue(c: Color32) -> f32 {
+    eframe::egui::ecolor::Hsva::from(c).h
+}
+
+/// The waterfall: `rows` new lines at the top (the sound now), the rest falls down. Mirrored,
+/// bass in the middle and treble at the edges; colour goes from the song's first hue (bass) to
+/// its second (treble) and shifts with how bright the sound is, loud parts glow toward white.
+fn waterfall(s: &mut ScopeState, sr: f32, rows: usize) {
+    let (w, h) = (s.w, s.h);
+    if rows == 0 || w < 2 || h < 2 {
+        return;
+    }
+    let rows = rows.min(h);
+    s.buf.copy_within(0..(h - rows) * w, rows * w);
+    let half = w.div_ceil(2).max(1);
+    let vals: Vec<f32> = (0..half).map(|i| band(s, i, half, sr)).collect();
+    // how much is high up (0 = all bass, 1 = all treble): the colour leans that way
+    let total: f32 = vals.iter().sum::<f32>().max(1e-6);
+    let bright = vals.iter().enumerate().map(|(i, v)| v * i as f32).sum::<f32>() / total / half as f32;
+    let (h1, h2) = s.hues;
+    // the shorter way round the colour wheel from one hue to the other
+    let mut d = h2 - h1;
+    if d > 0.5 {
+        d -= 1.0;
+    } else if d < -0.5 {
+        d += 1.0;
+    }
+    let line: Vec<Color32> = (0..w)
+        .map(|x| {
+            let f = ((x as f32 + 0.5 - w as f32 / 2.0).abs() / (w as f32 / 2.0)).min(1.0);
+            // (between two bands: blended, so the low end isn't a row of blocks)
+            let at = f * (half - 1) as f32;
+            let (i, k) = (at as usize, at.fract());
+            let v = (vals[i] * (1.0 - k) + vals[(i + 1).min(half - 1)] * k).powf(1.6);
+            let hh = (h1 + d * f + (bright - 0.3) * 0.12).rem_euclid(1.0);
+            let sat = (0.95 - (v - 0.75).max(0.0) * 2.4).clamp(0.2, 0.95);
+            Color32::from(eframe::egui::ecolor::Hsva::new(hh, sat, v.clamp(0.0, 1.0), 1.0))
+        })
+        .collect();
+    for y in 0..rows {
+        s.buf[y * w..y * w + w].copy_from_slice(&line);
     }
     let _ = SCOPE_LEN;
 }

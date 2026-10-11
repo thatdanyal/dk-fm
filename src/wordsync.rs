@@ -151,26 +151,22 @@ fn estimate_p(text: &str, start: f64, gap: f64, per_syl: f64, most: f64, even: f
     out
 }
 
-/// Times for `text` sung evenly (by syllables) from `start` to `end`: a translation shown on its
-/// own, sharing out the original line's time.
-pub fn spread(text: &str, start: f64, end: f64) -> Vec<f64> {
-    let u = units(text);
-    let syl: Vec<f64> = u.iter().map(|r| syllables(&text[r.0..r.1]) + 1.0).collect();
-    let total = syl.iter().sum::<f64>().max(1.0);
-    let mut out = Vec::with_capacity(u.len() + 1);
-    let mut acc = 0.0;
-    for s in &syl {
-        out.push(start + acc / total * (end - start));
-        acc += s;
-    }
-    out.push(end);
-    out
+/// Whether a line has exact word times (that fit its words).
+pub fn is_exact(exact: Option<&Vec<f64>>, text: &str) -> bool {
+    exact.is_some_and(|t| t.len() == units(text).len() + 1 && t.len() > 1)
+}
+
+/// How far a sweep across a line without exact word times has got at `pos` (0-1): from its
+/// start to when its singing is estimated to end.
+pub fn sweep(times: &[f64], pos: f64) -> f32 {
+    let (a, b) = (times[0], *times.last().unwrap_or(&times[0]));
+    ((pos - a) / (b - a).max(0.1)).clamp(0.0, 1.0) as f32
 }
 
 /// A line's times: exact ones if they fit its units, else the estimate.
 pub fn line_times(exact: Option<&Vec<f64>>, text: &str, start: f64, gap: f64) -> Vec<f64> {
     match exact {
-        Some(t) if t.len() == units(text).len() + 1 && t.len() > 1 => t.clone(),
+        Some(t) if is_exact(Some(t), text) => t.clone(),
         _ => estimate(text, start, gap),
     }
 }

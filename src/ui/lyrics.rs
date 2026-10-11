@@ -367,11 +367,14 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                             _ if text.is_empty() => "♪",
                             _ => text.as_str(),
                         };
-                        let label = if sing && Some(i) == active && !text.is_empty() {
-                            // sing-along: each word lights up the moment it's sung (a translation
-                            // shown alone shares the line's time out among its own words)
-                            let mine = times_of(i);
-                            let times = if txt == text.as_str() { mine } else { crate::wordsync::spread(txt, mine[0], *mine.last().unwrap()) };
+                        // sing-along: with exact word times each word lights up the moment it's
+                        // sung; without them (only the line's time is known) the colour sweeps
+                        // smoothly across the line, as does a translation shown alone
+                        let singing = sing && Some(i) == active && !text.is_empty();
+                        let by_word = singing && txt == text.as_str() && crate::wordsync::is_exact(exact.as_ref().and_then(|e| e.get(i)), text);
+                        let sweep = (singing && !by_word).then(|| crate::wordsync::sweep(&times_of(i), pos));
+                        let label = if by_word {
+                            let times = times_of(i);
                             let cut = crate::wordsync::sung_upto(txt, &times, pos);
                             // wake up for the next word, not before
                             if let (Some(next), true) = (times.iter().find(|w| **w > pos), status.playing) {
@@ -384,10 +387,35 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                             job.append(&txt[cut..], 0.0, f(to_come));
                             job.halign = egui::Align::Center;
                             egui::WidgetText::LayoutJob(job)
+                        } else if sweep.is_some() {
+                            egui::RichText::new(txt).font(vt(size)).color(sung_colors(&pal).1).into()
                         } else {
                             egui::RichText::new(txt).font(vt(size)).color(color).into()
                         };
-                        let mut r = ui.add(egui::Label::new(label).wrap().sense(egui::Sense::click()));
+                        let mut r = match sweep {
+                            Some(f) => {
+                                // the line in the colour still to come, then again in the sung
+                                // colour cut off where the sweep has got to (row by row)
+                                let (at, galley, resp) = egui::Label::new(label).wrap().sense(egui::Sense::click()).layout_in_ui(ui);
+                                let p = ui.painter();
+                                p.galley(at, galley.clone(), pal.dim);
+                                let mut left = f * galley.rows.iter().map(|r| r.rect.width()).sum::<f32>();
+                                for row in &galley.rows {
+                                    if left <= 0.0 {
+                                        break;
+                                    }
+                                    let rr = row.rect.translate(at.to_vec2());
+                                    let lit = egui::Rect::from_min_size(rr.min - egui::vec2(2.0, 2.0), egui::vec2(left.min(rr.width()) + 2.0, rr.height() + 4.0));
+                                    p.with_clip_rect(lit.intersect(p.clip_rect())).galley_with_override_text_color(at, galley.clone(), sung_colors(&pal).0);
+                                    left -= rr.width();
+                                }
+                                if f < 1.0 && status.playing {
+                                    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+                                }
+                                resp
+                            }
+                            None => ui.add(egui::Label::new(label).wrap().sense(egui::Sense::click())),
+                        };
                         // its translation right under it, smaller (lit with it)
                         if let (Some(u), false) = (&under, only) {
                             let gap = ui.spacing().item_spacing.y;
@@ -504,7 +532,7 @@ fn timing_bar(app: &mut App, ui: &mut Ui, area: egui::Rect, id: &str, offset: f6
     }
     let mid = if offset.abs() < 0.05 { "IN TIME".to_string() } else { format!("{:+.1} S", offset) };
     p.text(bar.center() - egui::vec2(0.0, 6.0), egui::Align2::CENTER_CENTER, mid, px(6.0), pal.accent2);
-    p.text(bar.center() + egui::vec2(0.0, 7.0), egui::Align2::CENTER_CENTER, if exact { "exact word timing" } else { "estimated word timing" }, vt(14.0), pal.dim);
+    p.text(bar.center() + egui::vec2(0.0, 7.0), egui::Align2::CENTER_CENTER, if exact { "exact word timing" } else { "line timing: the colour sweeps across" }, vt(14.0), pal.dim);
     if by != 0.0 {
         app.lyrics.nudge(id, by);
     }

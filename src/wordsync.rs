@@ -4,8 +4,9 @@
 //! language have them, timed by hand to the album recording): its words are lined up with the
 //! song's own lyric lines (whatever source they came from) and each matched word takes its time.
 //! A song NetEase doesn't have (or a different recording: its length must match within 2 s) gets
-//! an estimate instead: each word's share of the line by its syllables, tuned against NetEase's
-//! times (about 0.29 s off on average, against 0.40 s for the old letter count).
+//! an estimate instead: each word's share of the line by its syllables, a quarter of it an even
+//! share per word, tuned against NetEase's times (78 songs: 0.40 s off on average and 0.09 s
+//! early, against 0.42 s and 0.21 s early when it used less of the line; `estimate_error`).
 //!
 //! Looked up once per song, when its lyrics are first sung along to, and saved beside its lyrics
 //! (lyrics/<id>.words.json; "nothing found" is retried after 30 days).
@@ -122,20 +123,27 @@ fn syllables(w: &str) -> f64 {
 /// unit's share by syllables (+1, words take time even when short), the last one held. Same shape
 /// as a line of `Times`.
 pub fn estimate(text: &str, start: f64, gap: f64) -> Vec<f64> {
+    estimate_p(text, start, gap, 0.36, 0.85, 0.25)
+}
+
+/// `estimate` with its numbers: seconds a syllable, the most of the gap used, and how much of
+/// an even share per word (spread over the same time) is mixed in.
+fn estimate_p(text: &str, start: f64, gap: f64, per_syl: f64, most: f64, even: f64) -> Vec<f64> {
     let u = units(text);
     if u.is_empty() {
         return vec![start, start + gap.min(1.0)];
     }
     let syl: Vec<f64> = u.iter().map(|r| syllables(&text[r.0..r.1])).collect();
     let total: f64 = syl.iter().sum();
-    // time until the last unit starts (fitted: 0.36 s a syllable + 0.4 s, at most three
-    // quarters of the gap less a breath)
-    let span = (total * 0.36 + 0.4).min((gap - 0.3) * 0.75).max(0.3);
+    // time until the last unit starts (fitted: 0.36 s a syllable + 0.4 s, at most 85% of the
+    // gap less a breath); each unit's start mixes its syllable share with an even share
+    let span = (total * per_syl + 0.4).min((gap - 0.3) * most).max(0.3);
     let weights: f64 = syl[..syl.len() - 1].iter().map(|s| s + 1.0).sum::<f64>().max(1.0);
     let mut out = Vec::with_capacity(u.len() + 1);
     let mut acc = 0.0;
-    for s in &syl {
-        out.push(start + acc / weights * span);
+    let n = (syl.len() - 1).max(1) as f64;
+    for (i, s) in syl.iter().enumerate() {
+        out.push(start + (acc / weights * (1.0 - even) + i as f64 / n * even) * span);
         acc += s + 1.0;
     }
     let last = *out.last().unwrap();
@@ -392,6 +400,100 @@ mod tests {
         // another recording (everything 5 s later): not used
         let late: Vec<Word> = words.iter().map(|(s, e, w)| (s + 5.0, e + 5.0, w.clone())).collect();
         assert!(align(&lines, &late).is_none());
+    }
+
+    /// DKFM_LIB=<library.json> DKFM_LYR=<lyrics folder> cargo test --release estimate_error -- --ignored --nocapture
+    /// how far estimated word starts are from NetEase's exact ones, for several ways of estimating
+    #[test]
+    #[ignore]
+    fn estimate_error() {
+        let (_g, _dir) = crate::store::test_profile("wordsync-err");
+        let lib: serde_json::Value = serde_json::from_slice(&std::fs::read(std::env::var("DKFM_LIB").unwrap()).unwrap()).unwrap();
+        let lyr = std::path::PathBuf::from(std::env::var("DKFM_LYR").unwrap());
+        let tracks: Vec<Track> = lib["tracks"].as_object().unwrap().values().filter_map(|v| serde_json::from_value(v.clone()).ok()).collect();
+        let even = |text: &str, start: f64, gap: f64, cap: bool| -> Vec<f64> {
+            let u = units(text);
+            let syl: f64 = u.iter().map(|r| syllables(&text[r.0..r.1])).sum();
+            let mut l = (gap - 0.3).max(0.3);
+            if cap {
+                l = l.min(syl * 0.6 + 1.0);
+            }
+            (0..u.len()).map(|i| start + i as f64 * l / u.len() as f64).collect()
+        };
+        let names = ["syllables (now)", "even (whole gap)", "even (capped)", "blend 50/50 capped", "blend 50/50 whole", "blend 70 syl/30 even capped"];
+        let mut err = vec![0.0f64; names.len()];
+        let (mut n, mut songs) = (0usize, 0);
+        let mut kept: Vec<(Vec<(f64, String)>, Times)> = Vec::new();
+        let (mut bias, mut early, mut late, mut shifts) = (0.0f64, (0.0f64, 0.0f64), (0.0f64, 0.0f64), Vec::new());
+        for t in tracks.iter() {
+            let Ok(b) = std::fs::read(lyr.join(format!("{}.json", t.id))) else { continue };
+            let v: serde_json::Value = serde_json::from_slice(&b).unwrap();
+            if v["kind"] != "synced" {
+                continue;
+            }
+            let lines: Vec<(f64, String)> = serde_json::from_value(v["lines"].clone()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let Some(x) = exact(t, &lines) else { continue };
+            songs += 1;
+            kept.push((lines.clone(), x.clone()));
+            for (i, (lt, text)) in lines.iter().enumerate() {
+                let Some(ex) = x.get(i).filter(|e| e.len() > 2) else { continue };
+                let gap = lines.get(i + 1).map(|l| l.0 - lt).unwrap_or(8.0);
+                // judged from the line's own start (the line time itself isn't what's estimated)
+                let shift = ex[0] - lt;
+                let est = estimate(text, *lt, gap);
+                let ev = even(text, *lt, gap, false);
+                let evc = even(text, *lt, gap, true);
+                let k = ex.len() - 1;
+                shifts.push(shift);
+                for w in 1..k {
+                    let truth = ex[w] - shift;
+                    bias += est[w] - truth;
+                    // by position in the line: first half / second half
+                    if w * 2 < k { early.0 += est[w] - truth; early.1 += 1.0 } else { late.0 += est[w] - truth; late.1 += 1.0 }
+                    let c = [est[w], ev[w], evc[w], 0.5 * est[w] + 0.5 * evc[w], 0.5 * est[w] + 0.5 * ev[w], 0.7 * est[w] + 0.3 * evc[w]];
+                    for (e, v) in err.iter_mut().zip(c) {
+                        *e += (v - truth).abs();
+                    }
+                    n += 1;
+                }
+            }
+            if songs >= 80 {
+                break;
+            }
+        }
+        println!("{songs} songs, {n} words");
+        let mut best: Vec<(f64, f64, f64, f64)> = Vec::new();
+        for per_syl in [0.36, 0.40, 0.44, 0.48, 0.52] {
+            for most in [0.75, 0.85, 0.95] {
+                for ev in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    let (mut e, mut m) = (0.0, 0usize);
+                    for (lines, x) in &kept {
+                        for (i, (lt, text)) in lines.iter().enumerate() {
+                            let Some(ex) = x.get(i).filter(|e| e.len() > 2) else { continue };
+                            let gap = lines.get(i + 1).map(|l| l.0 - lt).unwrap_or(8.0);
+                            let shift = ex[0] - lt;
+                            let est = estimate_p(text, *lt, gap, per_syl, most, ev);
+                            for w in 1..ex.len() - 1 {
+                                e += (est[w] - (ex[w] - shift)).abs();
+                                m += 1;
+                            }
+                        }
+                    }
+                    best.push((e / m as f64, per_syl, most, ev));
+                }
+            }
+        }
+        best.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for b in best.iter().take(8) {
+            println!("{:.3} s off: {} s a syllable, {} of the gap, {} even", b.0, b.1, b.2, b.3);
+        }
+        shifts.sort_by(f64::total_cmp);
+        println!("estimate bias {:+.3} s (first half of lines {:+.3}, second half {:+.3})", bias / n as f64, early.0 / early.1, late.0 / late.1);
+        println!("line start vs first sung word: median {:+.3}, p10 {:+.3}, p90 {:+.3}, mean |x| {:.3}", shifts[shifts.len() / 2], shifts[shifts.len() / 10], shifts[shifts.len() * 9 / 10], shifts.iter().map(|x| x.abs()).sum::<f64>() / shifts.len() as f64);
+        for (name, e) in names.iter().zip(&err) {
+            println!("{name:30} {:.3} s off on average", e / n as f64);
+        }
     }
 
     /// DKFM_LIB=<library.json> DKFM_LYR=<lyrics folder> cargo test --release real_songs -- --ignored --nocapture

@@ -112,7 +112,7 @@ fn run(stop: &AtomicBool, ticks: &Mutex<Vec<Tick>>, song: &crate::audio::Shared)
         let mix = down(&mix, srate);
         let level = rms(&you);
         floor = if level < floor { level.max(1e-4) } else { floor * 1.002 };
-        let voice = level > (floor * 4.0).max(0.006);
+        let voice = level > (floor * 3.0).max(0.004);
         let fit = if voice { pitch(&you).map(|f| fits(f, &chroma(&mix))) } else { None };
         let mut t = ticks.lock();
         t.push((pos, voice, fit));
@@ -212,7 +212,8 @@ pub fn line_score(ticks: &[Tick]) -> u32 {
         return 0;
     }
     let sung: Vec<&Tick> = ticks.iter().filter(|t| t.1).collect();
-    let timing = (sung.len() as f32 / ticks.len() as f32 / 0.6).min(1.0);
+    // (the window has some slack before and after the line: singing 45% of it is on time)
+    let timing = (sung.len() as f32 / ticks.len() as f32 / 0.45).min(1.0);
     if timing < 0.15 {
         return 0;
     }
@@ -220,18 +221,18 @@ pub fn line_score(ticks: &[Tick]) -> u32 {
     // a rapped (or spoken) line has few clear notes: it's judged on timing
     let tune = if notes.len() * 3 >= sung.len() {
         // (singing in tune most of the time is enough for full marks)
-        (notes.iter().sum::<f32>() / notes.len() as f32 / 0.7).min(1.0)
+        (notes.iter().sum::<f32>() / notes.len() as f32 / 0.55).min(1.0)
     } else {
-        timing.min(0.85)
+        timing.min(0.95)
     };
     ((timing * 0.5 + tune * 0.5) * 100.0).round() as u32
 }
 
 pub fn grade(score: u32) -> &'static str {
     match score {
-        85.. => "PERFECT!",
-        65..=84 => "GREAT!",
-        40..=64 => "GOOD",
+        80.. => "PERFECT!",
+        60..=79 => "GREAT!",
+        35..=59 => "GOOD",
         _ => "MISS",
     }
 }

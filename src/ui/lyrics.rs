@@ -414,7 +414,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
             });
             // sing-along score: grade the lines that ended, and show how it's going
             if sing {
-                super::nowplaying::score_lines(app, &t.id, &lines, pos, &|i| *times_of(i).last().unwrap());
+                super::nowplaying::score_lines(app, &t.id, &lines, pos, offset, &|i| *times_of(i).last().unwrap());
                 super::nowplaying::score_overlay(app, ui, out.inner_rect, true);
             }
             // sing-along: after a long break, three dots over the next line go out one a second

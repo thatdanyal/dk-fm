@@ -57,8 +57,9 @@ impl Score {
 }
 
 /// Sing-along scoring: grades the lines that just ended (called with the synced lyrics drawn).
-/// `end_of(i)`: when line i's singing ends.
-pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64, end_of: &dyn Fn(usize) -> f64) {
+/// `end_of(i)`: when line i's singing ends. Times are the lyrics' (`pos` = the song's position
+/// less the song's EARLIER / LATER `offset`).
+pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64, offset: f64, end_of: &dyn Fn(usize) -> f64) {
     let Some(s) = app.theater.score.as_mut() else { return };
     let err = s.listener.error.lock().take();
     if let Some(e) = err {
@@ -86,11 +87,13 @@ pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64, e
             s.next += 1;
             continue;
         }
-        let end = end_of(s.next);
+        // a little slack: you hear a word before you sing it, and hold the last one
+        let end = end_of(s.next) + 0.6;
         if pos < end {
             break;
         }
-        let heard: Vec<crate::karaoke::Tick> = s.listener.ticks.lock().iter().filter(|t| t.0 >= *at && t.0 <= end).copied().collect();
+        // (what the microphone heard is timed by the song: moved to the lyrics' time)
+        let heard: Vec<crate::karaoke::Tick> = s.listener.ticks.lock().iter().filter(|t| t.0 - offset >= *at - 0.25 && t.0 - offset <= end).copied().collect();
         let g = crate::karaoke::line_score(&heard);
         s.grades.push(g);
         s.last = Some((g, std::time::Instant::now()));

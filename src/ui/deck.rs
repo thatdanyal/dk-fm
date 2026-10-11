@@ -335,6 +335,11 @@ fn cover(app: &mut App, ui: &mut Ui, r: Rect, t: Option<&crate::store::Track>, s
         }
     }
     frame_rect(ui.painter(), r, 2.0, pal.line_hi);
+    // right-click the cover: replace it (or the lyrics) for a song of yours
+    if let Some(t) = t.filter(|t| app.lib.track(&t.id).is_some()) {
+        let resp = ui.interact(r, ui.id().with(("deck-cover", r.min.x as i32, r.min.y as i32)), Sense::click());
+        resp.context_menu(|ui| super::browser::replace_items(app, ui, Some(t)));
+    }
 }
 
 fn codec_label(t: &crate::store::Track) -> String {

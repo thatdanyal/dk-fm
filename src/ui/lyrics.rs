@@ -63,6 +63,12 @@ impl LyricsState {
         }
     }
 
+    /// New lyrics were picked for a song (REPLACE LYRICS): loaded again, translated again.
+    pub fn replaced(&mut self, id: &str) {
+        self.forget(id);
+        self.tr.lock().retain(|k, _| k.0 != id);
+    }
+
     /// Drop what's known about a song's lyrics (it got new audio): looked up again when shown.
     pub fn forget(&mut self, id: &str) {
         self.cache.lock().remove(id);
@@ -220,6 +226,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
     let only = mode == "only";
     let mut cycle = false;
     let mut retry = false;
+    let mut replace = false;
     match lyr {
         Lyr::Loading => center(ui, "SEARCHING…", &pal),
         Lyr::None => {
@@ -227,7 +234,14 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                 ui.add_space((ui.available_height() / 2.0 - 30.0).max(4.0));
                 ui.label(egui::RichText::new("NO LYRICS FOUND").font(px(8.0)).color(pal.dim));
                 ui.add_space(6.0);
-                retry = ui.add(egui::Button::new(egui::RichText::new("LOOK AGAIN").font(px(6.0)))).on_hover_text("Search LRCLIB and YouTube captions again").clicked();
+                ui.horizontal(|ui| {
+                    let w = ui.available_width();
+                    ui.add_space((w - 270.0).max(0.0) / 2.0);
+                    retry = ui.add(egui::Button::new(egui::RichText::new("LOOK AGAIN").font(px(6.0)))).on_hover_text("Search LRCLIB and YouTube captions again").clicked();
+                    if ui.add(egui::Button::new(egui::RichText::new("ADD THEM…").font(px(6.0)))).on_hover_text("Find them yourself, or type / paste them").clicked() {
+                        replace = true;
+                    }
+                });
             });
         }
         Lyr::Instrumental => center(ui, "♪ INSTRUMENTAL ♪", &pal),
@@ -257,7 +271,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                         }
                     }
                     ui.add_space(10.0);
-                    ui.label(egui::RichText::new(source.label()).font(px(5.0)).color(pal.faint));
+                    replace |= source_line(ui, &pal, source);
                     cycle = tr_footer(ui, &pal, tr.as_ref(), only);
                 });
             });
@@ -393,7 +407,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                         }
                     }
                     ui.add_space(16.0);
-                    ui.label(egui::RichText::new(source.label()).font(px(5.0)).color(pal.faint));
+                    replace |= source_line(ui, &pal, source);
                     cycle = tr_footer(ui, &pal, tr.as_ref(), only);
                 });
                 ui.add_space(view_h * 0.5);
@@ -442,6 +456,9 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
     if cycle {
         app.edit_settings(|s| s.translate = if s.translate == "only" { "under".into() } else { "only".into() });
     }
+    if replace {
+        super::newlyrics::open(app, &t.id, ui.ctx());
+    }
     if retry {
         crate::lyricsrc::forget(&t.id);
         crate::wordsync::forget(&t.id);
@@ -451,8 +468,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
 }
 
 /// Sing-along's bar (bottom of the lyrics, while the mouse is over them or just after a nudge):
-/// VOCALS on / off (karaoke: the singer taken down), lyrics EARLIER / LATER for this song ([ and ]
-/// too) and where the word times came from.
+/// lyrics EARLIER / LATER for this song ([ and ] too) and where the word times came from.
 fn timing_bar(app: &mut App, ui: &mut Ui, area: egui::Rect, id: &str, offset: f64, exact: bool) {
     let pal = app.pal;
     let mut by = 0.0;
@@ -466,7 +482,7 @@ fn timing_bar(app: &mut App, ui: &mut Ui, area: egui::Rect, id: &str, offset: f6
     if !ui.rect_contains_pointer(area) && !recent && by == 0.0 {
         return;
     }
-    let bar = egui::Rect::from_center_size(egui::pos2(area.center().x, area.bottom() - 22.0), egui::vec2(500.0_f32.min(area.width() - 8.0), 30.0));
+    let bar = egui::Rect::from_center_size(egui::pos2(area.center().x, area.bottom() - 22.0), egui::vec2(390.0_f32.min(area.width() - 8.0), 30.0));
     let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("lyric-timing"))).with_clip_rect(area);
     p.rect_filled(bar, 0.0, super::widgets::with_alpha(pal.panel, 235));
     p.rect_stroke(bar, 0.0, egui::Stroke::new(1.5_f32, pal.line), egui::StrokeKind::Inside);
@@ -480,17 +496,6 @@ fn timing_bar(app: &mut App, ui: &mut Ui, area: egui::Rect, id: &str, offset: f6
         resp.on_hover_text(tip).clicked()
     };
     let w = 92.0;
-    let cut = app.player.vocals_cut();
-    let vr = egui::Rect::from_min_size(bar.min, egui::vec2(110.0, bar.height()));
-    if cut {
-        p.rect_filled(vr.shrink(3.0), 0.0, super::widgets::with_alpha(pal.accent, 60));
-    }
-    if btn(ui, vr, if cut { "VOCALS: OFF" } else { "VOCALS: ON" }, "v", "Karaoke: take the singer's voice down (works on most studio songs: it takes out what's in the middle of the mix). The voice is back when THEATER closes") {
-        app.player.set_vocals_cut(!cut);
-        app.lyrics.nudged = Some(std::time::Instant::now());
-    }
-    p.vline(vr.right(), bar.y_range().shrink(5.0), egui::Stroke::new(1.0_f32, pal.line));
-    let bar = egui::Rect::from_min_max(egui::pos2(vr.right(), bar.top()), bar.max);
     if btn(ui, egui::Rect::from_min_size(bar.min, egui::vec2(w, bar.height())), "◀ EARLIER", "e", "The words come 0.1 s sooner ([)") {
         by = -0.1;
     }
@@ -510,6 +515,20 @@ fn timing_bar(app: &mut App, ui: &mut Ui, area: egui::Rect, id: &str, offset: f6
 
 /// "TRANSLATED FROM SPANISH · TRANSLATION ONLY / SHOW THE ORIGINAL TOO" under translated lyrics.
 /// True when clicked (switches between the two).
+/// Where the lyrics came from, and WRONG LYRICS? (opens REPLACE LYRICS: true when clicked).
+fn source_line(ui: &mut Ui, pal: &super::theme::Pal, source: Source) -> bool {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(source.label()).font(px(5.0)).color(pal.faint));
+        ui.add_space(8.0);
+        let r = ui.add(egui::Label::new(egui::RichText::new("WRONG LYRICS?").font(px(5.0)).color(pal.dim)).sense(egui::Sense::click()));
+        if r.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        r.on_hover_text("Pick other lyrics, or type / paste your own").clicked()
+    })
+    .inner
+}
+
 fn tr_footer(ui: &mut Ui, pal: &super::theme::Pal, tr: Option<&crate::lang::Translation>, only: bool) -> bool {
     let Some(tr) = tr else { return false };
     ui.add_space(4.0);

@@ -28,6 +28,8 @@ pub enum Source {
     YouTube,
     /// YouTube's automatic (speech-recognised) captions: often rough
     YouTubeAuto,
+    /// typed or pasted in REPLACE LYRICS
+    Yours,
 }
 
 impl Source {
@@ -37,6 +39,7 @@ impl Source {
             Source::File => "LYRICS · FROM THE FILE",
             Source::YouTube => "LYRICS · YOUTUBE CAPTIONS",
             Source::YouTubeAuto => "LYRICS · YOUTUBE AUTO-CAPTIONS (MAY BE ROUGH)",
+            Source::Yours => "LYRICS · ADDED BY YOU",
         }
     }
 }
@@ -130,6 +133,94 @@ pub fn find_light(t: &Track) -> bool {
 /// Forget what was found for a song (to look again).
 pub fn forget(id: &str) {
     let _ = std::fs::remove_file(cache_path(id));
+}
+
+/// The lyrics saved for a song, if any (REPLACE LYRICS starts from them).
+pub fn saved(id: &str) -> Option<Lyr> {
+    load(id).map(|l| l.0).filter(|l| !matches!(l, Lyr::None))
+}
+
+/// REPLACE LYRICS: these are the song's lyrics from now on (never looked up again by itself).
+/// Their word timing and translations are worked out again for the new words.
+pub fn choose(id: &str, l: &Lyr, source: Source) {
+    save(id, l, source);
+    forget_derived(id);
+}
+
+/// Forget a song's lyrics and everything worked out from them (to look them up again).
+pub fn forget_all(id: &str) {
+    forget(id);
+    forget_derived(id);
+}
+
+/// A song's word timing and translations.
+fn forget_derived(id: &str) {
+    crate::wordsync::forget(id);
+    let prefix = format!("{id}.");
+    for e in std::fs::read_dir(data_dir().join("lyrics")).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".tr.json") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Typed or pasted lyrics: with times like [01:23.45] they light up in time, else plain.
+pub fn from_text(text: &str) -> Lyr {
+    let synced = parse_lrc(text);
+    if synced.len() >= 2 && synced.iter().filter(|l| !l.1.is_empty()).count() >= 2 {
+        return Lyr::Synced(synced);
+    }
+    let plain = RE_TAGS.replace_all(text, "").lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_string();
+    if plain.is_empty() { Lyr::None } else { Lyr::Plain(plain) }
+}
+
+/// Lyrics as text to edit: synced lines as [mm:ss.xx] lines.
+pub fn to_text(l: &Lyr) -> String {
+    match l {
+        Lyr::Synced(v) => v.iter().map(|(t, s)| format!("[{:02}:{:05.2}] {s}", (*t / 60.0) as u32, t % 60.0)).collect::<Vec<_>>().join("\n"),
+        Lyr::Plain(s) => s.clone(),
+        _ => String::new(),
+    }
+}
+
+/// One of LRCLIB's lyrics for a search (REPLACE LYRICS).
+#[derive(Clone, Debug)]
+pub struct Found {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub duration: f64,
+    pub lyr: Lyr,
+}
+
+/// Search LRCLIB for any words (title, artist, a line). Synced ones first.
+pub fn search(q: &str) -> Result<Vec<Found>, String> {
+    let ua = [("User-Agent", "DK.FM (https://github.com/thatdanyal/dk-fm)")];
+    let v = crate::net::get_json(&format!("https://lrclib.net/api/search?q={}", crate::net::enc(q)), &ua)?;
+    let mut out: Vec<Found> = v
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|x| {
+            let lyr = if x["instrumental"].as_bool() == Some(true) {
+                Lyr::Instrumental
+            } else if let Some(s) = x["syncedLyrics"].as_str().filter(|s| !s.trim().is_empty()) {
+                Lyr::Synced(parse_lrc(s))
+            } else {
+                Lyr::Plain(x["plainLyrics"].as_str().filter(|s| !s.trim().is_empty())?.trim().to_string())
+            };
+            let s = |k: &str| x[k].as_str().unwrap_or("").to_string();
+            Some(Found { title: s("trackName"), artist: s("artistName"), album: s("albumName"), duration: x["duration"].as_f64().unwrap_or(0.0), lyr })
+        })
+        .collect();
+    // (LRCLIB often has the same lyrics several times over)
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|f| seen.insert(to_text(&f.lyr).to_lowercase().split_whitespace().collect::<String>()));
+    out.sort_by_key(|f| !matches!(f.lyr, Lyr::Synced(_)));
+    out.truncate(30);
+    Ok(out)
 }
 
 static RE_TIME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(\d+):(\d+(?:\.\d+)?)\]").unwrap());
@@ -340,6 +431,29 @@ pub fn parse_vtt(src: &str) -> Vec<(f64, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REPLACE LYRICS' TYPE / PASTE: timed lines light up in time, others are plain text, and
+    /// lyrics turned into text and back are the same.
+    #[test]
+    fn typed_lyrics() {
+        let synced = Lyr::Synced(vec![(1.5, "Hello".into()), (65.25, "it's me".into()), (125.0, String::new())]);
+        let text = to_text(&synced);
+        assert_eq!(text, "[00:01.50] Hello
+[01:05.25] it's me
+[02:05.00] ");
+        assert_eq!(from_text(&text), synced);
+        assert_eq!(from_text("[Verse 1]
+Hello
+
+it's me  
+"), Lyr::Plain("Hello
+
+it's me".into()));
+        assert_eq!(from_text("  
+ "), Lyr::None);
+        // a single timed line isn't enough to light up in time
+        assert_eq!(from_text("[00:01.00] Hello"), Lyr::Plain("Hello".into()));
+    }
 
     #[test]
     fn lrc_lines() {

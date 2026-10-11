@@ -1688,6 +1688,7 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
     }
     quality_menu(app, ui, &sel);
     replace_audio_item(app, ui, one.as_ref());
+    replace_items(app, ui, one.as_ref());
     ui.separator();
     if let Some(p) = playlist {
         if ui.button(format!("Remove from \"{}\"", p.name)).clicked() {
@@ -1709,6 +1710,24 @@ pub(super) fn replace_audio_item(app: &mut App, ui: &mut Ui, one: Option<&crate:
     if r.on_hover_text("Wrong song or version playing? Pick the right one from YouTube: the title, cover, likes and playlists stay").clicked() {
         if let Some(t) = one {
             super::reaudio::open(app, &t.id, ui.ctx());
+        }
+        ui.close_menu();
+    }
+}
+
+/// "Replace lyrics…" and "Replace cover…" (any song of yours, one at a time).
+pub(super) fn replace_items(app: &mut App, ui: &mut Ui, one: Option<&crate::store::Track>) {
+    let r = ui.add_enabled(one.is_some(), egui::Button::new("Replace lyrics…")).on_disabled_hover_text("Pick one song");
+    if r.on_hover_text("Wrong lyrics, or none? Pick others from LRCLIB, or type / paste your own").clicked() {
+        if let Some(t) = one {
+            super::newlyrics::open(app, &t.id, ui.ctx());
+        }
+        ui.close_menu();
+    }
+    let r = ui.add_enabled(one.is_some(), egui::Button::new("Replace cover…")).on_disabled_hover_text("Pick one song");
+    if r.on_hover_text("Wrong cover, or none? Pick an album cover, a picture from your PC or a link (for this song or its whole album)").clicked() {
+        if let Some(t) = one {
+            super::newcover::open(app, &t.id, ui.ctx());
         }
         ui.close_menu();
     }

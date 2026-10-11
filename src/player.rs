@@ -47,7 +47,6 @@ pub struct Player {
     pub repaint: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// online songs in the queue (no file yet) that should be fetched: up now, or next
     pub wants: Mutex<Vec<String>>,
-    vocals_cut: AtomicBool,
 }
 
 impl Player {
@@ -94,7 +93,6 @@ impl Player {
             notices: Mutex::new(Vec::new()),
             repaint: Mutex::new(None),
             wants: Mutex::new(Vec::new()),
-            vocals_cut: AtomicBool::new(false),
         });
         MATCH.get_or_init(|| match_flag);
         p.engine.set_volume(opts.volume);
@@ -497,15 +495,6 @@ impl Player {
         self.st.lock().opts.crossfade = s;
         self.engine.send(Cmd::SetCrossfade(s as f32));
         self.save_opts();
-    }
-    /// Karaoke: the singer's voice taken down (THEATER's VOCALS button; not saved, it's back on
-    /// when THEATER closes).
-    pub fn set_vocals_cut(&self, on: bool) {
-        self.vocals_cut.store(on, Ordering::Relaxed);
-        self.engine.send(Cmd::SetVocals(if on { 1.0 } else { 0.0 }));
-    }
-    pub fn vocals_cut(&self) -> bool {
-        self.vocals_cut.load(Ordering::Relaxed)
     }
     pub fn set_normalize(&self, on: bool) {
         self.st.lock().opts.normalize = on;

@@ -23,6 +23,8 @@ pub mod plcover;
 pub mod plpick;
 pub mod preview;
 pub mod queue;
+pub mod newcover;
+pub mod newlyrics;
 pub mod reaudio;
 pub mod recs;
 pub mod scope;
@@ -153,6 +155,9 @@ pub struct App {
     pub fix: Option<reaudio::Fix>,
     /// songs getting new audio
     pub fixing: Vec<reaudio::Pending>,
+    /// REPLACE LYRICS / REPLACE COVER, open for a song
+    pub new_lyrics: Option<newlyrics::Fix>,
+    pub new_cover: Option<newcover::Fix>,
     /// "SAVE TO" for a song being downloaded (+ GET, KEEP)
     pub dest: Option<dest::Dest>,
     pub update: Arc<Mutex<UpdState>>,
@@ -574,6 +579,8 @@ impl App {
             pick: None,
             fix: None,
             fixing: Vec::new(),
+            new_lyrics: None,
+            new_cover: None,
             dest: None,
             update,
             update_dismissed: None,
@@ -1528,6 +1535,13 @@ impl App {
                         reaudio::open(self, &id, ctx);
                     }
                 }
+                // REPLACE LYRICS / REPLACE COVER, the same way
+                v @ ("newlyrics" | "newcover") => {
+                    let id = self.player.current_id().or_else(|| self.lib.data.read().tracks.keys().next().cloned());
+                    if let Some(id) = id {
+                        if v == "newlyrics" { newlyrics::open(self, &id, ctx) } else { newcover::open(self, &id, ctx) }
+                    }
+                }
                 // nowplaying2 / nowplaying3: another version of THEATER; theaterlayout: its editor
                 "nowplaying2" => self.open_theater(Some(1)),
                 "nowplaying3" => self.open_theater(Some(2)),
@@ -1748,10 +1762,6 @@ impl App {
         if !self.nowplaying && self.theater.score.is_some() {
             self.theater.score = None; // (the microphone stops)
         }
-        // karaoke's vocal cut is for THEATER: the singer is back when it closes
-        if !self.nowplaying && self.player.vocals_cut() {
-            self.player.set_vocals_cut(false);
-        }
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
         }
@@ -1908,6 +1918,8 @@ impl App {
         plpick::show_popup(self, ctx);
         dest::show(self, ctx);
         reaudio::show(self, ctx);
+        newlyrics::show(self, ctx);
+        newcover::show(self, ctx);
         if self.palette.is_some() {
             palette::show(self, ctx);
         }

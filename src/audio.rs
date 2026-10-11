@@ -33,7 +33,6 @@ pub enum Cmd {
     SetGain { id: String, db: f32 },
     SetLimiter(bool),
     /// karaoke: take the voice down (0 = as recorded, 1 = as far as it goes)
-    SetVocals(f32),
     SetLeveler(bool),
 }
 
@@ -436,19 +435,11 @@ struct Dsp {
     lev_env: f32,
     limiter: bool,
     lim_gain: f32,
-    /// karaoke vocal cut: how far (target, and now: it glides), and the filters keeping the
-    /// middle's lows and highs
-    vocals: f32,
-    voc_k: f32,
-    voc_band: [Biquad; 3],
 }
 
 impl Dsp {
     fn new(sr: f32) -> Self {
-        // what's kept of the middle: below 150 Hz (bass, kick drum) and above 6.5 kHz (cymbals)
-        // (two low passes in a row: a steep edge, so a low voice doesn't slip through with the bass)
-        let voc_band = [Biquad::design(3, 150.0, 0.0, 0.707, sr), Biquad::design(3, 150.0, 0.0, 0.707, sr), Biquad::design(4, 6500.0, 0.0, 0.707, sr)];
-        Self { sr, eq_on: false, preamp: 1.0, filters: Vec::new(), leveler: false, lev_env: 0.0, limiter: true, lim_gain: 1.0, vocals: 0.0, voc_k: 0.0, voc_band }
+        Self { sr, eq_on: false, preamp: 1.0, filters: Vec::new(), leveler: false, lev_env: 0.0, limiter: true, lim_gain: 1.0 }
     }
     fn set_eq(&mut self, enabled: bool, gains: [f32; 10], preamp: f32) {
         self.eq_on = enabled;
@@ -470,18 +461,6 @@ impl Dsp {
     fn process(&mut self, buf: &mut [f32]) {
         for fr in buf.chunks_mut(2) {
             let (mut l, mut r) = (fr[0], fr[1]);
-            if self.vocals > 0.0 || self.voc_k > 1e-4 {
-                // karaoke: what's in the middle of the mix (the singer, almost always) is taken
-                // out across the voice's range; what's panned left or right stays whole
-                self.voc_k += (self.vocals - self.voc_k) * 0.0005;
-                let (mid, side) = (0.5 * (l + r), 0.5 * (l - r));
-                let low = self.voc_band[0].run(mid, 0);
-                let kept = self.voc_band[1].run(low, 0) + self.voc_band[2].run(mid, 0);
-                let mid = mid + (kept - mid) * self.voc_k;
-                let make_up = 1.0 + 0.3 * self.voc_k;
-                l = (mid + side) * make_up;
-                r = (mid - side) * make_up;
-            }
             if self.eq_on {
                 l *= self.preamp;
                 r *= self.preamp;
@@ -761,7 +740,6 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     }
                 }
                 Cmd::SetLimiter(on) => dsp.limiter = on,
-                Cmd::SetVocals(k) => dsp.vocals = k.clamp(0.0, 1.0),
                 Cmd::SetLeveler(on) => dsp.leveler = on,
             }
         }
@@ -788,9 +766,9 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     stream_on = true;
                     if o.sr != sr {
                         sr = o.sr;
-                        let (limiter, leveler, vocals) = (dsp.limiter, dsp.leveler, dsp.vocals);
+                        let (limiter, leveler) = (dsp.limiter, dsp.leveler);
                         dsp = Dsp::new(sr as f32);
-                        (dsp.limiter, dsp.leveler, dsp.vocals) = (limiter, leveler, vocals);
+                        (dsp.limiter, dsp.leveler) = (limiter, leveler);
                         if let Some((e, g, p)) = eq_state {
                             dsp.set_eq(e, g, p);
                         }
@@ -955,31 +933,6 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
 
 #[cfg(test)]
 mod tests {
-    /// Karaoke's vocal cut: a voice in the middle of the mix goes, a guitar on one side and the
-    /// bass stay.
-    #[test]
-    fn vocal_cut_takes_out_the_middle() {
-        let sr = 48000.0;
-        let run = |l: &dyn Fn(f32) -> f32, r: &dyn Fn(f32) -> f32| -> f32 {
-            let mut d = super::Dsp::new(sr);
-            d.limiter = false;
-            d.vocals = 1.0;
-            let mut buf: Vec<f32> = (0..96000).flat_map(|i| { let t = i as f32 / sr; [l(t), r(t)] }).collect();
-            d.process(&mut buf);
-            // loudness of the last half second against the input's
-            let tail = &buf[buf.len() - 48000..];
-            let inp: f32 = (72000..96000).map(|i| { let t = i as f32 / sr; l(t) * l(t) + r(t) * r(t) }).sum();
-            (tail.iter().map(|x| x * x).sum::<f32>() / inp).sqrt()
-        };
-        let tone = |f: f32| move |t: f32| (t * f * std::f32::consts::TAU).sin() * 0.3;
-        let voice = run(&tone(440.0), &tone(440.0));
-        let side = run(&tone(440.0), &|_| 0.0);
-        let bass = run(&tone(50.0), &tone(50.0));
-        assert!(voice < 0.15, "voice {voice}");
-        assert!(side > 0.5, "guitar on one side {side}");
-        assert!(bass > 0.6, "bass {bass}");
-    }
-
     /// DKFM_DECODE_DIR=<folder> cargo test --release decode_folder -- --ignored --nocapture
     /// decodes every song in a folder to the end, like the player does, and reports any that fail
     #[test]

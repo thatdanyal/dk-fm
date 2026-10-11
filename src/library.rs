@@ -451,6 +451,22 @@ impl Library {
         save_jpeg(&sq, &self.cover_dir.join(&name)).then_some(name)
     }
 
+    /// REPLACE COVER: these songs show this picture (from `cover_jpeg`) from now on.
+    pub fn set_cover(&self, ids: &[String], jpeg: &[u8]) -> bool {
+        let (Some(cover), Some(thumb)) = self.save_cover(jpeg) else { return false };
+        {
+            let mut d = self.data.write();
+            for id in ids {
+                if let Some(t) = d.tracks.get_mut(id) {
+                    t.cover = Some(cover.clone());
+                    t.thumb = Some(thumb.clone());
+                }
+            }
+        }
+        self.changed();
+        true
+    }
+
     /// Builds the 2x2 mosaic cover from 4 cover files.
     pub fn make_mosaic(&self, covers: &[String]) -> Option<String> {
         let name = mosaic_name(covers);
@@ -1078,6 +1094,42 @@ fn merge_track(map: &mut HashMap<String, Track>, mut t: Track) {
     map.insert(t.id.clone(), t);
 }
 
+/// A picture made ready to be a song's cover: cut square (from the middle), at most 800 px, JPEG.
+pub fn cover_jpeg(data: &[u8]) -> Option<Vec<u8>> {
+    let img = image::load_from_memory(data).ok()?;
+    let side = img.width().min(img.height());
+    if side < 16 {
+        return None;
+    }
+    let mut sq = img.crop_imm((img.width() - side) / 2, (img.height() - side) / 2, side, side);
+    if side > 800 {
+        sq = sq.resize_exact(800, 800, image::imageops::FilterType::Lanczos3);
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90).encode_image(&sq.to_rgb8()).ok()?;
+    Some(out)
+}
+
+/// Put a cover (JPEG) into a music file's own tags, in place of the one there, so other players
+/// and a library rebuilt from the files show it too.
+pub fn embed_cover(path: &Path, jpeg: &[u8]) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::picture::{MimeType, Picture, PictureType};
+    use lofty::tag::Tag;
+    let mut tf = std::panic::catch_unwind(|| lofty::read_from_path(path)).map_err(|_| "unreadable file".to_string())?.map_err(|e| e.to_string())?;
+    if tf.primary_tag().is_none() {
+        let tt = tf.primary_tag_type();
+        tf.insert_tag(Tag::new(tt));
+    }
+    let tag = tf.primary_tag_mut().ok_or("no tags")?;
+    // (the first picture is the one players show: only this one is kept)
+    while !tag.pictures().is_empty() {
+        tag.remove_picture(0);
+    }
+    tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(MimeType::Jpeg), None, jpeg.to_vec()));
+    tf.save_to_path(path, WriteOptions::default()).map_err(|e| e.to_string())
+}
+
 fn save_jpeg(im: &image::DynamicImage, path: &Path) -> bool {
     let Ok(f) = std::fs::File::create(path) else { return false };
     image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(f), 85).encode_image(&im.to_rgb8()).is_ok()
@@ -1095,6 +1147,36 @@ fn mtime_ms(p: &Path) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REPLACE COVER: a picture is cut square and shrunk, shown for the songs, and put in the
+    /// file so reading the file again gives the same cover.
+    #[test]
+    fn replaced_cover_shows_and_goes_in_the_file() {
+        let (_profile, dir) = crate::store::test_profile("covertest");
+        let lib = Library::load();
+        let path = dir.join("song.mp3");
+        let frame: Vec<u8> = [0xFF, 0xFB, 0x90, 0x00].into_iter().chain(std::iter::repeat_n(0, 413)).collect();
+        std::fs::write(&path, frame.repeat(20)).unwrap();
+        let t = lib.read_track(&path).unwrap();
+        assert!(t.cover.is_none());
+        lib.data.write().tracks.insert(t.id.clone(), t.clone());
+        // a wide PNG: square, 800 px at most
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(1600, 900, image::Rgb([200, 30, 30]))).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let jpeg = cover_jpeg(&png).unwrap();
+        let im = image::load_from_memory(&jpeg).unwrap();
+        assert_eq!((im.width(), im.height()), (800, 800));
+        assert!(cover_jpeg(b"not a picture").is_none());
+        assert!(lib.set_cover(std::slice::from_ref(&t.id), &jpeg));
+        let shown = lib.track(&t.id).unwrap();
+        assert!(shown.cover.is_some() && lib.cover_path(shown.cover.as_ref().unwrap()).exists());
+        embed_cover(&path, &jpeg).unwrap();
+        // twice: still one picture
+        embed_cover(&path, &jpeg).unwrap();
+        let again = lib.read_track(&path).unwrap();
+        assert_eq!((again.cover, again.thumb), (shown.cover, shown.thumb));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn track(id: &str, artist: &str, title: &str, dur: f64, codec: &str, kbps: u32) -> Track {
         Track { id: id.into(), path: format!("/x/{id}.m4a"), artist: artist.into(), title: title.into(), duration: dur, codec: codec.into(), bitrate: Some(kbps), spotify_id: Some(format!("S{id}")), ..Default::default() }

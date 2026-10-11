@@ -23,6 +23,19 @@ pub struct LyricsState {
     last_pos: f64,
     /// translations: (song, language) -> None while it's being made
     tr: Arc<Mutex<HashMap<(String, String), Option<Result<crate::lang::Translation, String>>>>>,
+    /// sing-along word times per song
+    words: Arc<Mutex<HashMap<String, Words>>>,
+    /// your timing nudges (seconds per song, more = later), loaded when first needed
+    offsets: Option<HashMap<String, f64>>,
+    /// when the timing bar was last used (it stays up a moment after)
+    nudged: Option<std::time::Instant>,
+}
+
+#[derive(Clone)]
+enum Words {
+    Loading,
+    Estimated,
+    Exact(Arc<crate::wordsync::Times>),
 }
 
 /// How long before a line starts the text glides to it, so it's centred right as it's sung.
@@ -44,6 +57,60 @@ impl LyricsState {
         if t.len() > 8 {
             t.retain(|_, v| v.is_none());
         }
+        let mut w = self.words.lock();
+        if w.len() > 8 {
+            w.retain(|_, v| matches!(v, Words::Loading));
+        }
+    }
+
+    /// Drop what's known about a song's lyrics (it got new audio): looked up again when shown.
+    pub fn forget(&mut self, id: &str) {
+        self.cache.lock().remove(id);
+        self.words.lock().remove(id);
+        let o = self.offsets.get_or_insert_with(crate::wordsync::offsets);
+        if o.remove(id).is_some() {
+            crate::wordsync::save_offsets(o);
+        }
+    }
+
+    /// Your timing nudge for a song (seconds; more = the lyrics come later).
+    pub fn offset(&mut self, id: &str) -> f64 {
+        self.offsets.get_or_insert_with(crate::wordsync::offsets).get(id).copied().unwrap_or(0.0)
+    }
+
+    /// Nudge a song's lyrics by `by` seconds (saved).
+    pub fn nudge(&mut self, id: &str, by: f64) {
+        let o = self.offsets.get_or_insert_with(crate::wordsync::offsets);
+        let v = ((o.get(id).copied().unwrap_or(0.0) + by) * 10.0).round() / 10.0;
+        if v.abs() < 0.05 {
+            o.remove(id);
+        } else {
+            o.insert(id.to_string(), v.clamp(-30.0, 30.0));
+        }
+        crate::wordsync::save_offsets(o);
+        self.nudged = Some(std::time::Instant::now());
+    }
+
+    /// Word times for sing-along: exact ones once they're found (looked up in the background).
+    fn words_for(&self, t: &crate::store::Track, lines: &[(f64, String)], ctx: &egui::Context) -> Option<Arc<crate::wordsync::Times>> {
+        let have = self.words.lock().get(&t.id).cloned();
+        match have {
+            Some(Words::Exact(w)) => Some(w),
+            Some(_) => None,
+            None => {
+                self.words.lock().insert(t.id.clone(), Words::Loading);
+                let (slot, ctx, t, lines) = (self.words.clone(), ctx.clone(), t.clone(), lines.to_vec());
+                std::thread::Builder::new()
+                    .name("word-times".into())
+                    .spawn(move || {
+                        let w = crate::wordsync::exact(&t, &lines).map(|w| Words::Exact(Arc::new(w))).unwrap_or(Words::Estimated);
+                        slot.lock().insert(t.id.clone(), w);
+                        ctx.request_repaint();
+                    })
+                    .ok();
+                None
+            }
+        }
     }
 }
 
@@ -51,66 +118,26 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     show_sized(app, ui, 1.0, false);
 }
 
-/// About how long a line is sung for: a little per letter, never past the next line.
-pub(super) fn sung_for(text: &str, gap: f64) -> f64 {
-    let letters = text.chars().filter(|c| c.is_alphanumeric()).count() as f64;
-    (letters * 0.085 + 0.45).min(gap - 0.2).max(0.5)
-}
-
-/// Sing-along: the colour of words already sung, the accent that stands out most from the text
-/// (in a black-and-white theme the main accent can be close to the text colour).
-fn sung_color(pal: &super::theme::Pal) -> egui::Color32 {
-    let d = |a: egui::Color32| {
-        let b = pal.text;
-        (a.r() as i32 - b.r() as i32).abs() + (a.g() as i32 - b.g() as i32).abs() + (a.b() as i32 - b.b() as i32).abs()
-    };
-    if d(pal.accent) >= 120 || d(pal.accent) >= d(pal.accent2) { pal.accent } else { pal.accent2 }
-}
-
-/// Sing-along: how far into `text` the singer is (`t` seconds into a line sung for `dur`), as a
-/// byte position. Each word gets time by its length; the word being sung fills letter by letter.
-fn sung_upto(text: &str, t: f64, dur: f64) -> usize {
-    if t <= 0.0 {
-        return 0;
-    }
-    if t >= dur {
-        return text.len();
-    }
-    let words: Vec<(usize, usize)> = {
-        let mut v = Vec::new();
-        let mut start = None;
-        for (i, c) in text.char_indices() {
-            match (c.is_whitespace(), start) {
-                (false, None) => start = Some(i),
-                (true, Some(s)) => {
-                    v.push((s, i));
-                    start = None;
-                }
-                _ => {}
-            }
+/// Sing-along: the colours of words already sung and words still to come. An accent lights the
+/// sung ones if it differs from the text and stands out from the background more than the other
+/// lines do (a black-and-white theme's grey accent doesn't); otherwise sung words are the bright
+/// text and the ones to come are half as bright.
+fn sung_colors(pal: &super::theme::Pal) -> (egui::Color32, egui::Color32) {
+    let diff = |a: egui::Color32, b: egui::Color32| (a.r() as i32 - b.r() as i32).abs() + (a.g() as i32 - b.g() as i32).abs() + (a.b() as i32 - b.b() as i32).abs();
+    let lum = |c: egui::Color32| 0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32;
+    let pops = |c: egui::Color32| (lum(c) - lum(pal.bg)).abs() > (lum(pal.dim) - lum(pal.bg)).abs() * 1.15;
+    match [pal.accent, pal.accent2].into_iter().find(|c| diff(*c, pal.text) >= 120 && pops(*c)) {
+        Some(c) => (c, pal.text),
+        None => {
+            // (half way to the bright text: dimmer than what's sung, brighter than the other lines)
+            let mid = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
+            (pal.text, egui::Color32::from_rgb(mid(pal.dim.r(), pal.text.r()), mid(pal.dim.g(), pal.text.g()), mid(pal.dim.b(), pal.text.b())))
         }
-        if let Some(s) = start {
-            v.push((s, text.len()));
-        }
-        v
-    };
-    let weight = |w: &(usize, usize)| text[w.0..w.1].chars().count() as f64 + 1.5;
-    let total: f64 = words.iter().map(weight).sum();
-    let mut at = t / dur * total;
-    for w in &words {
-        let k = weight(w);
-        if at < k {
-            let chars: Vec<usize> = text[w.0..w.1].char_indices().map(|(i, _)| w.0 + i).chain([w.1]).collect();
-            let n = ((at / k) * (chars.len() - 1) as f64).round() as usize;
-            return chars[n.min(chars.len() - 1)];
-        }
-        at -= k;
     }
-    text.len()
 }
 
 /// Lyrics at `scale` times the size that fits the panel (THEATER uses bigger ones). `sing`:
-/// sing-along (the line lights up word by word, a 3-2-1 countdown before the singing starts).
+/// sing-along (each word lights up as it's sung, dots count in the singing after a long break).
 pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
     let pal = app.pal;
     let Some(t) = app.current_track() else {
@@ -241,11 +268,32 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
             // glides (eased) so the next line arrives centred exactly when it begins. Every line
             // is the same size: nothing jumps or re-wraps.
             let status = app.player.status();
-            let pos = status.position;
+            // (your nudge: lyrics that come later are earlier in the song's time)
+            let offset = app.lyrics.offset(&t.id);
+            let pos = status.position - offset;
+            let exact = if sing { app.lyrics.words_for(&t, &lines, ui.ctx()) } else { None };
+            let times_of = |i: usize| -> Vec<f64> {
+                let (lt, text) = &lines[i];
+                let gap = lines.get(i + 1).map(|l| l.0 - lt).unwrap_or(8.0);
+                crate::wordsync::line_times(exact.as_ref().and_then(|e| e.get(i)), text, *lt, gap)
+            };
             let active = lines.iter().rposition(|(t, _)| *t <= pos);
             let next_at = lines.get(active.map(|a| a + 1).unwrap_or(0)).map(|l| l.0);
             let until = next_at.map(|n| n - pos).unwrap_or(f64::MAX);
             let target = if until <= LEAD { Some(active.map(|a| a + 1).unwrap_or(0)) } else { active };
+            // sing-along: the next line with words, and whether it comes after a long break
+            // (dots count it in); a line's singing ends when its last word does
+            let lead_in = if sing {
+                let from = active.map(|a| a + 1).unwrap_or(0);
+                lines.iter().enumerate().skip(from).find(|(_, l)| !l.1.trim().is_empty()).and_then(|(n, (at, _))| {
+                    let sung_before = (0..n).rev().find(|&k| !lines[k].1.trim().is_empty());
+                    let quiet_from = sung_before.map(|k| *times_of(k).last().unwrap()).unwrap_or(0.0);
+                    (at - quiet_from >= 6.0 || sung_before.is_none() && *at >= 3.0).then_some((n, at - pos))
+                })
+            } else {
+                None
+            };
+            let mut lead_rect: Option<egui::Rect> = None;
             let st = &mut app.lyrics;
             // a new song, a seek or a jump of more than one line: snap there, no glide
             if st.song != t.id {
@@ -306,17 +354,20 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                             _ => text.as_str(),
                         };
                         let label = if sing && Some(i) == active && !text.is_empty() {
-                            // sing-along: what's been sung is lit, the rest waits in plain text
-                            let gap = lines.get(i + 1).map(|l| l.0 - lt).unwrap_or(8.0);
-                            let dur = sung_for(txt, gap);
-                            let cut = sung_upto(txt, pos - lt, dur);
-                            if cut < txt.len() && status.playing {
-                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(45));
+                            // sing-along: each word lights up the moment it's sung (a translation
+                            // shown alone shares the line's time out among its own words)
+                            let mine = times_of(i);
+                            let times = if txt == text.as_str() { mine } else { crate::wordsync::spread(txt, mine[0], *mine.last().unwrap()) };
+                            let cut = crate::wordsync::sung_upto(txt, &times, pos);
+                            // wake up for the next word, not before
+                            if let (Some(next), true) = (times.iter().find(|w| **w > pos), status.playing) {
+                                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((next - pos).clamp(0.01, 30.0)));
                             }
                             let mut job = egui::text::LayoutJob::default();
                             let f = |c: egui::Color32| egui::TextFormat { font_id: vt(size), color: c, ..Default::default() };
-                            job.append(&txt[..cut], 0.0, f(sung_color(&pal)));
-                            job.append(&txt[cut..], 0.0, f(pal.text));
+                            let (sung, to_come) = sung_colors(&pal);
+                            job.append(&txt[..cut], 0.0, f(sung));
+                            job.append(&txt[cut..], 0.0, f(to_come));
                             job.halign = egui::Align::Center;
                             egui::WidgetText::LayoutJob(job)
                         } else {
@@ -331,8 +382,11 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                             r = r.union(ui.add(egui::Label::new(egui::RichText::new(u).font(vt(size * 0.78)).color(c)).wrap().sense(egui::Sense::click())));
                         }
                         ys.push(r.rect.center().y - top);
+                        if lead_in.map(|l| l.0) == Some(i) {
+                            lead_rect = Some(r.rect);
+                        }
                         if r.clicked() {
-                            app.player.seek(*lt);
+                            app.player.seek((*lt + offset).max(0.0));
                         }
                         if r.hovered() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -346,37 +400,33 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
             });
             // sing-along score: grade the lines that ended, and show how it's going
             if sing {
-                super::nowplaying::score_lines(app, &t.id, &lines, pos);
+                super::nowplaying::score_lines(app, &t.id, &lines, pos, &|i| *times_of(i).last().unwrap());
                 super::nowplaying::score_overlay(app, ui, out.inner_rect, true);
             }
-            // sing-along: 3, 2, 1 before the singing starts (and after a long break)
-            if sing && status.playing {
-                let next = lines.iter().enumerate().skip(active.map(|a| a + 1).unwrap_or(0)).find(|(_, l)| !l.1.trim().is_empty());
-                if let Some((n, (at, _))) = next {
-                    let prev = active.map(|a| lines[a].0);
-                    let quiet = match active {
-                        None => true,
-                        Some(a) => lines[a].1.trim().is_empty() || at - prev.unwrap_or(0.0) >= 8.0 && pos - prev.unwrap_or(0.0) > sung_for(&lines[a].1, at - prev.unwrap_or(0.0)) + 1.0,
-                    };
-                    let left = at - pos;
-                    if quiet && n < lines.len() && left > 0.0 && left <= 3.0 {
-                        let area = out.inner_rect;
-                        let bh = (size * 3.4).min(area.height() * 0.45);
-                        let k = bh / (size * 3.4);
-                        let c = Pos2::new(area.center().x, area.top() + 10.0 + bh / 2.0);
-                        let p = ui.painter();
-                        let r = egui::Rect::from_center_size(c, egui::vec2(size * 4.2 * k, bh));
-                        let size = size * k;
-                        p.rect_filled(r, 0.0, super::widgets::with_alpha(pal.bg2, 235));
-                        p.rect_stroke(r, 0.0, egui::Stroke::new(2.0_f32, pal.accent), egui::StrokeKind::Inside);
-                        p.text(c - egui::vec2(0.0, size * 0.35), egui::Align2::CENTER_CENTER, format!("{}", left.ceil() as u32), vt(size * 2.6), pal.accent);
-                        p.text(c + egui::vec2(0.0, size * 1.15), egui::Align2::CENTER_CENTER, "GET READY", px((size * 0.3).max(6.0)), pal.text);
-                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((left - left.floor()).max(0.02)));
-                    } else if quiet && left > 3.0 && left < 30.0 {
-                        // wake up for the countdown
-                        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(left - 3.0));
+            // sing-along: after a long break, three dots over the next line go out one a second
+            if let (Some((_, left)), true) = (lead_in, status.playing) {
+                if left > 0.0 && left <= 3.0 {
+                    if let Some(r) = lead_rect.filter(|r| out.inner_rect.intersects(*r)) {
+                        let p = ui.painter().with_clip_rect(out.inner_rect);
+                        let (rad, step) = (size * 0.16, size * 0.7);
+                        let y = r.top() - size * 0.45;
+                        for k in 0..3 {
+                            let lit = (left.ceil() as i32) > k;
+                            let c = Pos2::new(r.center().x + (k as f32 - 1.0) * step, y);
+                            if lit {
+                                p.circle_filled(c, rad, sung_colors(&pal).0);
+                            } else {
+                                p.circle_stroke(c, rad, egui::Stroke::new(1.5_f32, pal.faint));
+                            }
+                        }
                     }
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((left - left.floor()).max(0.02)));
+                } else if left > 3.0 && left < 60.0 {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(left - 3.0));
                 }
+            }
+            if sing {
+                timing_bar(app, ui, out.inner_rect, &t.id, offset, exact.is_some());
             }
             let st = &mut app.lyrics;
             st.offset = out.state.offset.y;
@@ -394,7 +444,67 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
     }
     if retry {
         crate::lyricsrc::forget(&t.id);
+        crate::wordsync::forget(&t.id);
         app.lyrics.cache.lock().remove(&t.id);
+        app.lyrics.words.lock().remove(&t.id);
+    }
+}
+
+/// Sing-along's bar (bottom of the lyrics, while the mouse is over them or just after a nudge):
+/// VOCALS on / off (karaoke: the singer taken down), lyrics EARLIER / LATER for this song ([ and ]
+/// too) and where the word times came from.
+fn timing_bar(app: &mut App, ui: &mut Ui, area: egui::Rect, id: &str, offset: f64, exact: bool) {
+    let pal = app.pal;
+    let mut by = 0.0;
+    if ui.input(|i| i.key_pressed(egui::Key::OpenBracket) && i.modifiers.is_none()) {
+        by = -0.1;
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::CloseBracket) && i.modifiers.is_none()) {
+        by = 0.1;
+    }
+    let recent = app.lyrics.nudged.is_some_and(|t| t.elapsed().as_secs_f32() < 2.5);
+    if !ui.rect_contains_pointer(area) && !recent && by == 0.0 {
+        return;
+    }
+    let bar = egui::Rect::from_center_size(egui::pos2(area.center().x, area.bottom() - 22.0), egui::vec2(500.0_f32.min(area.width() - 8.0), 30.0));
+    let p = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("lyric-timing"))).with_clip_rect(area);
+    p.rect_filled(bar, 0.0, super::widgets::with_alpha(pal.panel, 235));
+    p.rect_stroke(bar, 0.0, egui::Stroke::new(1.5_f32, pal.line), egui::StrokeKind::Inside);
+    let btn = |ui: &mut Ui, r: egui::Rect, label: &str, salt: &str, tip: &str| -> bool {
+        let resp = ui.interact(r, ui.id().with(("lyric-timing", salt)), egui::Sense::click());
+        let c = if resp.hovered() { pal.accent } else { pal.text };
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        p.text(r.center(), egui::Align2::CENTER_CENTER, label, px(6.0), c);
+        resp.on_hover_text(tip).clicked()
+    };
+    let w = 92.0;
+    let cut = app.player.vocals_cut();
+    let vr = egui::Rect::from_min_size(bar.min, egui::vec2(110.0, bar.height()));
+    if cut {
+        p.rect_filled(vr.shrink(3.0), 0.0, super::widgets::with_alpha(pal.accent, 60));
+    }
+    if btn(ui, vr, if cut { "VOCALS: OFF" } else { "VOCALS: ON" }, "v", "Karaoke: take the singer's voice down (works on most studio songs: it takes out what's in the middle of the mix). The voice is back when THEATER closes") {
+        app.player.set_vocals_cut(!cut);
+        app.lyrics.nudged = Some(std::time::Instant::now());
+    }
+    p.vline(vr.right(), bar.y_range().shrink(5.0), egui::Stroke::new(1.0_f32, pal.line));
+    let bar = egui::Rect::from_min_max(egui::pos2(vr.right(), bar.top()), bar.max);
+    if btn(ui, egui::Rect::from_min_size(bar.min, egui::vec2(w, bar.height())), "◀ EARLIER", "e", "The words come 0.1 s sooner ([)") {
+        by = -0.1;
+    }
+    if btn(ui, egui::Rect::from_min_size(egui::pos2(bar.right() - w, bar.top()), egui::vec2(w, bar.height())), "LATER ▶", "l", "The words come 0.1 s later (])") {
+        by = 0.1;
+    }
+    let mid = if offset.abs() < 0.05 { "IN TIME".to_string() } else { format!("{:+.1} S", offset) };
+    p.text(bar.center() - egui::vec2(0.0, 6.0), egui::Align2::CENTER_CENTER, mid, px(6.0), pal.accent2);
+    p.text(bar.center() + egui::vec2(0.0, 7.0), egui::Align2::CENTER_CENTER, if exact { "exact word timing" } else { "estimated word timing" }, vt(14.0), pal.dim);
+    if by != 0.0 {
+        app.lyrics.nudge(id, by);
+    }
+    if recent {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
 
@@ -413,34 +523,4 @@ fn tr_footer(ui: &mut Ui, pal: &super::theme::Pal, tr: Option<&crate::lang::Tran
 
 fn center(ui: &mut Ui, s: &str, pal: &super::theme::Pal) {
     ui.centered_and_justified(|ui| ui.label(egui::RichText::new(s).font(px(8.0)).color(pal.dim)));
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sing_along_fills_word_by_word() {
-        let line = "Never gonna give you up";
-        let dur = sung_for(line, 6.0);
-        assert!(dur > 1.0 && dur < 3.0, "{dur}");
-        // not started, done, and always on a character boundary in between, moving forward
-        assert_eq!(sung_upto(line, -0.1, dur), 0);
-        assert_eq!(sung_upto(line, dur + 0.1, dur), line.len());
-        let mut last = 0;
-        for k in 0..=40 {
-            let at = sung_upto(line, dur * k as f64 / 40.0, dur);
-            assert!(at >= last && line.is_char_boundary(at));
-            last = at;
-        }
-        // half way through the time: about half way through the words
-        let mid = sung_upto(line, dur / 2.0, dur);
-        assert!((8..=16).contains(&mid), "{mid}");
-        // never runs past the next line
-        assert!(sung_for(line, 1.0) <= 0.8 + 1e-9);
-        // other alphabets
-        let jp = "君の名は 希望";
-        let at = sung_upto(jp, 0.5, 1.0);
-        assert!(jp.is_char_boundary(at) && at > 0 && at < jp.len());
-    }
 }

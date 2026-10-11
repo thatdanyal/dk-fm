@@ -210,10 +210,10 @@ impl Covers {
 
     /// Texture for a cover file at `size` px (None while loading).
     pub fn get(&mut self, ctx: &egui::Context, path: PathBuf, name: &str, size: u32) -> Option<egui::TextureId> {
-        /// covers kept at most (pixels: 16 MB is ~110 covers at 192 px)
-        const BUDGET: usize = 16 << 20;
+        /// covers kept at most (pixels: 8 MB is ~55 covers at 192 px, more than a screen holds)
+        const BUDGET: usize = 8 << 20;
         /// a cover not drawn for this long is let go (it loads again from disk in a moment)
-        const IDLE: f64 = 90.0;
+        const IDLE: f64 = 45.0;
         let now = ctx.input(|i| i.time);
         while let Ok((key, img)) = self.rx.try_recv() {
             self.pending.remove(&key);

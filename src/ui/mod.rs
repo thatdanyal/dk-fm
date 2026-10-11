@@ -23,6 +23,7 @@ pub mod plcover;
 pub mod plpick;
 pub mod preview;
 pub mod queue;
+pub mod reaudio;
 pub mod recs;
 pub mod scope;
 pub mod settings;
@@ -134,6 +135,9 @@ pub struct App {
     normal_size: Option<Vec2>,
     /// in the background (minimized or not focused): see system::went_away
     away: bool,
+    /// the last mouse / key input, and whether unused RAM was given back since
+    last_input: Instant,
+    idle_trimmed: bool,
     pub covers: widgets::Covers,
     pub browser: browser::BrowserState,
     pub import: import::ImportState,
@@ -145,6 +149,10 @@ pub struct App {
     pub palette: Option<palette::PaletteState>,
     /// "Add to playlist" checklist opened from a song's right-click menu
     pub pick: Option<plpick::Popup>,
+    /// REPLACE AUDIO, open for a song
+    pub fix: Option<reaudio::Fix>,
+    /// songs getting new audio
+    pub fixing: Vec<reaudio::Pending>,
     /// "SAVE TO" for a song being downloaded (+ GET, KEEP)
     pub dest: Option<dest::Dest>,
     pub update: Arc<Mutex<UpdState>>,
@@ -552,6 +560,8 @@ impl App {
             mini: false,
             normal_size: None,
             away: false,
+            last_input: Instant::now(),
+            idle_trimmed: false,
             covers,
             browser,
             import: import::ImportState::default(),
@@ -562,6 +572,8 @@ impl App {
             modal: None,
             palette: None,
             pick: None,
+            fix: None,
+            fixing: Vec::new(),
             dest: None,
             update,
             update_dismissed: None,
@@ -1509,6 +1521,13 @@ impl App {
                     if let Some(m) = self.home.mixes.first() { self.browser.set_view(browser::View::Mix(m.id.clone())); }
                 }
                 "nowplaying" => self.open_theater(None),
+                // REPLACE AUDIO for the song playing (DKFM_TEST_PLAY) or the first one
+                "reaudio" => {
+                    let id = self.player.current_id().or_else(|| self.lib.data.read().tracks.keys().next().cloned());
+                    if let Some(id) = id {
+                        reaudio::open(self, &id, ctx);
+                    }
+                }
                 // nowplaying2 / nowplaying3: another version of THEATER; theaterlayout: its editor
                 "nowplaying2" => self.open_theater(Some(1)),
                 "nowplaying3" => self.open_theater(Some(2)),
@@ -1729,15 +1748,32 @@ impl App {
         if !self.nowplaying && self.theater.score.is_some() {
             self.theater.score = None; // (the microphone stops)
         }
+        // karaoke's vocal cut is for THEATER: the singer is back when it closes
+        if !self.nowplaying && self.player.vocals_cut() {
+            self.player.set_vocals_cut(false);
+        }
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
         }
         let away = ctx.input(|i| !i.focused || i.viewport().minimized.unwrap_or(false));
         if away != self.away {
             self.away = away;
+            if away {
+                theme::fresh_fonts(ctx);
+            }
             system::went_away(away);
         }
+        // a minute with the mouse and keys untouched (just listening): give back unused RAM once
+        if ctx.input(|i| !i.events.is_empty() || i.pointer.is_moving()) {
+            self.last_input = Instant::now();
+            self.idle_trimmed = false;
+        } else if !self.idle_trimmed && self.last_input.elapsed() > Duration::from_secs(60) {
+            self.idle_trimmed = true;
+            theme::fresh_fonts(ctx);
+            system::trim_soon();
+        }
         preview::poll(self);
+        reaudio::poll(self);
         self.marks.clear();
         // notices from background workers
         let n: Vec<String> = self.player.notices.lock().drain(..).chain(self.dl.notices.lock().drain(..)).collect();
@@ -1871,6 +1907,7 @@ impl App {
         // overlays: palette, modal, update popup
         plpick::show_popup(self, ctx);
         dest::show(self, ctx);
+        reaudio::show(self, ctx);
         if self.palette.is_some() {
             palette::show(self, ctx);
         }

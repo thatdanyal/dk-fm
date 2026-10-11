@@ -91,18 +91,26 @@ pub fn trim_memory() {
 
 static AWAY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// DK.FM went to the background (minimized, or another window in front) or came back. After two
-/// minutes away it gives back the RAM it isn't using, like when it hides in the tray.
+/// DK.FM went to the background (minimized, or another window in front) or came back. After half
+/// a minute away it gives back the RAM it isn't using, like when it hides in the tray.
 pub fn went_away(away: bool) {
     let gen = AWAY.fetch_add(1, Ordering::Relaxed) + 1;
     if away {
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(120));
+            std::thread::sleep(std::time::Duration::from_secs(30));
             if AWAY.load(Ordering::Relaxed) == gen {
                 trim_memory();
             }
         });
     }
+}
+
+/// Give back unused RAM in a moment (after the frame being drawn now).
+pub fn trim_soon() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        trim_memory();
+    });
 }
 
 pub fn hide_window() {

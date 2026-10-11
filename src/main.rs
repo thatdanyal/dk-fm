@@ -27,6 +27,7 @@ mod system;
 mod ui;
 mod voice;
 mod watcher;
+mod wordsync;
 mod ytdlp;
 
 use parking_lot::Mutex;

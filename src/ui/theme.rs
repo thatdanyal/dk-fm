@@ -255,6 +255,15 @@ pub fn set_font(ctx: &egui::Context, choice: &str, pixel_headings: bool) {
     ctx.set_fonts(font_definitions());
 }
 
+/// Start the font texture afresh if it has grown big. Every letter drawn in every size and
+/// alphabet is kept in it (other languages' lyrics, big THEATER text, resizing) and egui never
+/// lets any go; rebuilt, it holds only what's on screen (drawn again next frame, a few ms).
+pub fn fresh_fonts(ctx: &egui::Context) {
+    if ctx.fonts(|f| f.font_image_size()[1]) > 512 {
+        ctx.set_fonts(font_definitions());
+    }
+}
+
 pub fn font_definitions() -> FontDefinitions {
     // Only our own fonts (egui's built-in set is 1.4 MB). Fallbacks, tried in order for any
     // character the retro fonts lack: accented/Greek/Cyrillic text, emoji, UI icons, then the

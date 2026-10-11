@@ -57,7 +57,8 @@ impl Score {
 }
 
 /// Sing-along scoring: grades the lines that just ended (called with the synced lyrics drawn).
-pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64) {
+/// `end_of(i)`: when line i's singing ends.
+pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64, end_of: &dyn Fn(usize) -> f64) {
     let Some(s) = app.theater.score.as_mut() else { return };
     let err = s.listener.error.lock().take();
     if let Some(e) = err {
@@ -85,8 +86,7 @@ pub fn score_lines(app: &mut App, id: &str, lines: &[(f64, String)], pos: f64) {
             s.next += 1;
             continue;
         }
-        let gap = lines.get(s.next + 1).map(|l| l.0 - at).unwrap_or(8.0);
-        let end = at + super::lyrics::sung_for(text, gap);
+        let end = end_of(s.next);
         if pos < end {
             break;
         }
@@ -779,7 +779,7 @@ fn editor(app: &mut App, ui: &mut Ui, r: Rect) -> Rect {
                 ui.label(egui::RichText::new("LYRICS SIZE").font(px(6.0)).color(pal.text));
                 ui.add(egui::Slider::new(&mut p.lyrics_size, 0.7..=2.6).show_value(false));
             });
-            ui.checkbox(&mut p.singalong, egui::RichText::new("Sing-along: words light up as they're sung, with a 3-2-1 countdown before the singing starts").font(vt(18.0)));
+            ui.checkbox(&mut p.singalong, egui::RichText::new("Sing-along: each word lights up as it's sung, dots count you in after a break").font(vt(18.0)));
             ui.checkbox(&mut p.auto_hide, egui::RichText::new("Hide the buttons and the mouse when it rests (3 s)").font(vt(18.0)));
             ui.add_space(8.0);
             ui.horizontal_wrapped(|ui| {

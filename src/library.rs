@@ -557,6 +557,15 @@ impl Library {
         self.quiet_changed();
     }
 
+    /// A song got new audio: its loudness and waveform are measured again.
+    pub fn forget_analysis(&self, id: &str) {
+        if let Some(t) = self.data.write().tracks.get_mut(id) {
+            t.gain_v2 = None;
+        }
+        let _ = std::fs::remove_file(crate::store::data_dir().join("waves").join(format!("{id}.bin")));
+        self.quiet_changed();
+    }
+
     pub fn set_gain(&self, id: &str, db: f32) {
         if let Some(t) = self.data.write().tracks.get_mut(id) {
             t.gain_v2 = Some(db);

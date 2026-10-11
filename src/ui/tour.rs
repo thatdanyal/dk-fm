@@ -30,7 +30,7 @@ pub const STEPS: [(&str, &str, &str, u32); 23] = [
     ("homepanel", "MADE FOR YOU", "Home's MADE FOR YOU mixes have your songs and new ones you don't have yet, side by side: double-click one to play it, + GET keeps it.", 4),
     ("theater", "THEATER, YOUR WAY", "Hover THEATER to pick one of your three versions (CLASSIC, KARAOKE, PARTY); a click opens your default. Inside, LAYOUT adds, removes and moves what's shown, renames a version and makes it the default. 1, 2, 3 switch; Esc leaves.", 4),
     ("settings", "LYRICS IN YOUR LANGUAGE", "Lyrics in another language are translated into yours, under each line. Pick your language in Settings > Language.", 4),
-    ("theater", "SING ALONG", "THEATER's KARAOKE version sings along: words light up as they're sung, with a 3-2-1 countdown before the singing starts. Turn it on for any version in THEATER > LAYOUT.", 5),
+    ("theater", "SING ALONG", "THEATER's KARAOKE version sings along: each word lights up the moment it's sung, and dots count you in after a break. Turn it on for any version in THEATER > LAYOUT.", 5),
     ("theater", "SCORE YOUR SINGING", "In a sing-along THEATER (KARAOKE), ♪ SCORE ME listens through your microphone and grades every line: PERFECT, GREAT, GOOD. Headphones give a fair score. Your best per song is kept.", 6),
     ("web", "FIND A SONG BY ITS LYRICS", "Remember a line but not the song? Type it in the search bar and pick LYRICS: your own songs that have it (click to play from that line) and the songs online.", 6),
     ("theme", "KEEP THESE COLOURS", "Like how the Album Cover theme looks with this song? THEME > + SAVE THESE COLOURS keeps it as a theme of yours.", 5),

@@ -97,5 +97,20 @@ pub fn lyrics(artist: &str, title: &str, album: &str, duration: f64) -> Option<V
     }
     let list = get_json(&format!("https://lrclib.net/api/search?artist_name={}&track_name={}", enc(artist), enc(title)), &ua).ok()?;
     let arr = list.as_array()?;
-    arr.iter().find(|x| x.get("syncedLyrics").map(|s| s.is_string()).unwrap_or(false)).or(arr.first()).cloned()
+    // the same recording (about the same length: a live, extended or sped-up one is timed
+    // differently), synced first
+    let off = |x: &&Value| if duration > 0.0 { x["duration"].as_f64().map(|d| (d - duration).abs()).unwrap_or(99.0) } else { 0.0 };
+    let synced = |x: &&Value| x.get("syncedLyrics").map(|s| s.is_string()).unwrap_or(false);
+    let same: Vec<&Value> = arr.iter().filter(|x| off(x) <= 3.0).collect();
+    match same.iter().filter(|x| synced(x)).min_by(|a, b| off(a).total_cmp(&off(b))) {
+        Some(x) => Some((*x).clone()),
+        // nothing that long with synced lyrics: plain lyrics (they have no timing to be wrong)
+        None => same.first().copied().or(arr.first()).map(|x| {
+            let mut x = x.clone();
+            if off(&&x) > 3.0 {
+                x["syncedLyrics"] = Value::Null;
+            }
+            x
+        }),
+    }
 }

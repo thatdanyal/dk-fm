@@ -136,6 +136,11 @@ static RE_TIME: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(\d+):(\d+(?:\
 static RE_TAGS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[[^\]]*\]").unwrap());
 static RE_FEAT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\s*[\(\[]\s*(feat|ft|with)[^\)\]]*[\)\]]").unwrap());
 
+/// A title without its "(feat. …)" part.
+pub fn bare_title(title: &str) -> String {
+    RE_FEAT.replace_all(title, "").trim().to_string()
+}
+
 pub fn parse_lrc(src: &str) -> Vec<(f64, String)> {
     let mut out = Vec::new();
     for line in src.lines() {

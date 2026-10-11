@@ -32,6 +32,8 @@ pub enum Cmd {
     SetCrossfade(f32),
     SetGain { id: String, db: f32 },
     SetLimiter(bool),
+    /// karaoke: take the voice down (0 = as recorded, 1 = as far as it goes)
+    SetVocals(f32),
     SetLeveler(bool),
 }
 
@@ -65,6 +67,9 @@ pub struct Shared {
     pub muted: AtomicBool,
     flush: AtomicU64,
     pub sample_rate: AtomicU32,
+    /// how long the sound card takes to play what it's handed (microseconds, from its own clock):
+    /// the position is what you hear, so lyrics stay in time on a slow device
+    latency_us: AtomicU32,
 }
 
 pub struct Engine {
@@ -83,6 +88,7 @@ impl Engine {
             volume: AtomicU32::new(0.64f32.to_bits()),
             muted: AtomicBool::new(false),
             flush: AtomicU64::new(0),
+            latency_us: AtomicU32::new(0),
             sample_rate: AtomicU32::new(48000),
         });
         let sh = shared.clone();
@@ -343,13 +349,24 @@ struct Biquad {
 }
 
 impl Biquad {
-    /// RBJ cookbook filters: kind 0 = low shelf, 1 = peaking, 2 = high shelf.
+    /// RBJ cookbook filters: kind 0 = low shelf, 1 = peaking, 2 = high shelf, 3 = low pass,
+    /// 4 = high pass.
     fn design(kind: u8, freq: f32, gain_db: f32, q: f32, sr: f32) -> Self {
         let a = 10f32.powf(gain_db / 40.0);
         let w0 = 2.0 * std::f32::consts::PI * (freq / sr).min(0.49);
         let (sin, cos) = w0.sin_cos();
         let (b0, b1, b2, a0, a1, a2);
         match kind {
+            3 | 4 => {
+                let alpha = sin / (2.0 * q);
+                let k = if kind == 3 { 1.0 - cos } else { 1.0 + cos };
+                b0 = k / 2.0;
+                b1 = if kind == 3 { k } else { -k };
+                b2 = k / 2.0;
+                a0 = 1.0 + alpha;
+                a1 = -2.0 * cos;
+                a2 = 1.0 - alpha;
+            }
             1 => {
                 let alpha = sin / (2.0 * q);
                 b0 = 1.0 + alpha * a;
@@ -419,11 +436,19 @@ struct Dsp {
     lev_env: f32,
     limiter: bool,
     lim_gain: f32,
+    /// karaoke vocal cut: how far (target, and now: it glides), and the filters keeping the
+    /// middle's lows and highs
+    vocals: f32,
+    voc_k: f32,
+    voc_band: [Biquad; 3],
 }
 
 impl Dsp {
     fn new(sr: f32) -> Self {
-        Self { sr, eq_on: false, preamp: 1.0, filters: Vec::new(), leveler: false, lev_env: 0.0, limiter: true, lim_gain: 1.0 }
+        // what's kept of the middle: below 150 Hz (bass, kick drum) and above 6.5 kHz (cymbals)
+        // (two low passes in a row: a steep edge, so a low voice doesn't slip through with the bass)
+        let voc_band = [Biquad::design(3, 150.0, 0.0, 0.707, sr), Biquad::design(3, 150.0, 0.0, 0.707, sr), Biquad::design(4, 6500.0, 0.0, 0.707, sr)];
+        Self { sr, eq_on: false, preamp: 1.0, filters: Vec::new(), leveler: false, lev_env: 0.0, limiter: true, lim_gain: 1.0, vocals: 0.0, voc_k: 0.0, voc_band }
     }
     fn set_eq(&mut self, enabled: bool, gains: [f32; 10], preamp: f32) {
         self.eq_on = enabled;
@@ -445,6 +470,18 @@ impl Dsp {
     fn process(&mut self, buf: &mut [f32]) {
         for fr in buf.chunks_mut(2) {
             let (mut l, mut r) = (fr[0], fr[1]);
+            if self.vocals > 0.0 || self.voc_k > 1e-4 {
+                // karaoke: what's in the middle of the mix (the singer, almost always) is taken
+                // out across the voice's range; what's panned left or right stays whole
+                self.voc_k += (self.vocals - self.voc_k) * 0.0005;
+                let (mid, side) = (0.5 * (l + r), 0.5 * (l - r));
+                let low = self.voc_band[0].run(mid, 0);
+                let kept = self.voc_band[1].run(low, 0) + self.voc_band[2].run(mid, 0);
+                let mid = mid + (kept - mid) * self.voc_k;
+                let make_up = 1.0 + 0.3 * self.voc_k;
+                l = (mid + side) * make_up;
+                r = (mid - side) * make_up;
+            }
             if self.eq_on {
                 l *= self.preamp;
                 r *= self.preamp;
@@ -517,7 +554,15 @@ fn open_output(host: &cpal::Host, shared: &Arc<Shared>) -> Option<Output> {
         // DKFM_AUDIO_DEBUG=1: print the loudness actually sent to the sound card, once a second
         let debug = std::env::var_os("DKFM_AUDIO_DEBUG").is_some();
         let (mut dbg_sum, mut dbg_n) = (0.0f64, 0usize);
-        let mut fill = move |out: &mut [f32]| {
+        let sh_lat = shared.clone();
+        let mut fill = move |out: &mut [f32], info: &cpal::OutputCallbackInfo| {
+            let ts = info.timestamp();
+            if let Some(d) = ts.playback.duration_since(&ts.callback) {
+                // (a smoothed reading; a nonsense one over half a second is ignored)
+                let us = d.as_micros().min(500_000) as u32;
+                let old = sh_lat.latency_us.load(Ordering::Relaxed);
+                sh_lat.latency_us.store(if old == 0 { us } else { (old * 15 + us) / 16 }, Ordering::Relaxed);
+            }
             let f = sh.flush.load(Ordering::Relaxed);
             if f != last_flush {
                 last_flush = f;
@@ -545,15 +590,15 @@ fn open_output(host: &cpal::Host, shared: &Arc<Shared>) -> Option<Output> {
             }
         };
         let stream = match config.sample_format() {
-            cpal::SampleFormat::F32 => device.build_output_stream(&stream_cfg, move |o: &mut [f32], _| fill(o), err, None).ok()?,
+            cpal::SampleFormat::F32 => device.build_output_stream(&stream_cfg, move |o: &mut [f32], info: &cpal::OutputCallbackInfo| fill(o, info), err, None).ok()?,
             cpal::SampleFormat::I16 => {
                 let mut tmp = Vec::new();
                 device
                     .build_output_stream(
                         &stream_cfg,
-                        move |o: &mut [i16], _| {
+                        move |o: &mut [i16], info: &cpal::OutputCallbackInfo| {
                             tmp.resize(o.len(), 0.0);
-                            fill(&mut tmp);
+                            fill(&mut tmp, info);
                             for (d, s) in o.iter_mut().zip(&tmp) {
                                 *d = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
                             }
@@ -568,9 +613,9 @@ fn open_output(host: &cpal::Host, shared: &Arc<Shared>) -> Option<Output> {
                 device
                     .build_output_stream(
                         &stream_cfg,
-                        move |o: &mut [u16], _| {
+                        move |o: &mut [u16], info: &cpal::OutputCallbackInfo| {
                             tmp.resize(o.len(), 0.0);
-                            fill(&mut tmp);
+                            fill(&mut tmp, info);
                             for (d, s) in o.iter_mut().zip(&tmp) {
                                 *d = ((s.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16;
                             }
@@ -716,6 +761,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     }
                 }
                 Cmd::SetLimiter(on) => dsp.limiter = on,
+                Cmd::SetVocals(k) => dsp.vocals = k.clamp(0.0, 1.0),
                 Cmd::SetLeveler(on) => dsp.leveler = on,
             }
         }
@@ -742,9 +788,9 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                     stream_on = true;
                     if o.sr != sr {
                         sr = o.sr;
-                        let (limiter, leveler) = (dsp.limiter, dsp.leveler);
+                        let (limiter, leveler, vocals) = (dsp.limiter, dsp.leveler, dsp.vocals);
                         dsp = Dsp::new(sr as f32);
-                        (dsp.limiter, dsp.leveler) = (limiter, leveler);
+                        (dsp.limiter, dsp.leveler, dsp.vocals) = (limiter, leveler, vocals);
                         if let Some((e, g, p)) = eq_state {
                             dsp.set_eq(e, g, p);
                         }
@@ -894,7 +940,8 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
         match cur.as_ref() {
             Some(c) => {
                 let queued = out.as_ref().map(|o| (o.ring_len - o.prod.slots()) as f64 / 2.0 / sr as f64).unwrap_or(0.0);
-                st.position = (c.position() - if playing { queued } else { 0.0 }).max(0.0);
+                let device = shared.latency_us.load(Ordering::Relaxed) as f64 / 1e6;
+                st.position = (c.position() - if playing { queued + device } else { 0.0 }).max(0.0);
                 st.duration = c.duration;
                 st.current = Some(c.id.clone());
             }
@@ -908,6 +955,31 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
 
 #[cfg(test)]
 mod tests {
+    /// Karaoke's vocal cut: a voice in the middle of the mix goes, a guitar on one side and the
+    /// bass stay.
+    #[test]
+    fn vocal_cut_takes_out_the_middle() {
+        let sr = 48000.0;
+        let run = |l: &dyn Fn(f32) -> f32, r: &dyn Fn(f32) -> f32| -> f32 {
+            let mut d = super::Dsp::new(sr);
+            d.limiter = false;
+            d.vocals = 1.0;
+            let mut buf: Vec<f32> = (0..96000).flat_map(|i| { let t = i as f32 / sr; [l(t), r(t)] }).collect();
+            d.process(&mut buf);
+            // loudness of the last half second against the input's
+            let tail = &buf[buf.len() - 48000..];
+            let inp: f32 = (72000..96000).map(|i| { let t = i as f32 / sr; l(t) * l(t) + r(t) * r(t) }).sum();
+            (tail.iter().map(|x| x * x).sum::<f32>() / inp).sqrt()
+        };
+        let tone = |f: f32| move |t: f32| (t * f * std::f32::consts::TAU).sin() * 0.3;
+        let voice = run(&tone(440.0), &tone(440.0));
+        let side = run(&tone(440.0), &|_| 0.0);
+        let bass = run(&tone(50.0), &tone(50.0));
+        assert!(voice < 0.15, "voice {voice}");
+        assert!(side > 0.5, "guitar on one side {side}");
+        assert!(bass > 0.6, "bass {bass}");
+    }
+
     /// DKFM_DECODE_DIR=<folder> cargo test --release decode_folder -- --ignored --nocapture
     /// decodes every song in a folder to the end, like the player does, and reports any that fail
     #[test]

@@ -1687,6 +1687,7 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
         ui.close_menu();
     }
     quality_menu(app, ui, &sel);
+    replace_audio_item(app, ui, one.as_ref());
     ui.separator();
     if let Some(p) = playlist {
         if ui.button(format!("Remove from \"{}\"", p.name)).clicked() {
@@ -1696,6 +1697,19 @@ pub(super) fn track_menu(app: &mut App, ui: &mut Ui, ids: &[String], i: usize, p
     }
     if ui.button(format!("Delete from library & PC{}", if sel.len() > 1 { format!(" ({})", sel.len()) } else { String::new() })).on_hover_text("Removes the song from DK.FM and every playlist, and moves its file to the Recycle Bin (restore it from there if you change your mind)").clicked() {
         delete_songs(app, &sel);
+        ui.close_menu();
+    }
+}
+
+/// "Replace audio…": the song plays the wrong recording (only songs DK.FM downloaded).
+pub(super) fn replace_audio_item(app: &mut App, ui: &mut Ui, one: Option<&crate::store::Track>) {
+    let ok = one.is_some_and(|t| app.dl.requalifiable(t));
+    let r = ui.add_enabled(ok, egui::Button::new("Replace audio…"));
+    let r = if one.is_none() { r.on_disabled_hover_text("Pick one song") } else { r.on_disabled_hover_text("Only songs DK.FM downloaded (your own files stay as they are)") };
+    if r.on_hover_text("Wrong song or version playing? Pick the right one from YouTube: the title, cover, likes and playlists stay").clicked() {
+        if let Some(t) = one {
+            super::reaudio::open(app, &t.id, ui.ctx());
+        }
         ui.close_menu();
     }
 }

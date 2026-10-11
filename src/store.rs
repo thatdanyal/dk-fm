@@ -115,8 +115,8 @@ pub struct TheaterPreset {
     #[serde(default = "d_one")] pub lyrics_size: f32,
     /// buttons fade away when the mouse rests for a few seconds
     #[serde(default)] pub auto_hide: bool,
-    /// sing-along: the line being sung lights up word by word, with a 3-2-1 countdown before
-    /// the singing starts (and after a long break)
+    /// sing-along: each word of the line being sung lights up the moment it's sung (dots count
+    /// the singing in after a long break)
     #[serde(default)] pub singalong: bool,
 }
 /// tabs a fresh install starts without (Settings > Tabs & sidebar brings them back)

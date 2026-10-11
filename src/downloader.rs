@@ -453,9 +453,36 @@ impl Downloader {
         self.rework("upgrade-quality", "upgrade", ids, None, |fmt, n| format!("Sound quality upgrade to {} ({n} songs)", quality_label(fmt)))
     }
 
+    /// REPLACE AUDIO: download a song again from another YouTube video (the right recording) in
+    /// place of its file. Its title, album, cover, likes, plays and playlists stay. Returns the
+    /// job, or None for a song DK.FM didn't download (your own files are never replaced).
+    pub fn replace_audio(&self, id: &str, video: &str) -> Option<String> {
+        let t = self.lib.track(id).filter(|t| self.requalifiable(t))?;
+        let job = format!("reaudio-{}", id.chars().take(12).collect::<String>());
+        Some(self.rework_from(&job, "reaudio", &[id.to_string()], None, Some(video), |_, _| format!("New audio for {} - {}", t.artist, t.title)))
+    }
+
+    /// How a job went: None while it's running, then Ok or the first error.
+    pub fn job_result(&self, job_id: &str) -> Option<Result<(), String>> {
+        let jobs = self.jobs.lock();
+        let Some(j) = jobs.iter().find(|j| j.id == job_id) else { return Some(Err("Cancelled".into())) };
+        if j.tracks.iter().any(|t| t.status.active()) {
+            return None;
+        }
+        Some(match j.tracks.iter().find(|t| t.status != TStatus::Done) {
+            None => Ok(()),
+            Some(t) => Err(t.error.clone().or(t.note.clone()).unwrap_or_else(|| "Cancelled".into())),
+        })
+    }
+
     /// A job that redoes library songs' files (`kind`: "upgrade" downloads them again, "shrink"
     /// converts them here) in sound quality `fmt` (None: the one set now).
     fn rework(&self, job_id: &str, kind: &str, ids: &[String], fmt: Option<&str>, name: impl Fn(&str, usize) -> String) -> String {
+        self.rework_from(job_id, kind, ids, fmt, None, name)
+    }
+
+    /// `rework`, downloading from `video` instead of each song's own YouTube video.
+    fn rework_from(&self, job_id: &str, kind: &str, ids: &[String], fmt: Option<&str>, video: Option<&str>, name: impl Fn(&str, usize) -> String) -> String {
         let job_id = job_id.to_string();
         self.cancel(&job_id);
         self.jobs.lock().retain(|j| j.id != job_id);
@@ -480,12 +507,13 @@ impl Downloader {
                     raw_title: t.title.clone(),
                     ..Default::default()
                 };
-                Some(JTrack { t: it, status: TStatus::Queued, progress: 0.0, error: None, note: None, matched: None, candidates: Vec::new(), low_confidence: false, track_id: None, forced: Some(y), replace: Some(t.id.clone()) })
+                let forced = video.map(String::from).unwrap_or(y);
+                Some(JTrack { t: it, status: TStatus::Queued, progress: 0.0, error: None, note: None, matched: None, candidates: Vec::new(), low_confidence: false, track_id: None, forced: Some(forced), replace: Some(t.id.clone()) })
             })
             .collect();
         drop(lib);
         let n = tracks.len();
-        let col = Collection { kind: kind.into(), id: "quality".into(), name: name(&fmt, n), tracks: tracks.iter().map(|t| t.t.clone()).collect(), complete: true, ..Default::default() };
+        let col = Collection { kind: kind.into(), id: if kind == "reaudio" { "reaudio".into() } else { "quality".into() }, name: name(&fmt, n), tracks: tracks.iter().map(|t| t.t.clone()).collect(), complete: true, ..Default::default() };
         self.queue.lock().extend((0..n).map(|i| (job_id.clone(), i)));
         self.jobs.lock().push(Job { id: job_id.clone(), col, folder: PathBuf::from(dir), pick: None, fmt, target_playlist: None, cancel: Arc::new(AtomicBool::new(false)), tracks });
         self.touch();
@@ -724,6 +752,11 @@ impl Downloader {
                 // cover: Spotify / album art, else the YouTube thumbnail cropped square
                 let cover_url = t.cover.clone().or(if kind == "album" { job_cover.clone() } else { None });
                 let mut cover: Option<Vec<u8>> = cover_url.and_then(|u| crate::net::get_bytes(&u).ok());
+                // new audio for a song: it keeps its own cover (not the new video's thumbnail)
+                if let (None, Some((_, old))) = (&cover, &replacing) {
+                    use lofty::file::TaggedFileExt;
+                    cover = std::panic::catch_unwind(|| lofty::read_from_path(old)).ok().and_then(|r| r.ok()).and_then(|f| f.tags().iter().find_map(|tag| tag.pictures().first().map(|p| p.data().to_vec())));
+                }
                 if cover.is_none() {
                     if let Ok(img) = image::open(tmp.join("thumb.jpg")) {
                         let s = img.width().min(img.height());
@@ -1528,6 +1561,46 @@ mod tests {
         assert!(std::path::Path::new(&tr.path).starts_with(std::path::absolute(&dir).unwrap()));
         assert_eq!(d.playlists.iter().find(|p| p.id == pid).unwrap().track_ids, vec![tr.id.clone()]);
         drop(d);
+        lib.delete_playlist(&pid);
+        lib.flush();
+    }
+
+    /// REPLACE AUDIO for real (network): a song downloaded into the test profile gets another
+    /// video's sound and stays the same song (id, like, playlist, cover). DKFM_USER_DATA = a test
+    /// profile with yt-dlp and ffmpeg in its bin (cargo test -- --ignored replaces_a_songs_audio).
+    #[test]
+    #[ignore]
+    fn replaces_a_songs_audio() {
+        let dir = std::path::PathBuf::from(std::env::var("DKFM_USER_DATA").expect("use a test profile"));
+        let lib = Library::load();
+        let settings = Arc::new(Mutex::new(Settings { download_dir: dir.join("Music").display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        let wait = |dl: &Downloader| {
+            let t0 = std::time::Instant::now();
+            while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(180) {
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        };
+        let t = sources::search("daft punk one more time", "songs", 1).unwrap().remove(0);
+        let col = Collection { kind: "track".into(), id: format!("yt{}", t.youtube_id.clone().unwrap()), name: t.title.clone(), tracks: vec![t], complete: true, source: "youtube".into(), ..Default::default() };
+        dl.start_to(col, None, None);
+        wait(&dl);
+        let id = dl.jobs.lock()[0].tracks[0].track_id.clone().expect("downloaded");
+        let before = lib.track(&id).unwrap();
+        lib.set_liked(std::slice::from_ref(&id), true);
+        let pid = lib.new_playlist("Mine", vec![id.clone()]);
+        // another recording of it (a live / other upload)
+        let other = sources::search("daft punk one more time live", "youtube", 5).unwrap().into_iter().find_map(|c| c.youtube_id.filter(|y| Some(y) != before.youtube_id.as_ref())).unwrap();
+        let job = dl.replace_audio(&id, &other).expect("a DK.FM download");
+        wait(&dl);
+        assert_eq!(dl.job_result(&job), Some(Ok(())));
+        let after = lib.track(&id).expect("same song id");
+        eprintln!("{:?} -> {:?}, {:.0} s -> {:.0} s", before.youtube_id, after.youtube_id, before.duration, after.duration);
+        assert_eq!(after.youtube_id.as_deref(), Some(other.as_str()));
+        assert_eq!((after.title.as_str(), after.path.as_str()), (before.title.as_str(), before.path.as_str()));
+        assert!(lib.stat(&id).liked);
+        assert_eq!(lib.data.read().playlists.iter().find(|p| p.id == pid).unwrap().track_ids, vec![id.clone()]);
+        assert!(after.cover.is_some() && after.cover == before.cover, "kept its own cover");
         lib.delete_playlist(&pid);
         lib.flush();
     }

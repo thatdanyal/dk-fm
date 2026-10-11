@@ -799,7 +799,7 @@ mod tests {
         let mut z = DeflateEncoder::new(Vec::new(), Compression::default());
         z.write_all(&serde_json::to_vec(&j).unwrap()).unwrap();
         let Share::Settings(x) = decode(&format!("{PREFIX}settings:{}", crate::spotify_auth::b64(&z.finish().unwrap(), true))).unwrap() else { panic!() };
-        assert_eq!((x.theme.as_str(), x.zoom, x.columns.contains(&"title".to_string()), x.keys.len(), x.visualizer.as_str()), ("red-retro", 1.5, true, 0, "off"));
+        assert_eq!((x.theme.as_str(), x.zoom, x.columns.contains(&"title".to_string()), x.keys.len(), x.visualizer.as_str()), (crate::ui::theme::DEFAULT, 1.5, true, 0, "off"));
         assert_eq!((x.eq.gains.len(), x.eq.gains[0]), (10, 12.0));
         assert!(!x.search_sources.is_empty());
     }

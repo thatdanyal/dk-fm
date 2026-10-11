@@ -1028,7 +1028,7 @@ impl App {
             s.custom_themes.retain(|c| c.name != name);
             s.theme_order.retain(|k| k != key);
             if s.theme == key {
-                s.theme = "red-retro".into();
+                s.theme = theme::DEFAULT.into();
             }
         });
         self.set_theme(ctx);

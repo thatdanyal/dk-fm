@@ -70,7 +70,7 @@ pub fn save_json<T: Serialize>(path: &Path, v: &T) {
 // ---------------------------------------------------------------- settings
 
 fn d_true() -> bool { true }
-fn d_theme() -> String { "red-retro".into() }
+fn d_theme() -> String { crate::ui::theme::DEFAULT.into() }
 fn d_format() -> String { "high".into() }
 fn d_conc() -> u32 { 3 }
 fn d_sync() -> u32 { 6 }
@@ -364,6 +364,13 @@ impl Settings {
         }
         if s.eq.preset.is_empty() {
             s.eq.preset = "Flat".into();
+        }
+        // Matches Logo is everyone's theme now (once: pick another any time); the owner's own
+        // copy of it is the built-in one now
+        if s.upgrade("theme-matches-logo") {
+            s.theme = crate::ui::theme::DEFAULT.into();
+            s.custom_themes.retain(|c| c.name != "MatchesLogo");
+            s.theme_order.retain(|k| k != "custom:MatchesLogo");
         }
         s
     }

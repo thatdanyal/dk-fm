@@ -29,7 +29,11 @@ const fn hex(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
+/// The theme everyone starts with (and the one a deleted theme in use falls back to).
+pub const DEFAULT: &str = "matches-logo";
+
 pub const THEMES: &[(&str, &str)] = &[
+    ("matches-logo", "Matches Logo"),
     ("red-retro", "Red Retro"),
     ("amber-crt", "Amber CRT"),
     ("green-phosphor", "Green Phosphor"),
@@ -42,6 +46,8 @@ pub const THEMES: &[(&str, &str)] = &[
 
 pub fn palette(name: &str, accent: Option<&str>) -> Pal {
     let mut p = match name {
+        // the DK.FM logo's teal on near-black
+        "matches-logo" => Pal { bg: hex(0x0c0c0c), bg2: hex(0x101010), panel: hex(0x151515), panel_hi: hex(0x1f1f1f), line: hex(0x323232), line_hi: hex(0x5f7677), text: hex(0xececec), dim: hex(0x8d8d8d), faint: hex(0x424242), accent: hex(0xc8e6e7), accent2: hex(0x6ecbcf), ink: hex(0x000000), lcd_bg: hex(0x131313), lcd: hex(0xdaeded), shadow: Color32::BLACK, sel: Color32::from_rgba_unmultiplied(109, 202, 207, 40), dark: true },
         "amber-crt" => Pal { bg: hex(0x0a0702), bg2: hex(0x110c03), panel: hex(0x151004), panel_hi: hex(0x1e1706), line: hex(0x3b2c0b), line_hi: hex(0x6b4f12), text: hex(0xffe2b0), dim: hex(0xa7834a), faint: hex(0x5a4519), accent: hex(0xffb000), accent2: hex(0xff6a1f), ink: hex(0x1a1000), lcd_bg: hex(0x1a1203), lcd: hex(0xffb000), shadow: Color32::BLACK, sel: Color32::from_rgba_unmultiplied(255, 176, 0, 40), dark: true },
         "green-phosphor" => Pal { bg: hex(0x020a04), bg2: hex(0x031006), panel: hex(0x041407), panel_hi: hex(0x071d0b), line: hex(0x0f3a18), line_hi: hex(0x1b6a2c), text: hex(0xc8ffd4), dim: hex(0x4f9e62), faint: hex(0x1f4f2b), accent: hex(0x33ff66), accent2: hex(0xb6ff3b), ink: hex(0x001a06), lcd_bg: hex(0x021505), lcd: hex(0x33ff66), shadow: Color32::BLACK, sel: Color32::from_rgba_unmultiplied(51, 255, 102, 36), dark: true },
         "synthwave" => Pal { bg: hex(0x0b0414), bg2: hex(0x10061d), panel: hex(0x140824), panel_hi: hex(0x1c0c33), line: hex(0x35185c), line_hi: hex(0x5e2aa0), text: hex(0xf6dcff), dim: hex(0x9a72bf), faint: hex(0x452866), accent: hex(0xff2bd6), accent2: hex(0x22e5ff), ink: hex(0x1a0216), lcd_bg: hex(0x170828), lcd: hex(0xff4fe0), shadow: Color32::BLACK, sel: Color32::from_rgba_unmultiplied(255, 43, 214, 40), dark: true },

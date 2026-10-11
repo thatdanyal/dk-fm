@@ -231,7 +231,7 @@ impl Media {
     #[cfg(windows)]
     pub fn new(player: Arc<Player>) -> Self {
         let hwnd = HWND.load(Ordering::Relaxed);
-        let controls = (hwnd != 0).then(|| crate::smtc::Controls::new(hwnd as isize, player).ok()).flatten();
+        let controls = (hwnd != 0).then(|| crate::smtc::Controls::new(hwnd, player).ok()).flatten();
         Self { controls, last: String::new() }
     }
 

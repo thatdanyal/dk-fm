@@ -482,13 +482,13 @@ impl OrIfEmpty for String {
 fn id_ok(s: &str, len: std::ops::RangeInclusive<usize>) -> bool {
     len.contains(&s.len()) && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
-fn yt_ok(s: &String) -> bool {
+fn yt_ok(s: &str) -> bool {
     id_ok(s, 11..=11)
 }
-fn sp_ok(s: &String) -> bool {
+fn sp_ok(s: &str) -> bool {
     s.len() == 22 && s.bytes().all(|c| c.is_ascii_alphanumeric())
 }
-fn key_ok(s: &String) -> bool {
+fn key_ok(s: &str) -> bool {
     ["sp:", "yt:", "sc:"].iter().any(|p| s.strip_prefix(p).map(|r| id_ok(r, 1..=64)).unwrap_or(false))
 }
 
@@ -503,9 +503,9 @@ fn clean_song(s: Song) -> Option<Song> {
         title,
         artist: short(&s.artist, 300),
         secs: s.secs.min(86_400),
-        spotify: s.spotify.filter(sp_ok),
-        youtube: s.youtube.filter(yt_ok),
-        key: s.key.filter(key_ok),
+        spotify: s.spotify.filter(|x| sp_ok(x)),
+        youtube: s.youtube.filter(|x| yt_ok(x)),
+        key: s.key.filter(|x| key_ok(x)),
     })
 }
 
@@ -573,10 +573,10 @@ pub fn add_layout(s: &mut Settings, mut l: NamedLayout) -> String {
 
 impl Song {
     pub fn of(t: &Track) -> Song {
-        let spotify = t.spotify_id.clone().filter(sp_ok);
-        let youtube = t.youtube_id.clone().filter(yt_ok);
+        let spotify = t.spotify_id.clone().filter(|x| sp_ok(x));
+        let youtube = t.youtube_id.clone().filter(|x| yt_ok(x));
         // the source key only when it adds something
-        let key = t.source_key.clone().filter(key_ok).filter(|k| Some(k.as_str()) != spotify.as_ref().map(|s| format!("sp:{s}")).as_deref() && Some(k.as_str()) != youtube.as_ref().map(|y| format!("yt:{y}")).as_deref());
+        let key = t.source_key.clone().filter(|x| key_ok(x)).filter(|k| Some(k.as_str()) != spotify.as_ref().map(|s| format!("sp:{s}")).as_deref() && Some(k.as_str()) != youtube.as_ref().map(|y| format!("yt:{y}")).as_deref());
         Song { title: short(&t.title, 300), artist: short(&t.artist, 300), secs: t.duration.max(0.0).round().min(86_400.0) as u32, spotify, youtube, key }
     }
 

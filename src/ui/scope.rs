@@ -247,7 +247,7 @@ fn scope(s: &mut ScopeState, frames: &[[f32; 2]], c: &Cols) {
             break;
         }
     }
-    let span = (mono.len() - start).min(1024).max(1);
+    let span = (mono.len() - start).clamp(1, 1024);
     let mut prev: Option<i32> = None;
     for x in 0..w {
         let v = mono.get(start + x * span / w).copied().unwrap_or(0.0);

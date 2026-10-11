@@ -99,11 +99,7 @@ fn analyze(path: &PathBuf) -> Option<(Vec<u8>, f32)> {
     let (mut acc, mut n) = (0f64, 0usize);
     let mut peak = 0f32;
     let mut sbuf: Option<SampleBuffer<f32>> = None;
-    loop {
-        let pkt = match reader.next_packet() {
-            Ok(p) => p,
-            Err(_) => break,
-        };
+    while let Ok(pkt) = reader.next_packet() {
         if pkt.track_id() != tid {
             continue;
         }
@@ -156,6 +152,6 @@ fn analyze(path: &PathBuf) -> Option<(Vec<u8>, f32)> {
     let rel: Vec<f32> = abs.iter().cloned().filter(|&x| db(x) > db(mean(&abs)) - 10.0).collect();
     let mut gain = if rel.is_empty() { 0.0 } else { TARGET_DB - db(mean(&rel)) };
     // never boost past the song's own peak, keep within a sane range
-    gain = gain.min(-20.0 * peak.max(1e-6).log10() - 1.0).min(6.0).max(-12.0);
+    gain = gain.min(-20.0 * peak.max(1e-6).log10() - 1.0).clamp(-12.0, 6.0);
     Some((peaks, (gain * 10.0).round() / 10.0))
 }

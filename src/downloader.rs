@@ -500,7 +500,7 @@ impl Downloader {
                     album_artist: t.album_artist.clone(),
                     year: t.year,
                     track_no: t.track,
-                    duration_ms: (t.duration > 0.0).then(|| (t.duration * 1000.0) as u64),
+                    duration_ms: (t.duration > 0.0).then_some((t.duration * 1000.0) as u64),
                     spotify_id: t.spotify_id.clone(),
                     youtube_id: Some(y.clone()),
                     source_key: t.source_key.clone().unwrap_or_else(|| format!("yt:{y}")),
@@ -811,6 +811,9 @@ impl Downloader {
             Ok(())
         })();
         if let Err(e) = res {
+            if !cancel.load(Ordering::Relaxed) {
+                crate::problems::note("download", &format!("{} - {}: {e}", t.artists.join(", "), t.title));
+            }
             self.with_track(job_id, &cancel, idx, |jt| {
                 if cancel.load(Ordering::Relaxed) {
                     jt.status = TStatus::Cancelled;
@@ -874,6 +877,9 @@ impl Downloader {
         })();
         let _ = std::fs::remove_dir_all(&tmp);
         let cancelled = cancel.load(Ordering::Relaxed);
+        if let (Err(e), false) = (&r, cancelled) {
+            crate::problems::note("download", &format!("{} - {} (changing its quality): {e}", t.artists.join(", "), t.title));
+        }
         self.with_track(job_id, cancel, idx, |jt| match r {
             Ok(ids) => {
                 jt.status = TStatus::Done;

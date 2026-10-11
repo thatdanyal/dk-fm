@@ -135,6 +135,11 @@ pub fn forget(id: &str) {
     let _ = std::fs::remove_file(cache_path(id));
 }
 
+/// Lyrics were looked up for this song and none were found (FIX MY LIBRARY).
+pub fn found_none(id: &str) -> bool {
+    std::fs::read(cache_path(id)).ok().and_then(|b| serde_json::from_slice::<Saved>(&b).ok()).is_some_and(|s| s.kind == "none")
+}
+
 /// The lyrics saved for a song, if any (REPLACE LYRICS starts from them).
 pub fn saved(id: &str) -> Option<Lyr> {
     load(id).map(|l| l.0).filter(|l| !matches!(l, Lyr::None))

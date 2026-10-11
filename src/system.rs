@@ -220,15 +220,25 @@ impl Tray {
 // ------------------------------------------------------------------------------------- media keys
 
 pub struct Media {
+    #[cfg(windows)]
+    controls: Option<crate::smtc::Controls>,
+    #[cfg(not(windows))]
     controls: Option<souvlaki::MediaControls>,
     last: String,
 }
 
 impl Media {
+    #[cfg(windows)]
+    pub fn new(player: Arc<Player>) -> Self {
+        let hwnd = HWND.load(Ordering::Relaxed);
+        let controls = (hwnd != 0).then(|| crate::smtc::Controls::new(hwnd as isize, player).ok()).flatten();
+        Self { controls, last: String::new() }
+    }
+
+    #[cfg(not(windows))]
     pub fn new(player: Arc<Player>) -> Self {
         use souvlaki::{MediaControlEvent, MediaControls, PlatformConfig, SeekDirection};
-        let hwnd = HWND.load(Ordering::Relaxed);
-        let cfg = PlatformConfig { dbus_name: "dkfm", display_name: "DK.FM", hwnd: if hwnd != 0 { Some(hwnd as *mut std::ffi::c_void) } else { None } };
+        let cfg = PlatformConfig { dbus_name: "dkfm", display_name: "DK.FM", hwnd: None };
         // Linux: media keys go over D-Bus; without a session bus its thread would only fail
         let controls = MediaControls::new(cfg).ok().filter(|_| session_bus()).and_then(|mut c| {
             let p = player.clone();
@@ -255,18 +265,32 @@ impl Media {
 
     pub fn update(&mut self, title: &str, artist: &str, album: &str, cover: Option<&str>, duration: f64, playing: bool, position: f64) {
         let Some(c) = self.controls.as_mut() else { return };
-        let key = format!("{title}|{artist}|{playing}");
-        if key != self.last {
-            self.last = key;
-            let url = cover.map(|p| format!("file:///{}", p.replace('\\', "/")));
-            let _ = c.set_metadata(souvlaki::MediaMetadata { title: Some(title), artist: Some(artist), album: Some(album), cover_url: url.as_deref(), duration: Some(std::time::Duration::from_secs_f64(duration.max(0.0).min(1e7))) });
+        let song = format!("{title}|{artist}|{album}|{}", cover.unwrap_or(""));
+        let changed = song != self.last;
+        self.last = song;
+        #[cfg(windows)]
+        {
+            if changed {
+                let _ = c.set_song(title, artist, album, cover, duration);
+            }
+            let _ = c.set_state(playing, position);
         }
-        let prog = Some(souvlaki::MediaPosition(std::time::Duration::from_secs_f64(position.max(0.0).min(1e7))));
-        let _ = c.set_playback(if playing { souvlaki::MediaPlayback::Playing { progress: prog } } else { souvlaki::MediaPlayback::Paused { progress: prog } });
+        #[cfg(not(windows))]
+        {
+            // (NaN or negative times would panic in Duration)
+            let secs = |x: f64| std::time::Duration::from_secs_f64(if x.is_finite() { x.clamp(0.0, 1e7) } else { 0.0 });
+            if changed {
+                let url = cover.map(|p| format!("file://{}", p.replace('\\', "/")));
+                let _ = c.set_metadata(souvlaki::MediaMetadata { title: Some(title), artist: Some(artist), album: Some(album), cover_url: url.as_deref(), duration: Some(secs(duration)) });
+            }
+            let prog = Some(souvlaki::MediaPosition(secs(position)));
+            let _ = c.set_playback(if playing { souvlaki::MediaPlayback::Playing { progress: prog } } else { souvlaki::MediaPlayback::Paused { progress: prog } });
+        }
     }
 }
 
 /// A D-Bus session bus to connect to (always true off Linux).
+#[cfg(not(windows))]
 fn session_bus() -> bool {
     if !cfg!(target_os = "linux") {
         return true;

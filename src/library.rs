@@ -727,7 +727,7 @@ impl Library {
         let mut out: Vec<Vec<String>> = Vec::new();
         let mut take = |g: &mut Vec<&Track>| {
             if g.len() > 1 {
-                g.sort_by(|a, b| quality(b).cmp(&quality(a)));
+                g.sort_by_key(|a| std::cmp::Reverse(quality(a)));
                 out.push(g.iter().map(|t| t.id.clone()).collect());
             }
             g.clear();

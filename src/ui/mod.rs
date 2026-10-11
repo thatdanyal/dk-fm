@@ -23,6 +23,7 @@ pub mod plcover;
 pub mod plpick;
 pub mod preview;
 pub mod queue;
+pub mod fixlib;
 pub mod newcover;
 pub mod newlyrics;
 pub mod reaudio;
@@ -158,6 +159,8 @@ pub struct App {
     /// REPLACE LYRICS / REPLACE COVER, open for a song
     pub new_lyrics: Option<newlyrics::Fix>,
     pub new_cover: Option<newcover::Fix>,
+    /// FIX MY LIBRARY's checks
+    pub fixlib: fixlib::FixState,
     /// "SAVE TO" for a song being downloaded (+ GET, KEEP)
     pub dest: Option<dest::Dest>,
     pub update: Arc<Mutex<UpdState>>,
@@ -581,6 +584,7 @@ impl App {
             fixing: Vec::new(),
             new_lyrics: None,
             new_cover: None,
+            fixlib: Default::default(),
             dest: None,
             update,
             update_dismissed: None,
@@ -662,7 +666,9 @@ impl App {
         Some(now)
     }
     pub fn toast_err(&mut self, msg: impl Into<String>) {
-        self.toasts.push((msg.into(), Instant::now(), true));
+        let msg = msg.into();
+        crate::problems::note("error", &msg);
+        self.toasts.push((msg, Instant::now(), true));
     }
 
     /// Keep a change undoable (Ctrl+Z or the toast's UNDO button).
@@ -1570,6 +1576,7 @@ impl App {
                 "downloads" => self.browser.set_view(browser::View::Downloads),
                 "albums" => self.browser.set_view(browser::View::Albums),
                 "dupes" => self.browser.set_view(browser::View::Duplicates),
+                "fix" => self.browser.set_view(browser::View::Fix),
                 "playlist" => {
                     let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
                     if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }

@@ -190,6 +190,6 @@ fn icon(g: Glyph) -> isize {
             bgra[i..i + 4].copy_from_slice(&[255, 255, 255, a]);
         }
     }
-    let and = vec![0u8; N * 4]; // 20 px rows padded to 4 bytes; all zero = use the alpha
+    let and = [0u8; N * 4]; // 20 px rows padded to 4 bytes; all zero = use the alpha
     unsafe { CreateIcon(std::ptr::null_mut(), N as i32, N as i32, 1, 32, and.as_ptr(), bgra.as_ptr()) as isize }
 }

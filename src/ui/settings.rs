@@ -27,10 +27,11 @@ pub enum SetTab {
     Backup,
     System,
     Updates,
+    Problems,
     About,
 }
 
-const TABS: [(SetTab, &str); 17] = [
+const TABS: [(SetTab, &str); 18] = [
     (SetTab::Look, "Look"),
     (SetTab::Language, "Language"),
     (SetTab::Layouts, "Layouts"),
@@ -47,6 +48,7 @@ const TABS: [(SetTab, &str); 17] = [
     (SetTab::Backup, "Backup"),
     (SetTab::System, "System"),
     (SetTab::Updates, "Updates"),
+    (SetTab::Problems, "Problems"),
     (SetTab::About, "About"),
 ];
 
@@ -355,6 +357,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::System, "The X button: quit or keep playing in the tray", "close minimize background"),
     (SetTab::System, "Start with your computer", "startup login boot"),
     (SetTab::Updates, "Automatic updates", "new version check"),
+    (SetTab::Problems, "Problems & debug info", "bug error crash log failed report debug help broken"),
     (SetTab::About, "About DK.FM", "version made by credits"),
 ];
 
@@ -437,6 +440,7 @@ fn settings_body(app: &mut App, ui: &mut Ui, tab: &mut SetTab) {
                 SetTab::Backup => backups(app, ui),
                 SetTab::System => system_tab(app, ui),
                 SetTab::Updates => updates(app, ui),
+                SetTab::Problems => problems(app, ui),
                 SetTab::About => about(app, ui),
             }
             });
@@ -2016,6 +2020,44 @@ fn backups(app: &mut App, ui: &mut Ui) {
         super::sharing::copy(app, ui.ctx(), &sh, "your settings");
     }
     dim(ui, &pal, "Got a code (theme, layout, settings or playlist)? Press Ctrl+V anywhere in DK.FM, or paste it into Ctrl+K. You see what it does before anything changes.");
+}
+
+/// What went wrong lately (errors on screen, failed downloads, crashes), and COPY DEBUG INFO to
+/// paste into a bug report.
+fn problems(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    caption(ui, &pal, "PROBLEMS");
+    dim(ui, &pal, "What went wrong lately: errors, songs that failed to download, and crashes (DK.FM keeps playing after one). Reporting a bug? COPY DEBUG INFO and paste it with it.");
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if button(ui, &pal, "COPY DEBUG INFO", true, true).on_hover_text("The version, your system, the download tools, how big your library is and the latest problems (no song names besides failed downloads, nothing private)").clicked() {
+            let (songs, playlists) = { let d = app.lib.data.read(); (d.tracks.len(), d.playlists.len()) };
+            ui.ctx().copy_text(crate::problems::debug_info(songs, playlists));
+            app.toast("Debug info copied: paste it into your report");
+        }
+        if button(ui, &pal, "OPEN THE LOG FOLDER", false, true).clicked() {
+            let _ = open::that(crate::store::data_dir());
+        }
+        if button(ui, &pal, "CLEAR", false, true).clicked() {
+            crate::problems::clear();
+        }
+    });
+    ui.add_space(8.0);
+    let list = crate::problems::recent(200);
+    if list.is_empty() {
+        dim(ui, &pal, "Nothing has gone wrong. ✔");
+        return;
+    }
+    egui::ScrollArea::vertical().id_salt("problems").auto_shrink([false, false]).show(ui, |ui| {
+        for (when, what, text) in list {
+            ui.horizontal_top(|ui| {
+                ui.label(egui::RichText::new(when).font(vt(15.0)).color(pal.faint));
+                let c = if what == "crash" { pal.accent } else { pal.accent2 };
+                ui.add_sized([64.0, 16.0], egui::Label::new(egui::RichText::new(what.to_uppercase()).font(px(5.0)).color(c)));
+                ui.add(egui::Label::new(egui::RichText::new(text).font(vt(16.0)).color(pal.text)).wrap());
+            });
+        }
+    });
 }
 
 fn about(app: &mut App, ui: &mut Ui) {

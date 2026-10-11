@@ -1257,7 +1257,7 @@ pub fn rank(cands: Vec<Cand>, t: &ITrack) -> Vec<Cand> {
     for c in merged.iter_mut() {
         c.score = score(c, t);
     }
-    merged.sort_by(|a, b| b.score.cmp(&a.score));
+    merged.sort_by_key(|a| std::cmp::Reverse(a.score));
     merged
 }
 

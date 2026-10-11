@@ -15,9 +15,11 @@ mod library;
 mod lyricsrc;
 mod net;
 mod player;
+mod problems;
 mod recognize;
 mod share;
 mod single;
+mod smtc;
 mod sources;
 #[cfg(windows)]
 mod taskbar;

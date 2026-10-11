@@ -23,7 +23,7 @@ static ENSURING: Mutex<()> = Mutex::new(());
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
 
-fn bin_dir() -> PathBuf {
+pub fn bin_dir() -> PathBuf {
     data_dir().join("bin")
 }
 fn yt_dir() -> PathBuf {

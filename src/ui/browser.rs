@@ -8,8 +8,9 @@ use crate::store::Track;
 use eframe::egui::{self, Align2, Color32, Pos2, Rect, Sense, Ui, Vec2};
 use std::collections::HashSet;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum View {
+    #[default]
     Home,
     All,
     Liked,
@@ -30,17 +31,14 @@ pub enum View {
     Import,
     Downloads,
     Duplicates,
+    /// FIX MY LIBRARY: no cover, no lyrics, wrong length
+    Fix,
     /// new music picked from what you play
     Discover,
     /// FIND MUSIC: search YouTube Music for songs, artists, albums… to download
     Web,
 }
 
-impl Default for View {
-    fn default() -> Self {
-        View::Home
-    }
-}
 
 /// Screens of the HOME panel (everything but a playlist, Liked and Downloads, which are LIBRARY's).
 pub fn is_home_view(v: &View) -> bool {
@@ -136,10 +134,10 @@ pub const COLUMNS: [Col; 10] = [
 /// Screens in the tab strip above the library (the sidebar lists only playlists):
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
-pub const NAV: [(&str, &str, &str, &str, &str); 13] = [
+pub const NAV: [(&str, &str, &str, &str, &str); 14] = [
     ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🔍", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND MUSIC", "Find music online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
     ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
-    ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
+    ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("fix", "more", "🔧", "Fix my library", "Fix my library"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
 
 /// Tabs in your order (unknown ids dropped, new ones put in at their default place).
@@ -166,6 +164,7 @@ fn nav_of(v: &View) -> Option<&'static str> {
         View::Import => "import",
         View::Downloads => "downloads",
         View::Duplicates => "dupes",
+        View::Fix => "fix",
         View::Web => "web",
         View::Discover => "discover",
         View::Liked | View::Downloaded | View::Playlist(_) => return None,
@@ -187,6 +186,7 @@ pub fn view_for(key: &str) -> Option<View> {
         "artists" => View::Artists,
         "stats" => View::Stats,
         "dupes" => View::Duplicates,
+        "fix" => View::Fix,
         "import" => View::Import,
         "downloads" => View::Downloads,
         "web" => View::Web,
@@ -325,6 +325,10 @@ pub fn show_home(app: &mut App, ui: &mut Ui) {
     let main = ui.available_rect_before_wrap();
     let strip_h = nav_strip(app, ui, Rect::from_min_max(Pos2::new(main.left() + 2.0, main.top()), main.max));
     let main = Rect::from_min_max(Pos2::new(main.left(), main.top() + strip_h), main.max);
+    // FIX MY LIBRARY checks lengths only while it's open
+    if app.browser.view != View::Fix {
+        super::fixlib::stop(app);
+    }
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(main.shrink2(Vec2::new(2.0, 0.0))), |ui| {
         ui.set_clip_rect(main);
         match app.browser.view.clone() {
@@ -336,6 +340,7 @@ pub fn show_home(app: &mut App, ui: &mut Ui) {
             View::Import => super::import::show(app, ui),
             View::Downloads => super::import::downloads(app, ui),
             View::Duplicates => super::dupes::show(app, ui),
+            View::Fix => super::fixlib::show(app, ui),
             View::Web => super::websearch::show(app, ui),
             View::Discover => super::explore::show(app, ui),
             _ => tracks_view(app, ui),
@@ -414,7 +419,7 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
         app.mark(id, r);
         rx += w + 4.0;
         let resp = ui.interact(r, ui.id().with(("nav", id)), Sense::click());
-        let on = cur == Some(id) || id == "more" && cur == Some("dupes");
+        let on = cur == Some(id) || id == "more" && matches!(cur, Some("dupes" | "fix"));
         let p = ui.painter();
         if on {
             fill(p, r, pal.accent);
@@ -467,7 +472,7 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
                 }
             }
             // a tab or button you hid is still one click away here
-            let hid: Vec<_> = NAV.iter().filter(|n| hidden.iter().any(|h| h == n.0) && !matches!(n.0, "dupes" | "folder")).collect();
+            let hid: Vec<_> = NAV.iter().filter(|n| hidden.iter().any(|h| h == n.0) && !matches!(n.0, "dupes" | "fix" | "folder")).collect();
             if !hid.is_empty() {
                 ui.separator();
                 for n in hid {

@@ -49,10 +49,13 @@ open = "5"
 rfd = "0.15"
 auto-launch = "0.5"
 raw-window-handle = "0.6"
-souvlaki = { version = "0.7", default-features = false, features = ["use_zbus"] }
 unicode-normalization = "0.1"
 sys-locale = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# media keys and the system's now-playing (macOS, Linux; Windows uses smtc.rs)
+[target.'cfg(not(windows))'.dependencies]
+souvlaki = { version = "0.7", default-features = false, features = ["use_zbus"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = "0.19"
@@ -61,7 +64,7 @@ tray-icon = "0.19"
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Com"] }
 
 # voice search: Windows' own speech recognition (the same crate version egui's deps already build)
-windows = { version = "0.58", default-features = false, features = ["Foundation", "Foundation_Collections", "Media_SpeechRecognition"] }
+windows = { version = "0.58", default-features = false, features = ["Foundation", "Foundation_Collections", "Media", "Media_SpeechRecognition", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_System_WinRT"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

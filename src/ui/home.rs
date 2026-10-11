@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 enum Jump {
-    Playlist(Playlist),
+    Playlist(Box<Playlist>),
     Album { key: String, title: String, artist: String, cover: Option<String> },
 }
 
@@ -332,7 +332,7 @@ fn rebuild_now(app: &mut App) {
     let d = app.lib.data.read();
     let h = app.lib.history.read();
     // jump back in: playlists you played, and albums you listened to (2+ of their songs in a row)
-    let mut jump: Vec<(f64, Jump)> = d.playlists.iter().filter(|p| p.last_played > 0.0).map(|p| (p.last_played / 1000.0, Jump::Playlist(p.clone()))).collect();
+    let mut jump: Vec<(f64, Jump)> = d.playlists.iter().filter(|p| p.last_played > 0.0).map(|p| (p.last_played / 1000.0, Jump::Playlist(Box::new(p.clone())))).collect();
     let mut seen = HashSet::new();
     let mut prev: Option<String> = None;
     for e in h.events.iter().rev().take(5000) {

@@ -171,6 +171,8 @@ pub struct Session {
     #[serde(default)] pub queue: Vec<String>,
     #[serde(default)] pub index: i64,
     #[serde(default)] pub position: f64,
+    /// with shuffle on: the queue in its own order (shuffle off goes back to it)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")] pub unshuffled: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

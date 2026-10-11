@@ -105,6 +105,8 @@ impl Player {
         if !q.is_empty() {
             let idx = session.index.clamp(0, q.len() as i64 - 1) as isize;
             let mut st = p.st.lock();
+            let u: Vec<String> = session.unshuffled.into_iter().filter(|id| q.contains(id)).collect();
+            st.unshuffled = (!u.is_empty() && st.opts.shuffle).then_some(u);
             st.queue = q;
             st.index = idx;
             drop(st);
@@ -373,7 +375,14 @@ impl Player {
                 let keep = st.index as usize + 1;
                 st.queue.truncate(keep);
                 st.queue.extend(sh);
-            } else if let Some(orig) = st.unshuffled.take() {
+            } else if let Some(mut orig) = st.unshuffled.take() {
+                // back to the list's own order (songs taken out of the queue meanwhile stay out,
+                // songs added stay in at the end)
+                let now: std::collections::HashSet<&String> = st.queue.iter().collect();
+                orig.retain(|id| now.contains(id));
+                let had: std::collections::HashSet<String> = orig.iter().cloned().collect();
+                let added: Vec<String> = st.queue.iter().filter(|id| !had.contains(*id)).cloned().collect();
+                orig.extend(added);
                 st.index = orig.iter().position(|x| *x == cur).unwrap_or(0) as isize;
                 st.queue = orig;
             }
@@ -543,6 +552,7 @@ impl Player {
     fn controller(self: Arc<Self>) {
         let mut last = Instant::now();
         let mut last_save = Instant::now();
+        let mut saved_gen = u64::MAX;
         loop {
             let ev = self.engine.events.recv_timeout(Duration::from_millis(250));
             match ev {
@@ -653,8 +663,11 @@ impl Player {
                 let st = self.st.lock();
                 let mut set = self.settings.lock();
                 let pos = s.position;
-                if set.session.index != st.index as i64 || set.session.queue.len() != st.queue.len() || (set.session.position - pos).abs() > 1.0 {
+                // (shuffle on / off reorders the queue without changing its length)
+                if set.session.index != st.index as i64 || saved_gen != st.queue_gen || (set.session.position - pos).abs() > 1.0 {
+                    saved_gen = st.queue_gen;
                     set.session.queue = st.queue.iter().take(5000).cloned().collect();
+                    set.session.unshuffled = st.unshuffled.iter().flatten().take(5000).cloned().collect();
                     set.session.index = st.index as i64;
                     set.session.position = pos;
                     self.settings_dirty.store(true, Ordering::Relaxed);
@@ -669,6 +682,7 @@ impl Player {
         let st = self.st.lock();
         let mut set = self.settings.lock();
         set.session.queue = st.queue.iter().take(5000).cloned().collect();
+        set.session.unshuffled = st.unshuffled.iter().flatten().take(5000).cloned().collect();
         set.session.index = st.index as i64;
         set.session.position = s.position;
     }
@@ -738,6 +752,33 @@ pub fn smart_shuffle(lib: &Library, mut ids: Vec<String>, smart: bool) -> Vec<St
 mod tests {
     use super::*;
     use crate::store::Stat;
+
+    /// Shuffle off goes back to the list's own order, also after DK.FM was closed and opened.
+    #[test]
+    fn shuffle_off_restores_the_order_after_a_restart() {
+        let (_g, dir) = crate::store::test_profile("shuffletest");
+        let lib = crate::library::Library::load();
+        let order: Vec<String> = (0..8).map(|i| format!("s{i}")).collect();
+        for id in &order {
+            lib.data.write().tracks.insert(id.clone(), crate::store::Track { id: id.clone(), path: dir.join(format!("{id}.mp3")).display().to_string(), title: id.clone(), ..Default::default() });
+        }
+        let dirty = Arc::new(AtomicBool::new(false));
+        let settings = Arc::new(Mutex::new(Settings::default()));
+        settings.lock().player.shuffle = false;
+        let p = Player::new(lib.clone(), settings.clone(), dirty.clone());
+        p.play_list(order.clone(), 0, Some(false));
+        p.toggle_shuffle();
+        assert!(p.st.lock().opts.shuffle);
+        p.shutdown();
+        p.engine.send(Cmd::Pause);
+        assert_eq!(settings.lock().session.unshuffled, order);
+        // DK.FM opened again: shuffle off goes back to the list's order
+        let p2 = Player::new(lib.clone(), settings.clone(), dirty);
+        assert_eq!(p2.st.lock().unshuffled.as_ref(), Some(&order));
+        p2.toggle_shuffle();
+        assert_eq!(p2.st.lock().queue, order);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn hidden_songs_are_skipped() {

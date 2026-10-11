@@ -9,10 +9,10 @@ use eframe::egui::{self, Align2, Id, LayerId, Order, Pos2, Rect};
 
 /// Bump with every update that adds steps: people who update are offered a tour of just the
 /// steps newer than the last tour they were offered.
-pub const TOUR_VERSION: u32 = 6;
+pub const TOUR_VERSION: u32 = 7;
 
 /// (what it points at, title, explanation, the TOUR_VERSION that added it)
-pub const STEPS: [(&str, &str, &str, u32); 23] = [
+pub const STEPS: [(&str, &str, &str, u32); 27] = [
     ("homepanel", "HOME", "Home, Discover, Songs, Albums, Artists, Recent, Top and Stats have their own HOME tab, next to LIBRARY (your playlists).", 2),
     ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
     ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
@@ -34,6 +34,10 @@ pub const STEPS: [(&str, &str, &str, u32); 23] = [
     ("theater", "SCORE YOUR SINGING", "In a sing-along THEATER (KARAOKE), ♪ SCORE ME listens through your microphone and grades every line: PERFECT, GREAT, GOOD. Headphones give a fair score. Your best per song is kept.", 6),
     ("web", "FIND A SONG BY ITS LYRICS", "Remember a line but not the song? Type it in the search bar and pick LYRICS: your own songs that have it (click to play from that line) and the songs online.", 6),
     ("theme", "KEEP THESE COLOURS", "Like how the Album Cover theme looks with this song? THEME > + SAVE THESE COLOURS keeps it as a theme of yours.", 5),
+    ("podcasts", "PODCASTS & AUDIOBOOKS", "Follow any podcast or audiobook: search for it or paste its RSS link. Episodes pick up where you stopped and play up to 2x with normal-sounding voices.", 7),
+    ("stats", "YEAR IN REVIEW", "Stats > ★ YEAR IN REVIEW: your year on one card (song of the year, top artists, your busiest month and more). SAVE AS PICTURE to share it.", 7),
+    ("more", "FIX MY LIBRARY", "⋯ > Fix my library: songs with no cover, no lyrics, or the wrong recording, each with the button that fixes it.", 7),
+    ("theme", "MATCHES LOGO", "DK.FM has a new look to match its logo. Your old theme is still in THEME.", 7),
     ("refresh", "REFRESH", "↻ checks for a DK.FM update and syncs your Spotify playlists right now.", 2),
     ("settings", "SETTINGS", "Settings has a search box: type what you're looking for, like \"quality\" or \"spotify\".", 2),
 ];

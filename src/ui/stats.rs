@@ -16,6 +16,8 @@ pub struct StatsState {
     cache: Option<((usize, usize, u64, u64), Arc<Computed>)>,
     /// karaoke.json's last change, looked at every few seconds (not every frame)
     karaoke_seen: Option<(std::time::Instant, u64)>,
+    /// YEAR IN REVIEW is open
+    pub reviewing: bool,
 }
 
 #[derive(Default)]
@@ -107,6 +109,12 @@ fn compute(app: &App, period: usize) -> Computed {
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
+    if app.stats.reviewing {
+        if !super::review::show(app, ui) {
+            app.stats.reviewing = false;
+        }
+        return;
+    }
     let kar = match app.stats.karaoke_seen {
         Some((at, v)) if at.elapsed().as_secs() < 5 => v,
         _ => {
@@ -126,6 +134,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.vertical(|ui| {
                 ui.label(egui::RichText::new("YOUR STATS").font(px(12.0)).color(pal.text));
                 ui.label(egui::RichText::new("UPDATED LIVE · STORED ONLY ON THIS PC").color(pal.dim));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if button(ui, &pal, "★ YEAR IN REVIEW", true, true).on_hover_text("Your year on one card, to keep or share").clicked() {
+                    app.stats.reviewing = true;
+                }
             });
         });
         ui.add_space(6.0);

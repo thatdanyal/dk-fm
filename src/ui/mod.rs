@@ -28,6 +28,7 @@ pub mod newcover;
 pub mod podcasts;
 pub mod newlyrics;
 pub mod reaudio;
+pub mod review;
 pub mod recs;
 pub mod scope;
 pub mod settings;
@@ -165,6 +166,7 @@ pub struct App {
     /// FIX MY LIBRARY's checks
     pub fixlib: fixlib::FixState,
     pub podcasts: podcasts::PodState,
+    pub review: review::Review,
     /// "SAVE TO" for a song being downloaded (+ GET, KEEP)
     pub dest: Option<dest::Dest>,
     pub update: Arc<Mutex<UpdState>>,
@@ -591,6 +593,7 @@ impl App {
             new_cover: None,
             fixlib: Default::default(),
             podcasts: Default::default(),
+            review: Default::default(),
             dest: None,
             update,
             update_dismissed: None,
@@ -1585,6 +1588,10 @@ impl App {
                 "dupes" => self.browser.set_view(browser::View::Duplicates),
                 "fix" => self.browser.set_view(browser::View::Fix),
                 "podcasts" => self.browser.set_view(browser::View::Podcasts),
+                "review" => {
+                    self.browser.set_view(browser::View::Stats);
+                    self.stats.reviewing = true;
+                }
                 "playlist" => {
                     let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
                     if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }

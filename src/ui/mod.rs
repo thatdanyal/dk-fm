@@ -136,6 +136,8 @@ pub struct App {
     dock: DockState<Tab>,
     pub layout_edit: bool,
     pub mini: bool,
+    /// when the mini player was turned on (its window takes a moment to shrink)
+    mini_at: Instant,
     normal_size: Option<Vec2>,
     /// in the background (minimized or not focused): see system::went_away
     away: bool,
@@ -568,6 +570,7 @@ impl App {
             dock,
             layout_edit: false,
             mini: false,
+            mini_at: Instant::now(),
             normal_size: None,
             away: false,
             last_input: Instant::now(),
@@ -993,6 +996,7 @@ impl App {
     pub fn toggle_mini(&mut self, ctx: &egui::Context) {
         self.mini = !self.mini;
         if self.mini {
+            self.mini_at = Instant::now();
             self.normal_size = ctx.input(|i| i.viewport().inner_rect.map(|r| r.size()));
             ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(Vec2::new(460.0, 172.0)));
@@ -1775,6 +1779,15 @@ impl App {
         }
         if self.frames == 2 && self.started_hidden {
             system::hide_window();
+        }
+        // the mini player dragged to the top of the screen (Windows maximizes it), snapped to a
+        // side or pulled much bigger: that's the full player, at that size
+        if self.mini && self.mini_at.elapsed().as_millis() > 1500 {
+            let (max, size) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().inner_rect.map(|r| r.size())));
+            if max || size.is_some_and(|s| s.y > 360.0) {
+                self.mini = false;
+                ctx.send_viewport_cmd(ViewportCommand::WindowLevel(egui::WindowLevel::Normal));
+            }
         }
         let away = ctx.input(|i| !i.focused || i.viewport().minimized.unwrap_or(false));
         if away != self.away {

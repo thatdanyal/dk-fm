@@ -15,6 +15,7 @@ mod library;
 mod lyricsrc;
 mod net;
 mod player;
+mod podcasts;
 mod problems;
 mod recognize;
 mod share;

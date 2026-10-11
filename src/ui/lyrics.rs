@@ -150,6 +150,19 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
         ui.centered_and_justified(|ui| ui.label(egui::RichText::new("NO LYRICS").color(pal.dim)));
         return;
     };
+    // a podcast episode: its show notes instead (no lyrics to look up)
+    if t.id.starts_with(crate::audio::EPISODE) {
+        let about = super::podcasts::about(app, &t.id);
+        egui::ScrollArea::vertical().auto_shrink([false; 2]).id_salt("ep-about").show(ui, |ui| {
+            egui::Frame::new().inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                ui.label(egui::RichText::new(&t.title).font(vt(22.0 * scale)).color(pal.text));
+                ui.label(egui::RichText::new(&t.artist).font(vt(17.0 * scale)).color(pal.dim));
+                ui.add_space(8.0);
+                ui.label(egui::RichText::new(if about.is_empty() { "No show notes for this episode." } else { about.as_str() }).font(vt(18.0 * scale)).color(pal.text));
+            });
+        });
+        return;
+    }
     // size follows the panel: narrow panels get smaller text, wide ones bigger (and your own
     // Ctrl+scroll zoom on top)
     let area = ui.available_rect_before_wrap();

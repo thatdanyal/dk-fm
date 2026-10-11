@@ -19,6 +19,8 @@ use symphonia::core::units::Time;
 
 pub const EQ_FREQS: [f32; 10] = [31.0, 62.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0];
 pub const SCOPE_LEN: usize = 4096;
+/// Podcast episodes' ids start with this (they play at the podcast speed).
+pub const EPISODE: &str = "ep-";
 
 pub enum Cmd {
     Play { id: String, path: PathBuf, start: f64, gain_db: f32, autoplay: bool },
@@ -32,8 +34,9 @@ pub enum Cmd {
     SetCrossfade(f32),
     SetGain { id: String, db: f32 },
     SetLimiter(bool),
-    /// karaoke: take the voice down (0 = as recorded, 1 = as far as it goes)
     SetLeveler(bool),
+    /// podcast episodes' speed (1 = as recorded; voices keep their pitch). Songs always play at 1.
+    SetSpeed(f32),
 }
 
 #[derive(Debug, Clone)]
@@ -126,8 +129,12 @@ struct Deck {
     resampler: Option<rubato::FastFixedIn<f32>>,
     pending: [Vec<f32>; 2],
     out: VecDeque<f32>,
-    frames_out: u64,
+    /// how much of the file has been played (frames at the device rate; with a speed other than 1
+    /// it moves faster or slower than what's been heard)
+    frames_out: f64,
     base: f64,
+    speed: f32,
+    stretch: Option<Stretch>,
     duration: f64,
     eof: bool,
     trim: f32,
@@ -179,8 +186,10 @@ impl Deck {
             resampler,
             pending: [Vec::new(), Vec::new()],
             out: VecDeque::with_capacity(16384),
-            frames_out: 0,
+            frames_out: 0.0,
             base: 0.0,
+            speed: 1.0,
+            stretch: None,
             duration,
             eof: false,
             trim,
@@ -190,7 +199,7 @@ impl Deck {
     }
 
     fn position(&self) -> f64 {
-        self.base + self.frames_out as f64 / self.dst_rate as f64
+        self.base + self.frames_out / self.dst_rate as f64
     }
 
     fn remaining(&self) -> f64 {
@@ -209,8 +218,9 @@ impl Deck {
                 r.reset();
             }
             self.base = secs;
-            self.frames_out = 0;
+            self.frames_out = 0.0;
             self.eof = false;
+            self.stretch = None;
         }
     }
 
@@ -307,9 +317,22 @@ impl Deck {
         let _ = self.src_rate;
     }
 
+    fn set_speed(&mut self, speed: f32) {
+        let speed = speed.clamp(0.5, 3.0);
+        if (speed - self.speed).abs() > 1e-3 {
+            self.speed = speed;
+            self.stretch = None;
+        }
+    }
+
     /// Up to `frames` stereo frames; fewer means the song ended.
     fn read(&mut self, frames: usize, dst: &mut Vec<f32>) {
         dst.clear();
+        if (self.speed - 1.0).abs() > 1e-3 {
+            self.read_stretched(frames, dst);
+            self.apply_trim(dst);
+            return;
+        }
         while self.out.len() < frames * 2 && !self.eof {
             if !self.decode_more() {
                 self.eof = true;
@@ -317,7 +340,70 @@ impl Deck {
         }
         let n = (frames * 2).min(self.out.len());
         dst.extend(self.out.drain(..n));
-        // smooth per-song trim changes over the chunk (no clicks)
+        self.apply_trim(dst);
+        self.frames_out += (n / 2) as f64;
+    }
+
+    /// Faster or slower without changing the pitch (WSOLA): the sound is cut into overlapping
+    /// 40 ms pieces taken further apart (faster) or closer together (slower) than they're played,
+    /// each one nudged by up to 12 ms to where it lines up best with the one before, then
+    /// cross-faded. Made for speech; only runs when the speed isn't 1.
+    fn read_stretched(&mut self, frames: usize, dst: &mut Vec<f32>) {
+        let mut st = self.stretch.take().unwrap_or_else(|| Stretch::new(self.dst_rate));
+        let (ho, delta) = (st.hop, st.delta);
+        while dst.len() < frames * 2 {
+            if st.ready < st.done.len() {
+                let take = (frames * 2 - dst.len()).min(st.done.len() - st.ready);
+                dst.extend_from_slice(&st.done[st.ready..st.ready + take]);
+                st.ready += take;
+                continue;
+            }
+            st.done.clear();
+            st.ready = 0;
+            // enough sound decoded for the next piece and the search around it
+            let want = (st.last + 2 * ho).max(st.next.ceil() as usize + delta + ho) + 1;
+            while self.out.len() / 2 < want && !self.eof {
+                if !self.decode_more() {
+                    self.eof = true;
+                }
+            }
+            if self.out.len() / 2 < want {
+                // the end: what's left plays as it is
+                let from = (st.last + ho).min(self.out.len() / 2);
+                st.done.extend(self.out.iter().skip(from * 2).copied());
+                self.frames_out += (self.out.len() / 2 - from) as f64;
+                self.out.clear();
+                st.last = 0;
+                st.next = 0.0;
+                if st.done.is_empty() {
+                    break;
+                }
+                continue;
+            }
+            let buf = self.out.make_contiguous();
+            let lo = (st.next.round() as usize).saturating_sub(delta);
+            let hi = st.next.round() as usize + delta;
+            let best = best_match(buf, st.last + ho, lo, hi, ho);
+            for i in 0..ho {
+                let w = 0.5 - 0.5 * (std::f32::consts::PI * i as f32 / ho as f32).cos();
+                for c in 0..2 {
+                    st.done.push(buf[(st.last + ho + i) * 2 + c] * (1.0 - w) + buf[(best + i) * 2 + c] * w);
+                }
+            }
+            st.last = best;
+            st.next += ho as f64 * self.speed as f64;
+            self.frames_out += ho as f64 * self.speed as f64;
+            // what's behind both is done with
+            let drop = st.last.min((st.next as usize).saturating_sub(delta));
+            self.out.drain(..drop * 2);
+            st.last -= drop;
+            st.next -= drop as f64;
+        }
+        self.stretch = Some(st);
+    }
+
+    /// Smooth per-song trim changes over the chunk (no clicks).
+    fn apply_trim(&mut self, dst: &mut [f32]) {
         let step = (self.trim_target - self.trim) / (dst.len().max(1) as f32 / 2.0);
         for f in dst.chunks_mut(2) {
             self.trim += step;
@@ -327,12 +413,65 @@ impl Deck {
             }
         }
         self.trim = self.trim_target;
-        self.frames_out += (n / 2) as u64;
     }
 
     fn finished(&self) -> bool {
         self.eof && self.out.is_empty()
     }
+}
+
+/// The time stretcher's state (see `Deck::read_stretched`).
+struct Stretch {
+    /// frames played per piece (half of a 40 ms piece) and how far a piece may be nudged
+    hop: usize,
+    delta: usize,
+    /// where the last piece started, and where the next should (frames into the deck's queue)
+    last: usize,
+    next: f64,
+    /// made but not handed out yet
+    done: Vec<f32>,
+    ready: usize,
+}
+
+impl Stretch {
+    fn new(rate: u32) -> Self {
+        let hop = (rate as f32 * 0.02) as usize;
+        Self { hop, delta: (rate as f32 * 0.012) as usize, last: 0, next: hop as f64, done: Vec::new(), ready: 0 }
+    }
+}
+
+/// Where in `lo..=hi` a piece of `len` frames lines up best with the one at `target` (mono,
+/// normalised correlation: first every 4th frame, then the frames around the best).
+fn best_match(buf: &[f32], target: usize, lo: usize, hi: usize, len: usize) -> usize {
+    let m = |i: usize| buf[i * 2] + buf[i * 2 + 1];
+    let score = |k: usize, step: usize| {
+        let (mut xy, mut yy) = (0.0f32, 1e-9f32);
+        let mut i = 0;
+        while i < len {
+            let y = m(k + i);
+            xy += m(target + i) * y;
+            yy += y * y;
+            i += step;
+        }
+        xy / yy.sqrt()
+    };
+    let mut best = (lo, f32::MIN);
+    let mut k = lo;
+    while k <= hi {
+        let s = score(k, 4);
+        if s > best.1 {
+            best = (k, s);
+        }
+        k += 4;
+    }
+    let (a, b) = (best.0.saturating_sub(3).max(lo), (best.0 + 3).min(hi));
+    for k in a..=b {
+        let s = score(k, 2);
+        if s > best.1 {
+            best = (k, s);
+        }
+    }
+    best.0
 }
 
 fn db_to_lin(db: f32) -> f32 {
@@ -633,6 +772,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
     let mut stream_on = out.is_some();
     let mut xfade = 0.0f32;
     let mut fading: Option<(f64, f64)> = None; // (elapsed, length) seconds
+    let mut ep_speed = 1.0f32;
     let mut dsp = Dsp::new(sr as f32);
     const CHUNK: usize = 512;
     let mut a = Vec::with_capacity(CHUNK * 2);
@@ -741,6 +881,7 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                 }
                 Cmd::SetLimiter(on) => dsp.limiter = on,
                 Cmd::SetLeveler(on) => dsp.leveler = on,
+                Cmd::SetSpeed(s) => ep_speed = s,
             }
         }
 
@@ -830,6 +971,9 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
                 break;
             }
             mix.iter_mut().for_each(|s| *s = 0.0);
+            for d in [cur.as_mut(), next.as_mut()].into_iter().flatten() {
+                d.set_speed(if d.id.starts_with(EPISODE) { ep_speed } else { 1.0 });
+            }
             let mut act = Act::None;
             {
                 let c = cur.as_mut().unwrap();
@@ -933,6 +1077,64 @@ fn mixer_thread(rx: Receiver<Cmd>, events: Sender<Event>, shared: Arc<Shared>) {
 
 #[cfg(test)]
 mod tests {
+    /// Podcast speed: faster or slower, the same pitch, and the position follows the file.
+    #[test]
+    fn speed_keeps_the_pitch() {
+        let sr = 48000u32;
+        let secs = 4.0;
+        let n = (sr as f64 * secs) as usize;
+        // a 16-bit stereo WAV of a 440 Hz tone
+        let mut wav = Vec::new();
+        let data = (n * 4) as u32;
+        for (k, v) in [(b"RIFF", 36 + data), (b"WAVE", 0), (b"fmt ", 16)] {
+            wav.extend_from_slice(k);
+            if &k[..] != b"WAVE" {
+                wav.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&sr.to_le_bytes());
+        wav.extend_from_slice(&(sr * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data.to_le_bytes());
+        for i in 0..n {
+            let v = ((i as f32 / sr as f32 * 440.0 * std::f32::consts::TAU).sin() * 12000.0) as i16;
+            wav.extend_from_slice(&v.to_le_bytes());
+            wav.extend_from_slice(&v.to_le_bytes());
+        }
+        let p = std::env::temp_dir().join("dkfm-speed-test.wav");
+        std::fs::write(&p, wav).unwrap();
+        for speed in [1.5f32, 0.75] {
+            let mut d = super::Deck::open("ep-test", &p, sr, 0.0).unwrap();
+            d.set_speed(speed);
+            let (mut all, mut buf) = (Vec::new(), Vec::new());
+            loop {
+                d.read(512, &mut buf);
+                all.extend_from_slice(&buf);
+                if buf.len() < 1024 {
+                    break;
+                }
+            }
+            let played = all.len() as f64 / 2.0 / sr as f64;
+            let want = secs / speed as f64;
+            assert!((played - want).abs() < 0.1, "speed {speed}: {played:.2} s, want {want:.2}");
+            assert!((d.position() - secs).abs() < 0.1, "position {:.2}", d.position());
+            // pitch: zero crossings in the middle second
+            let mid: Vec<f32> = all.chunks(2).map(|f| f[0]).skip(sr as usize / 4).take(sr as usize / 2).collect();
+            let crossings = mid.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count() as f64;
+            let hz = crossings / 2.0 / 0.5;
+            assert!((hz - 440.0).abs() < 15.0, "speed {speed}: {hz} Hz");
+            // no clicks where the pieces join (a 440 Hz tone at this level moves at most ~0.02
+            // from one sample to the next)
+            let jump = all.chunks(2).map(|f| f[0]).collect::<Vec<_>>().windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+            assert!(jump < 0.04, "speed {speed}: a jump of {jump}");
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
     /// DKFM_DECODE_DIR=<folder> cargo test --release decode_folder -- --ignored --nocapture
     /// decodes every song in a folder to the end, like the player does, and reports any that fail
     #[test]

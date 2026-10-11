@@ -33,6 +33,7 @@ pub enum View {
     Duplicates,
     /// FIX MY LIBRARY: no cover, no lyrics, wrong length
     Fix,
+    Podcasts,
     /// new music picked from what you play
     Discover,
     /// FIND MUSIC: search YouTube Music for songs, artists, albums… to download
@@ -134,9 +135,9 @@ pub const COLUMNS: [Col; 10] = [
 /// Screens in the tab strip above the library (the sidebar lists only playlists):
 /// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
 /// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
-pub const NAV: [(&str, &str, &str, &str, &str); 14] = [
+pub const NAV: [(&str, &str, &str, &str, &str); 15] = [
     ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🔍", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND MUSIC", "Find music online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
-    ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"),
+    ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"), ("podcasts", "tab", "🎙", "PODCASTS", "Podcasts & audiobooks"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("fix", "more", "🔧", "Fix my library", "Fix my library"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
 
@@ -165,6 +166,7 @@ fn nav_of(v: &View) -> Option<&'static str> {
         View::Downloads => "downloads",
         View::Duplicates => "dupes",
         View::Fix => "fix",
+        View::Podcasts => "podcasts",
         View::Web => "web",
         View::Discover => "discover",
         View::Liked | View::Downloaded | View::Playlist(_) => return None,
@@ -187,6 +189,7 @@ pub fn view_for(key: &str) -> Option<View> {
         "stats" => View::Stats,
         "dupes" => View::Duplicates,
         "fix" => View::Fix,
+        "podcasts" => View::Podcasts,
         "import" => View::Import,
         "downloads" => View::Downloads,
         "web" => View::Web,
@@ -341,6 +344,7 @@ pub fn show_home(app: &mut App, ui: &mut Ui) {
             View::Downloads => super::import::downloads(app, ui),
             View::Duplicates => super::dupes::show(app, ui),
             View::Fix => super::fixlib::show(app, ui),
+            View::Podcasts => super::podcasts::show(app, ui),
             View::Web => super::websearch::show(app, ui),
             View::Discover => super::explore::show(app, ui),
             _ => tracks_view(app, ui),

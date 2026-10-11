@@ -265,7 +265,7 @@ impl Media {
 
     pub fn update(&mut self, title: &str, artist: &str, album: &str, cover: Option<&str>, duration: f64, playing: bool, position: f64) {
         let Some(c) = self.controls.as_mut() else { return };
-        let song = format!("{title}|{artist}|{album}|{}", cover.unwrap_or(""));
+        let song = format!("{title}|{artist}|{album}|{}|{:.0}", cover.unwrap_or(""), duration);
         let changed = song != self.last;
         self.last = song;
         #[cfg(windows)]

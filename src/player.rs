@@ -175,7 +175,7 @@ impl Player {
 
     fn next_index(&self) -> Option<isize> {
         let st = self.st.lock();
-        if st.opts.repeat == "one" && st.index >= 0 {
+        if st.opts.repeat == "one" && st.index >= 0 && !repeats_not(&st) {
             return Some(st.index);
         }
         first_unhidden(&self.lib.data.read(), &st.queue, st.index + 1, st.opts.repeat == "all")
@@ -295,7 +295,7 @@ impl Player {
         if len == 0 {
             return;
         }
-        if !manual && repeat == "one" {
+        if !manual && repeat == "one" && !repeats_not(&self.st.lock()) {
             return self.load(idx, true, 0.0);
         }
         let mut i = idx + 1;
@@ -342,6 +342,11 @@ impl Player {
         let (idx, len, repeat) = { let st = self.st.lock(); (st.index, st.queue.len() as isize, st.opts.repeat.clone()) };
         let i = if idx - 1 < 0 { if repeat == "all" { len - 1 } else { 0 } } else { idx - 1 };
         self.load(i, true, 0.0);
+    }
+
+    /// Podcast episodes' playback speed (songs always play at 1).
+    pub fn set_podcast_speed(&self, s: f32) {
+        self.engine.send(Cmd::SetSpeed(s));
     }
 
     pub fn seek(&self, t: f64) {
@@ -565,7 +570,7 @@ impl Player {
                     {
                         let mut st = self.st.lock();
                         let n = st.queue.len() as isize;
-                        let mut ni = if st.opts.repeat == "one" { st.index } else { st.index + 1 };
+                        let mut ni = if st.opts.repeat == "one" && !repeats_not(&st) { st.index } else { st.index + 1 };
                         if ni >= n { ni = 0; }
                         if st.queue.get(ni as usize) != Some(&id) {
                             if let Some(p) = st.queue.iter().position(|x| *x == id) { ni = p as isize; }
@@ -718,6 +723,11 @@ static MATCH: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
 
 fn plural(n: usize, w: &str) -> String {
     format!("{n} {w}{}", if n == 1 { "" } else { "s" })
+}
+
+/// A podcast episode playing: repeat one doesn't play it again (it moves on).
+fn repeats_not(st: &State) -> bool {
+    st.queue.get(st.index.max(0) as usize).is_some_and(|id| id.starts_with(crate::audio::EPISODE))
 }
 
 /// Smart shuffle: a true permutation, same-artist songs spread evenly apart, and songs you tend

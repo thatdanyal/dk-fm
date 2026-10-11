@@ -106,10 +106,18 @@ pub struct Library {
     /// songs downloaded just to listen before getting them (ids start with `PREVIEW`): playable,
     /// but never saved, listed or counted in Stats
     pub previews: RwLock<HashMap<String, Track>>,
+    /// podcast episodes ready to play (ids start with `audio::EPISODE`): like previews, never in
+    /// the library, its stats or history
+    pub episodes: RwLock<HashMap<String, Track>>,
 }
 
 /// Id prefix of a preview (see `Library::previews`).
 pub const PREVIEW: &str = "pv-";
+
+/// A preview or a podcast episode: plays, but isn't music in your library (not counted).
+pub fn not_music(id: &str) -> bool {
+    id.starts_with(PREVIEW) || id.starts_with(crate::audio::EPISODE)
+}
 
 /// One undoable change: the playlists and songs it touched, as they were before it.
 pub struct Undo {
@@ -204,6 +212,7 @@ impl Library {
             dir,
             undo: Default::default(),
             previews: Default::default(),
+            episodes: Default::default(),
         });
         // save changes every few seconds even while the window is hidden or minimized (no frames
         // are drawn then), so downloads and auto-sync survive a crash, shutdown or forced close
@@ -514,7 +523,15 @@ impl Library {
 
     // ------------------------------------------------------------ queries & edits
     pub fn track(&self, id: &str) -> Option<Track> {
-        self.data.read().tracks.get(id).cloned().or_else(|| if id.starts_with(PREVIEW) { self.previews.read().get(id).cloned() } else { None })
+        self.data.read().tracks.get(id).cloned().or_else(|| {
+            if id.starts_with(PREVIEW) {
+                self.previews.read().get(id).cloned()
+            } else if id.starts_with(crate::audio::EPISODE) {
+                self.episodes.read().get(id).cloned()
+            } else {
+                None
+            }
+        })
     }
 
     pub fn stat(&self, id: &str) -> Stat {
@@ -553,7 +570,7 @@ impl Library {
     }
 
     pub fn bump_play(&self, id: &str) {
-        if self.private.load(Ordering::Relaxed) || id.starts_with(PREVIEW) {
+        if self.private.load(Ordering::Relaxed) || not_music(id) {
             return;
         }
         let mut d = self.data.write();
@@ -566,7 +583,7 @@ impl Library {
     }
 
     pub fn bump_skip(&self, id: &str) {
-        if self.private.load(Ordering::Relaxed) || id.starts_with(PREVIEW) {
+        if self.private.load(Ordering::Relaxed) || not_music(id) {
             return;
         }
         self.data.write().stats.entry(id.to_string()).or_default().skips += 1;
@@ -590,7 +607,7 @@ impl Library {
     }
 
     pub fn add_history(&self, row: (String, i64, i64, u8)) {
-        if self.private.load(Ordering::Relaxed) || row.0.starts_with(PREVIEW) {
+        if self.private.load(Ordering::Relaxed) || not_music(&row.0) {
             return;
         }
         let mut h = self.history.write();

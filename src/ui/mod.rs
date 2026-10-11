@@ -25,6 +25,7 @@ pub mod preview;
 pub mod queue;
 pub mod fixlib;
 pub mod newcover;
+pub mod podcasts;
 pub mod newlyrics;
 pub mod reaudio;
 pub mod recs;
@@ -161,6 +162,7 @@ pub struct App {
     pub new_cover: Option<newcover::Fix>,
     /// FIX MY LIBRARY's checks
     pub fixlib: fixlib::FixState,
+    pub podcasts: podcasts::PodState,
     /// "SAVE TO" for a song being downloaded (+ GET, KEEP)
     pub dest: Option<dest::Dest>,
     pub update: Arc<Mutex<UpdState>>,
@@ -585,6 +587,7 @@ impl App {
             new_lyrics: None,
             new_cover: None,
             fixlib: Default::default(),
+            podcasts: Default::default(),
             dest: None,
             update,
             update_dismissed: None,
@@ -1577,6 +1580,7 @@ impl App {
                 "albums" => self.browser.set_view(browser::View::Albums),
                 "dupes" => self.browser.set_view(browser::View::Duplicates),
                 "fix" => self.browser.set_view(browser::View::Fix),
+                "podcasts" => self.browser.set_view(browser::View::Podcasts),
                 "playlist" => {
                     let p = self.lib.data.read().playlists.iter().find(|p| p.track_ids.len() > 3).map(|p| p.id.clone());
                     if let Some(p) = p { self.browser.set_view(browser::View::Playlist(p)); }
@@ -1791,6 +1795,7 @@ impl App {
         }
         preview::poll(self);
         reaudio::poll(self);
+        podcasts::tick(self);
         self.marks.clear();
         // notices from background workers
         let n: Vec<String> = self.player.notices.lock().drain(..).chain(self.dl.notices.lock().drain(..)).collect();

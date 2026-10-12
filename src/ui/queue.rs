@@ -11,7 +11,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let secs: f64 = upcoming.iter().map(|t| t.duration).sum();
     egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 6)).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(format!("{} UP NEXT · {}", upcoming.len(), fmt_long(secs))).font(px(6.0)).color(pal.dim));
+            // the buttons first, so a narrow queue cuts the count short instead of overlapping them
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if tb_button(ui, &pal, "CLEAR", false).clicked() {
                     app.player.clear_upcoming();
@@ -19,6 +19,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 if tb_button(ui, &pal, "SAVE", false).clicked() && !queue.is_empty() {
                     app.modal = Some(Modal::Prompt { title: "SAVE QUEUE AS PLAYLIST".into(), text: "My Queue".into(), action: PromptAction::NewPlaylist(queue.clone()) });
                 }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("{} UP NEXT · {}", upcoming.len(), fmt_long(secs))).font(px(6.0)).color(pal.dim)).truncate());
+                });
             });
         });
     });

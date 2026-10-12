@@ -4,7 +4,7 @@ use eframe::egui::{Key, Modifiers};
 use std::collections::BTreeMap;
 
 /// (action, what it does, default binding)
-pub const ACTIONS: [(&str, &str, &str); 24] = [
+pub const ACTIONS: [(&str, &str, &str); 26] = [
     ("play", "Play / pause", "Space"),
     ("fwd", "Seek forward 5 s", "Right"),
     ("back", "Seek back 5 s", "Left"),
@@ -21,6 +21,8 @@ pub const ACTIONS: [(&str, &str, &str); 24] = [
     ("vis", "Cycle visualizer", "V"),
     ("palette", "Command palette: search & do anything", "Ctrl+K"),
     ("search", "Search library", "Ctrl+F"),
+    ("go_back", "Back (the screen before)", "Alt+Left"),
+    ("go_forward", "Forward", "Alt+Right"),
     ("layout", "Edit layout", "Ctrl+E"),
     ("mini", "Mini player", "Ctrl+M"),
     ("settings", "Settings", "Ctrl+Comma"),

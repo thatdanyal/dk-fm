@@ -65,17 +65,19 @@ pub enum Tab {
     Queue,
     Eq,
     Lyrics,
-    /// Home, Discover, FIND MUSIC, Songs, Albums, Artists, Stats... (LIBRARY has the playlists)
+    /// (old layouts only: HOME was its own panel until October 2026; it's part of MUSIC now,
+    /// see `merge_home`)
     Home,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Deck, Tab::Scope, Tab::Home, Tab::Library, Tab::Queue, Tab::Eq, Tab::Lyrics];
+    /// (Library = MUSIC: Home, search, your library and playlists, like Spotify's main window)
+    pub const ALL: [Tab; 6] = [Tab::Deck, Tab::Library, Tab::Lyrics, Tab::Queue, Tab::Eq, Tab::Scope];
     pub fn name(&self) -> &'static str {
         match self {
             Tab::Deck => "DECK",
             Tab::Scope => "SCOPE",
-            Tab::Library => "LIBRARY",
+            Tab::Library => "MUSIC",
             Tab::Queue => "QUEUE",
             Tab::Eq => "EQUALIZER",
             Tab::Lyrics => "LYRICS",
@@ -249,7 +251,11 @@ pub fn load_dock(v: &serde_json::Value) -> Option<DockState<Tab>> {
             }
         }
     }
-    (!seen.is_empty()).then_some(d)
+    if seen.is_empty() {
+        return None;
+    }
+    merge_home(&mut d);
+    Some(d)
 }
 
 /// Brings `tab` to the front where it is, or puts it back into the biggest panel. True when the
@@ -328,30 +334,37 @@ pub fn keep_deck(dock: &mut DockState<Tab>) {
     }
 }
 
-/// A layout from before HOME had its own panel: HOME goes in front, next to LIBRARY.
-pub fn add_home_tab(dock: &mut DockState<Tab>) {
-    if dock.find_tab(&Tab::Home).is_some() {
-        return;
-    }
-    if let Some((s, n, _)) = dock.find_tab(&Tab::Library) {
-        if let Some(Node::Leaf { tabs, active, .. }) = dock.get_surface_mut(s).and_then(|x| x.node_tree_mut()).map(|tr| &mut tr[n]) {
-            tabs.insert(0, Tab::Home);
-            *active = egui_dock::TabIndex(0);
-            return;
+/// HOME was its own panel next to LIBRARY until October 2026; now both are one panel, MUSIC
+/// (`Tab::Library`), like Spotify's window: Home, search and your library side by side. A layout
+/// with HOME gets MUSIC in its place, or just loses HOME when MUSIC is there too.
+pub fn merge_home(d: &mut DockState<Tab>) {
+    let Some((s, n, t)) = d.find_tab(&Tab::Home) else { return };
+    if d.find_tab(&Tab::Library).is_some() {
+        d.remove_tab((s, n, t));
+        if d.iter_all_tabs().next().is_none() {
+            *d = default_dock();
         }
+    } else if let Some(Node::Leaf { tabs, .. }) = d.get_surface_mut(s).and_then(|x| x.node_tree_mut()).map(|tr| &mut tr[n]) {
+        tabs[t.0] = Tab::Library;
     }
-    reveal(dock, Tab::Home);
 }
 
 pub fn default_dock() -> DockState<Tab> {
-    // the deck over the equalizer and visualizer (tabs) down the left; Home and the library over
-    // the lyrics; the queue on the right (the visualizer starts off, the equalizer flat and off)
-    dock_with(0.23, 0.45, 0.76, 0.62)
+    // DK.FM's owner's own layout: the deck over the lyrics (with the equalizer and visualizer
+    // as tabs behind them) down the left, the music (Home, your library and playlists) in the
+    // middle at full height, the queue on the right (the visualizer starts off, the EQ flat
+    // and off)
+    let mut d = DockState::new(vec![Tab::Library]);
+    let s = d.main_surface_mut();
+    let [music, col] = s.split_left(NodeIndex::root(), 0.2614, vec![Tab::Deck]);
+    let _ = s.split_below(col, 0.3268, vec![Tab::Lyrics, Tab::Eq, Tab::Scope]);
+    let _ = s.split_right(music, 0.743, vec![Tab::Queue]);
+    d
 }
 
-/// The default layout's shape with these splits: the left column's share of the width, the
-/// deck's share of that column's height, the middle's share of what's right of the column, and
-/// Home / the library's share of the middle's height.
+/// The default layout of 5–11 October 2026 (the lyrics under the library) with these splits:
+/// the left column's share of the width, the deck's share of that column's height, the
+/// middle's share of what's right of the column, and the library's share of the middle's height.
 fn dock_with(left: f32, deck: f32, middle: f32, lib: f32) -> DockState<Tab> {
     let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
     let s = d.main_surface_mut();
@@ -374,15 +387,18 @@ fn old_default_dock() -> DockState<Tab> {
     d
 }
 
-/// A layout's shape: every split (rounded) and every group of tabs, to recognise a layout.
-fn shape(d: &DockState<Tab>) -> Vec<String> {
+/// A layout's arrangement: which way each split goes and which panels are tabbed together
+/// (sizes left out), with HOME merged into MUSIC.
+fn arrangement(d: &DockState<Tab>) -> Vec<String> {
+    let mut d = d.clone();
+    merge_home(&mut d);
     let mut v: Vec<String> = d
         .main_surface()
         .iter()
         .map(|n| match n {
             Node::Leaf { tabs, .. } => format!("{tabs:?}"),
-            Node::Horizontal { fraction, .. } => format!("H{fraction:.2}"),
-            Node::Vertical { fraction, .. } => format!("V{fraction:.2}"),
+            Node::Horizontal { .. } => "H".into(),
+            Node::Vertical { .. } => "V".into(),
             _ => String::new(),
         })
         .collect();
@@ -392,13 +408,12 @@ fn shape(d: &DockState<Tab>) -> Vec<String> {
     v
 }
 
-/// The October 2026 default replaces a layout nobody chose (the old default) and the layout it
-/// was made from (DK.FM's owner's); anyone's own layout stays as it is.
+/// Everyone whose layout is still one of DK.FM's earlier defaults (whatever sizes they dragged
+/// its panels to) gets the new default; a layout someone arranged differently stays as it is.
 fn takes_new_default(d: &DockState<Tab>) -> bool {
-    let s = shape(d);
-    s == shape(&old_default_dock()) || s == shape(&dock_with(0.27, 0.54, 0.743, 0.539))
+    let a = arrangement(d);
+    a == arrangement(&old_default_dock()) || a == arrangement(&dock_with(0.23, 0.45, 0.76, 0.62))
 }
-
 
 /// Smallest comfortable size of a panel.
 fn min_size(tab: Tab) -> Vec2 {
@@ -437,7 +452,7 @@ pub fn fit_dock(dock: &DockState<Tab>, area: Vec2) -> Option<DockState<Tab>> {
     if need.x <= area.x + 1.0 && need.y <= area.y + 1.0 {
         return None;
     }
-    let big = [Tab::Home, Tab::Library];
+    let big = [Tab::Library];
     let open: Vec<Tab> = Tab::ALL.into_iter().filter(|t| *t != Tab::Deck && !big.contains(t) && dock.find_tab(t).is_some()).collect();
     let libs: Vec<Tab> = big.into_iter().filter(|t| dock.find_tab(t).is_some()).collect();
     let has_lib = !libs.is_empty();
@@ -510,12 +525,13 @@ impl App {
         let mut dock = dock_json.as_ref().and_then(load_dock).unwrap_or_else(default_dock);
         {
             let mut s = settings.lock();
-            if s.upgrade("home-tab") {
-                add_home_tab(&mut dock);
-            }
-            // the new default layout (only where it was the default anyway: see takes_new_default)
-            if s.upgrade("layout-2026-10") && s.dock.is_some() && takes_new_default(&dock) {
-                dock = default_dock();
+            s.upgrade("home-tab"); // (HOME is part of MUSIC now: nothing to add)
+            // the new default layout (only where it was a default anyway: see takes_new_default),
+            // and HOME is part of MUSIC now (load_dock merged it: saved like that from now on)
+            if s.upgrade("layout-2026-10b") && s.dock.is_some() {
+                if takes_new_default(&dock) {
+                    dock = default_dock();
+                }
                 s.dock = serde_json::to_value(&dock).ok();
             }
             // the playlist you played last is at the top of the list (you can change it back)
@@ -835,13 +851,13 @@ impl App {
         match name {
             "Default" => Some(default_dock()),
             "Minimal" => {
-                let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
+                let mut d = DockState::new(vec![Tab::Library]);
                 let _ = d.main_surface_mut().split_left(NodeIndex::root(), 0.26, vec![Tab::Deck, Tab::Queue]);
                 Some(d)
             }
             "Everything" => {
                 // the older default: every panel open
-                let mut d = DockState::new(vec![Tab::Home, Tab::Library]);
+                let mut d = DockState::new(vec![Tab::Library]);
                 let s = d.main_surface_mut();
                 let [lib, left] = s.split_left(NodeIndex::root(), 0.27, vec![Tab::Deck]);
                 let _ = s.split_below(left, 0.46, vec![Tab::Scope, Tab::Eq]);
@@ -1382,10 +1398,20 @@ impl App {
             "layout" => self.toggle_layout_edit(),
             "mini" => self.toggle_mini(ctx),
             "search" => {
-                // filter the playlist open in LIBRARY
+                // filter the list showing, or (on Home, an artist's page…) the search bar
                 self.show_panel(Tab::Library);
-                self.browser.use_page(false);
-                self.browser.focus_search = true;
+                use browser::View as V;
+                if matches!(self.browser.view, V::All | V::Liked | V::Downloaded | V::Top | V::Recent | V::Album(_) | V::ArtistSongs(_) | V::Mix(_) | V::Playlist(_)) {
+                    self.browser.focus_search = true;
+                } else {
+                    self.browser.web.focus = true;
+                }
+            }
+            "go_back" => {
+                self.browser.go(false);
+            }
+            "go_forward" => {
+                self.browser.go(true);
             }
             "import" => self.browser.set_view(browser::View::Import),
             "next" => self.player.next(true),
@@ -1659,6 +1685,11 @@ impl App {
                     }
                 }
                 "mini" => self.toggle_mini(ctx),
+                // the new-user tour at step DKFM_TOUR_STEP (from 1)
+                "tour" => {
+                    tour::start(self);
+                    self.tour = std::env::var("DKFM_TOUR_STEP").ok().and_then(|v| v.parse::<usize>().ok()).map(|n| n.saturating_sub(1)).or(Some(0));
+                }
                 "layout" => self.layout_edit = true,
                 "eq" => self.show_panel(Tab::Eq),
                 "radio" => {
@@ -1728,15 +1759,16 @@ impl egui_dock::TabViewer for Viewer<'_> {
         match tab {
             Tab::Scope => self.app.mark("scope", ui.max_rect()),
             Tab::Eq => self.app.mark("eq", ui.max_rect()),
-            Tab::Library => self.app.mark("library", ui.max_rect()),
-            Tab::Home => self.app.mark("homepanel", ui.max_rect()),
-            _ => {}
+            Tab::Library | Tab::Home => self.app.mark("library", ui.max_rect()),
+            Tab::Deck => self.app.mark("deck", ui.max_rect()),
+            Tab::Lyrics => self.app.mark("lyrics", ui.max_rect()),
+            Tab::Queue => self.app.mark("queue", ui.max_rect()),
         }
         match tab {
             Tab::Deck => deck::show(self.app, ui),
             Tab::Scope => scope::show(self.app, ui),
             Tab::Library => browser::show(self.app, ui),
-            Tab::Home => browser::show_home(self.app, ui),
+            Tab::Home => browser::show(self.app, ui),
             Tab::Queue => queue::show(self.app, ui),
             Tab::Eq => eqpanel::show(self.app, ui),
             Tab::Lyrics => lyrics::show(self.app, ui),
@@ -1867,7 +1899,7 @@ impl App {
         // something opened a library view (Ctrl+K, Home, a link, a share…): make sure it's on screen
         if self.browser.nav != self.seen_nav {
             self.seen_nav = self.browser.nav;
-            self.show_panel(if self.browser.nav_home { Tab::Home } else { Tab::Library });
+            self.show_panel(Tab::Library);
         }
         self.titlebar(ctx);
 
@@ -2114,19 +2146,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn new_default_layout_only_replaces_layouts_nobody_chose() {
+    fn new_default_layout_replaces_earlier_defaults_only() {
         let saved = |d: &DockState<Tab>| load_dock(&serde_json::to_value(d).unwrap()).unwrap();
         assert!(takes_new_default(&saved(&old_default_dock())));
-        // the owner's layout (as saved, its splits dragged to these)
+        // the 5–11 October default, as shipped and with its splits dragged anywhere
+        assert!(takes_new_default(&saved(&dock_with(0.23, 0.45, 0.76, 0.62))));
         assert!(takes_new_default(&saved(&dock_with(0.27000001, 0.5398840308, 0.7430105209, 0.5387368202))));
+        assert!(takes_new_default(&saved(&dock_with(0.35, 0.3, 0.6, 0.8))));
+        // anyone's own arrangement stays
+        assert!(!takes_new_default(&saved(&App::preset("Minimal").unwrap())));
+        assert!(!takes_new_default(&saved(&App::preset("Everything").unwrap())));
+        assert!(!takes_new_default(&saved(&default_dock())), "nothing to do");
+        let mut moved = dock_with(0.23, 0.45, 0.76, 0.62);
+        let q = moved.find_tab(&Tab::Queue).unwrap();
+        moved.remove_tab(q);
+        assert!(!takes_new_default(&saved(&moved)));
+        // DKFM_DOCK_FILE=<the owner's saved dock JSON>: that's the new default
         if let Ok(f) = std::env::var("DKFM_DOCK_FILE") {
             let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
-            assert!(takes_new_default(&load_dock(&v).unwrap()), "the owner's saved layout");
+            assert_eq!(arrangement(&load_dock(&v).unwrap()), arrangement(&default_dock()), "the owner's saved layout");
         }
-        // anyone's own layout stays
-        assert!(!takes_new_default(&saved(&dock_with(0.3, 0.54, 0.743, 0.539))));
-        assert!(!takes_new_default(&saved(&App::preset("Minimal").unwrap())));
-        assert!(!takes_new_default(&saved(&default_dock())), "nothing to do");
+    }
+
+    #[test]
+    fn home_merges_into_music() {
+        // next to LIBRARY (tabbed or not): HOME goes
+        for d in [dock_with(0.23, 0.45, 0.76, 0.62), {
+            let mut d = DockState::new(vec![Tab::Library]);
+            let _ = d.main_surface_mut().split_left(NodeIndex::root(), 0.5, vec![Tab::Home]);
+            d
+        }] {
+            let d = load_dock(&serde_json::to_value(&d).unwrap()).unwrap();
+            assert!(d.find_tab(&Tab::Home).is_none() && d.find_tab(&Tab::Library).is_some());
+        }
+        // HOME without LIBRARY: MUSIC takes its place
+        let mut d = DockState::new(vec![Tab::Home, Tab::Queue]);
+        let _ = d.main_surface_mut().split_left(NodeIndex::root(), 0.3, vec![Tab::Deck]);
+        let d = load_dock(&serde_json::to_value(&d).unwrap()).unwrap();
+        assert!(d.find_tab(&Tab::Home).is_none());
+        let (_, n, t) = d.find_tab(&Tab::Library).unwrap();
+        assert_eq!((n, t.0), (d.find_tab(&Tab::Queue).unwrap().1, 0));
+        // only HOME: the default
+        let d = load_dock(&serde_json::to_value(DockState::new(vec![Tab::Home])).unwrap()).unwrap();
+        assert_eq!(arrangement(&d), arrangement(&DockState::new(vec![Tab::Library])));
     }
 
     #[test]

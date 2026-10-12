@@ -142,7 +142,7 @@ pub fn voice(app: &mut App, ctx: &egui::Context) {
 
 /// The search bar was typed in (`enter` = search now, else after a short pause).
 pub fn typed(app: &mut App, enter: bool) {
-    if app.browser.view_of(true) != &super::browser::View::Web {
+    if app.browser.view != super::browser::View::Web {
         let q = std::mem::take(&mut app.browser.web.query);
         app.browser.set_view(super::browser::View::Web);
         app.browser.web.query = q;
@@ -154,7 +154,7 @@ pub fn typed(app: &mut App, enter: bool) {
 
 /// Search for `q` in FIND MUSIC (e.g. what SHAZAM heard).
 pub fn search_for(app: &mut App, q: String, cat: &str) {
-    app.show_panel(super::Tab::Home);
+    app.show_panel(super::Tab::Library);
     app.browser.set_view(super::browser::View::Web);
     let w = &mut app.browser.web;
     w.query = q;
@@ -216,7 +216,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     take_results(app);
     let cat = if app.browser.web.cat.is_empty() { "all".to_string() } else { app.browser.web.cat.clone() };
     egui::Frame::new().inner_margin(egui::Margin::same(14)).show(ui, |ui| {
-        // (the search box is the search bar in HOME's tab strip)
+        // (the search box is the search bar at the top of MUSIC)
         ui.horizontal_wrapped(|ui| {
             for (k, label) in sources::CATEGORIES {
                 if tb_button(ui, &pal, label, cat == k).clicked() && cat != k {

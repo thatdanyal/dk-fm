@@ -36,7 +36,7 @@ const TABS: [(SetTab, &str); 18] = [
     (SetTab::Language, "Language"),
     (SetTab::Layouts, "Layouts"),
     (SetTab::Lists, "Lists"),
-    (SetTab::Sidebar, "Tabs & sidebar"),
+    (SetTab::Sidebar, "Sidebar"),
     (SetTab::Search, "Search"),
     (SetTab::Discover, "Discover"),
     (SetTab::Library, "Library"),
@@ -320,7 +320,7 @@ const FIND: &[(SetTab, &str, &str)] = &[
     (SetTab::Lists, "Song list columns", "year genre bitrate added album"),
     (SetTab::Lists, "Default sort", "order"),
     (SetTab::Lists, "When DK.FM starts: open to", "start screen"),
-    (SetTab::Sidebar, "Tabs along the top of HOME", "order hide nav"),
+    (SetTab::Sidebar, "Screens in the sidebar", "order hide nav tabs home songs albums artists"),
     (SetTab::Sidebar, "Sort playlists by", "recently played name added custom order"),
     (SetTab::Sidebar, "Playlist covers in the sidebar", "pictures"),
     (SetTab::Search, "FIND MUSIC: versions per search", "results youtube music"),
@@ -1088,13 +1088,14 @@ fn hidden_songs(app: &mut App, ui: &mut Ui) {
 fn sidebar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let (mut order, mut hidden) = { let s = app.settings.lock(); (browser::nav_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
-    caption(ui, &pal, "TABS");
-    dim(ui, &pal, "Choose which screens the tabs above your library show, and their order. The left sidebar lists only your playlists. Hidden ones stay in the ••• menu at the right end.");
+    caption(ui, &pal, "SIDEBAR");
+    dim(ui, &pal, "Choose which screens your library's sidebar lists above your playlists, and their order. Hidden ones stay in the ••• menu at the top right.");
     let mut changed = false;
-    for (g, title) in [("tab", "TABS"), ("more", "RIGHT END: IMPORT · DOWNLOADS · ••• MENU")] {
+    for (g, title) in [("tab", "IN THE SIDEBAR"), ("more", "TOP RIGHT: IMPORT · DOWNLOADS · ••• MENU")] {
         ui.add_space(6.0);
         ui.label(egui::RichText::new(title).font(px(6.0)).color(pal.dim));
-        let ids: Vec<&str> = order.iter().copied().filter(|id| NAV.iter().any(|s| s.0 == *id && s.1 == g)).collect();
+        // (the search bar is always there)
+        let ids: Vec<&str> = order.iter().copied().filter(|id| *id != "web" && NAV.iter().any(|s| s.0 == *id && s.1 == g)).collect();
         for (i, id) in ids.iter().enumerate() {
             let (_, _, ico, _, label) = NAV.iter().find(|s| s.0 == *id).unwrap();
             let shown = !hidden.iter().any(|h| h == id);
@@ -1128,7 +1129,7 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         app.edit_settings(|s| s.sidebar_covers = covers);
     }
     ui.add_space(8.0);
-    if button(ui, &pal, "RESET TABS", false, true).clicked() {
+    if button(ui, &pal, "RESET SIDEBAR", false, true).clicked() {
         order = browser::nav_order(&[]);
         hidden.clear();
         changed = true;

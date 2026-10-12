@@ -114,7 +114,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
                 title(ui, &pal, "GETTING SONGS");
                 ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                     line(ui, &pal, "📥", "+ IMPORT (Ctrl+I): paste a Spotify, YouTube or SoundCloud link and DK.FM downloads the songs.");
-                    line(ui, &pal, "🌐", "HOME > Search: find any song, artist or album, listen first, then + GET it.");
+                    line(ui, &pal, "🌐", "The search bar at the top: find any song, artist or album, listen first, then + GET it.");
                     line(ui, &pal, "♫", "SHAZAM on the deck names a song playing on your PC or, with the microphone, around you.");
                     line(ui, &pal, "🔎", "Ctrl+K: find any song in your library, or do anything else.");
                 });
@@ -141,7 +141,7 @@ pub fn show_welcome(app: &mut App, ctx: &egui::Context, step: usize, mut start_m
                     line(ui, &pal, "🔲", "Ctrl+E: move panels around. Ctrl+, : Settings.");
                 });
                 ui.add_space(6.0);
-                dim(ui, &pal, "New here? SHOW ME AROUND points out the main features one by one (about a minute).");
+                dim(ui, &pal, "New here? SHOW ME AROUND shows you around in 7 quick steps: search, your library, importing from Spotify, the player and lyrics.");
             }
         });
         ui.add_space(12.0);

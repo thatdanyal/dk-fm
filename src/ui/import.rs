@@ -177,6 +177,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             let u = app.import.input.trim().to_string();
             fetch_link(app, ui.ctx(), u);
         }
+        // a list to pick from is showing: the ways to import step aside so it gets the room
+        if app.import.result.is_some() {
+            if ui.add(egui::Label::new(egui::RichText::new("Other ways to import (your whole Spotify library, SoundCloud, a .dkfm file) >").color(pal.accent2)).sense(Sense::click())).clicked() {
+                app.import.result = None;
+                app.import.selected.clear();
+            }
+            return;
+        }
         let connected = !app.settings.lock().spotify_refresh_token.is_empty();
         ui.label(egui::RichText::new("Spotify playlists, albums & songs · YouTube / YouTube Music playlists, albums & videos · SoundCloud. Spotify songs are matched to the best studio version on YouTube Music. Imported playlists stay in sync automatically.").color(pal.dim));
         ui.add_space(8.0);
@@ -428,11 +436,13 @@ fn profile(app: &mut App, ui: &mut Ui, name: &str, playlists: &[sources::Profile
             let mut on = app.import.selected.contains(&i);
             ui.horizontal(|ui| {
                 ui.add_space(12.0);
-                if ui.checkbox(&mut on, "").changed() {
-                    if on { app.import.selected.insert(i); } else { app.import.selected.remove(&i); }
-                }
+                let mut flip = ui.checkbox(&mut on, "").changed();
                 ui.label(egui::RichText::new(&p.kind).font(px(6.0)).color(if p.kind == "LIKED" { pal.accent } else { pal.dim }));
-                ui.label(egui::RichText::new(&p.name).color(pal.text));
+                // (the name ticks it too)
+                flip |= ui.add(egui::Label::new(egui::RichText::new(&p.name).color(pal.text)).sense(Sense::click())).clicked();
+                if flip {
+                    if app.import.selected.contains(&i) { app.import.selected.remove(&i); } else { app.import.selected.insert(i); }
+                }
                 ui.label(egui::RichText::new(if p.total > 0 { format!("{} ♪ · {}", p.total, p.owner) } else { p.owner.clone() }).color(pal.dim));
                 if !p.note.is_empty() {
                     ui.label(egui::RichText::new(format!("⚠ {}", p.note)).color(pal.accent2));

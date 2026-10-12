@@ -41,27 +41,6 @@ pub enum View {
 }
 
 
-/// Screens of the HOME panel (everything but a playlist, Liked and Downloads, which are LIBRARY's).
-pub fn is_home_view(v: &View) -> bool {
-    !matches!(v, View::Playlist(_) | View::Liked | View::Downloaded)
-}
-
-/// What one of the two browser panels shows: HOME (home, discover, find music, songs, albums,
-/// artists, stats...) or LIBRARY (your playlists, Liked and Downloads). Each keeps its own screen,
-/// search and selection; the panel being drawn has its page in `BrowserState`, the other one
-/// waits here.
-#[derive(Default)]
-pub struct Page {
-    view: View,
-    search: String,
-    sort: Option<(SortKey, bool)>,
-    selection: HashSet<String>,
-    anchor: Option<usize>,
-    list: Vec<String>,
-    list_key: Option<(View, String, Option<(SortKey, bool)>, u64)>,
-    focus_search: bool,
-}
-
 /// Songs being dragged (to reorder a playlist, or onto a sidebar playlist).
 pub struct DragSongs(pub Vec<String>);
 
@@ -132,12 +111,12 @@ pub const COLUMNS: [Col; 10] = [
     col("added", "ADDED", 84.0, 0.0, true, Some(SortKey::Added), "Date added", false),
 ];
 
-/// Screens in the tab strip above the library (the sidebar lists only playlists):
-/// (id, place, icon, tab label, name in Settings). "tab" = the tabs on the left, "more" = the
-/// buttons at the right end (Import, Downloads, and the ⋯ menu for the rest).
+/// Screens in the sidebar above your playlists, like Spotify's (id, place, icon, label, name in
+/// Settings). "tab" = a sidebar row ("web" is the search bar at the top instead), "more" = the
+/// buttons at the top right (Import, Downloads, and the ⋯ menu for the rest).
 pub const NAV: [(&str, &str, &str, &str, &str); 15] = [
-    ("home", "tab", "🏠", "HOME", "Home"), ("discover", "tab", "🔍", "DISCOVER", "Discover new music"), ("web", "tab", "🌐", "FIND MUSIC", "Find music online"), ("all", "tab", "♫", "SONGS", "All songs"), ("albums", "tab", "💿", "ALBUMS", "Albums"), ("artists", "tab", "👤", "ARTISTS", "Artists"),
-    ("recent", "tab", "🕘", "RECENT", "Recently added"), ("top", "tab", "★", "TOP", "Most played"), ("stats", "tab", "📊", "STATS", "Stats"), ("podcasts", "tab", "🎙", "PODCASTS", "Podcasts & audiobooks"),
+    ("home", "tab", "🏠", "Home", "Home"), ("discover", "tab", "✨", "Discover", "Discover new music"), ("web", "tab", "🌐", "FIND MUSIC", "Find music online"), ("all", "tab", "♫", "Songs", "All songs"), ("albums", "tab", "💿", "Albums", "Albums"), ("artists", "tab", "👤", "Artists", "Artists"),
+    ("recent", "tab", "🕘", "Recently added", "Recently added"), ("top", "tab", "★", "Most played", "Most played"), ("podcasts", "tab", "🎧", "Podcasts", "Podcasts & audiobooks"), ("stats", "tab", "📊", "Your stats", "Stats"),
     ("import", "more", "📥", "+ IMPORT", "Import music"), ("downloads", "more", "⬇", "⬇", "Downloads"), ("dupes", "more", "📋", "Duplicates", "Duplicates"), ("fix", "more", "🔧", "Fix my library", "Fix my library"), ("folder", "more", "+", "Add music folder…", "Add music folder"),
 ];
 
@@ -218,52 +197,48 @@ pub struct BrowserState {
     pub web: super::websearch::WebState,
     side_key: Option<(u64, u64, String)>,
     side_rows: Vec<SideRow>,
-    /// counts view changes (the window shows the panel of the last one when it changes)
+    /// counts view changes (the window brings the library panel to the front when it changes)
     pub nav: u64,
-    /// the last view change was a HOME screen (else LIBRARY's)
-    pub nav_home: bool,
-    /// the other panel's page (see `Page`), and whether the fields above are HOME's
-    parked: Page,
-    on_home: bool,
+    /// screens you were on before this one, and the ones BACK left (‹ › like a web browser)
+    back: Vec<View>,
+    fwd: Vec<View>,
     /// width of the playlists column while it's dragged (saved when let go)
     side_w: Option<f32>,
 }
 
 impl Default for BrowserState {
     fn default() -> Self {
-        Self { view: View::Liked, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), copies: (u64::MAX, Default::default(), Vec::new()), downloaded: (u64::MAX, Default::default()), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0, nav_home: true, parked: Page { view: View::Home, ..Default::default() }, on_home: false, side_w: None }
+        Self { view: View::Home, search: String::new(), sort: None, selection: HashSet::new(), anchor: None, list: Vec::new(), list_key: None, focus_search: false, groups_key: 0, albums: Vec::new(), artists: Vec::new(), dupes: Default::default(), copies: (u64::MAX, Default::default(), Vec::new()), downloaded: (u64::MAX, Default::default()), add: Default::default(), web: Default::default(), side_key: None, side_rows: Vec::new(), nav: 0, back: Vec::new(), fwd: Vec::new(), side_w: None }
     }
 }
 
 impl BrowserState {
-    /// Make HOME's (`home`) or LIBRARY's page the current one.
-    pub fn use_page(&mut self, home: bool) {
-        if self.on_home == home {
-            return;
-        }
-        let p = &mut self.parked;
-        std::mem::swap(&mut self.view, &mut p.view);
-        std::mem::swap(&mut self.search, &mut p.search);
-        std::mem::swap(&mut self.sort, &mut p.sort);
-        std::mem::swap(&mut self.selection, &mut p.selection);
-        std::mem::swap(&mut self.anchor, &mut p.anchor);
-        std::mem::swap(&mut self.list, &mut p.list);
-        std::mem::swap(&mut self.list_key, &mut p.list_key);
-        std::mem::swap(&mut self.focus_search, &mut p.focus_search);
-        self.on_home = home;
-    }
-
-    /// The screen HOME is on (`home`) or LIBRARY is on.
-    pub fn view_of(&self, home: bool) -> &View {
-        if self.on_home == home { &self.view } else { &self.parked.view }
-    }
-
-    /// Open a screen, in the panel it belongs to (HOME or LIBRARY).
+    /// Open a screen (the one you were on is kept for ‹ BACK).
     pub fn set_view(&mut self, v: View) {
-        let home = is_home_view(&v);
-        self.use_page(home);
-        self.nav_home = home;
-        self.view = v;
+        if v != self.view {
+            self.back.push(std::mem::replace(&mut self.view, v));
+            if self.back.len() > 60 {
+                self.back.remove(0);
+            }
+            self.fwd.clear();
+        }
+        self.opened();
+    }
+
+    /// ‹ BACK (`forward` = › FORWARD): the screen before (after) this one. False if there's none.
+    pub fn go(&mut self, forward: bool) -> bool {
+        let (from, to) = if forward { (&mut self.fwd, &mut self.back) } else { (&mut self.back, &mut self.fwd) };
+        let Some(v) = from.pop() else { return false };
+        to.push(std::mem::replace(&mut self.view, v));
+        self.opened();
+        true
+    }
+
+    pub fn can_go(&self, forward: bool) -> bool {
+        !if forward { &self.fwd } else { &self.back }.is_empty()
+    }
+
+    fn opened(&mut self) {
         self.nav += 1;
         self.search.clear();
         self.sort = None;
@@ -279,18 +254,23 @@ pub fn artist_key(t: &Track) -> String {
     main_artist(&t.artist).to_lowercase()
 }
 
-/// LIBRARY: your playlists down the side (drag the line to make that column wider or
-/// narrower) and the one you picked.
+/// The music panel, laid out like Spotify: your library down the side (Home, Discover, Liked,
+/// Songs, Albums, Artists… then your playlists; drag the line to make that column wider or
+/// narrower), and what you picked beside it, under a bar with ‹ › (back / forward), the search
+/// bar, Import, Downloads and a ⋯ menu.
 pub fn show(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
-    app.browser.use_page(false);
-    if is_home_view(&app.browser.view) {
-        app.browser.view = View::Liked;
-    }
     let full = ui.available_rect_before_wrap();
-    let max_w = (full.width() - 220.0).max(110.0);
+    // the mouse's back / forward buttons, like in a web browser (or Spotify)
+    if ui.rect_contains_pointer(full) {
+        let (b, f) = ui.input(|i| (i.pointer.button_pressed(egui::PointerButton::Extra1), i.pointer.button_pressed(egui::PointerButton::Extra2)));
+        if b || f {
+            app.browser.go(f);
+        }
+    }
+    let max_w = (full.width() - 300.0).max(110.0);
     let saved = app.settings.lock().sidebar_width;
-    let want = app.browser.side_w.unwrap_or(if saved > 0.0 { saved } else { (full.width() * 0.3).clamp(132.0, 184.0) });
+    let want = app.browser.side_w.unwrap_or(if saved > 0.0 { saved } else { (full.width() * 0.24).clamp(150.0, 210.0) });
     let side_w = want.clamp(110.0, max_w).round();
     let side = Rect::from_min_size(full.min, Vec2::new(side_w, full.height()));
     let main = Rect::from_min_max(Pos2::new(full.left() + side_w, full.top()), full.max);
@@ -298,7 +278,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     ui.allocate_new_ui(egui::UiBuilder::new().max_rect(side), |ui| sidebar(app, ui));
     // the dividing line: drag it
     let grip = Rect::from_center_size(Pos2::new(side.right(), side.center().y), Vec2::new(8.0, side.height()));
-    let g = ui.interact(grip, ui.id().with("side-split"), Sense::drag()).on_hover_text("Drag to make the playlists column wider or narrower");
+    let g = ui.interact(grip, ui.id().with("side-split"), Sense::drag()).on_hover_text("Drag to make your library column wider or narrower");
     if g.hovered() || g.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
     }
@@ -311,23 +291,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             app.edit_settings(|s| s.sidebar_width = w.round());
         }
     }
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(main.shrink2(Vec2::new(2.0, 0.0))), |ui| {
-        ui.set_clip_rect(main);
-        tracks_view(app, ui);
-    });
-}
-
-/// HOME: Home, Discover, the search bar (FIND MUSIC), Songs, Albums, Artists, Recent, Top and
-/// Stats along the top, with Import, Downloads and more at the right end.
-pub fn show_home(app: &mut App, ui: &mut Ui) {
-    let pal = app.pal;
-    app.browser.use_page(true);
-    if !is_home_view(&app.browser.view) {
-        app.browser.view = View::Home;
-    }
-    let main = ui.available_rect_before_wrap();
-    let strip_h = nav_strip(app, ui, Rect::from_min_max(Pos2::new(main.left() + 2.0, main.top()), main.max));
-    let main = Rect::from_min_max(Pos2::new(main.left(), main.top() + strip_h), main.max);
+    let bar_h = top_bar(app, ui, Rect::from_min_max(Pos2::new(main.left() + 2.0, main.top()), main.max));
+    let main = Rect::from_min_max(Pos2::new(main.left(), main.top() + bar_h), main.max);
+    app.mark("page", main);
     // FIX MY LIBRARY checks lengths only while it's open
     if app.browser.view != View::Fix {
         super::fixlib::stop(app);
@@ -350,80 +316,76 @@ pub fn show_home(app: &mut App, ui: &mut Ui) {
             _ => tracks_view(app, ui),
         }
     });
-    let _ = pal;
 }
 
-// ------------------------------------------------------------------------------- tab strip
+// ------------------------------------------------------------------------------- top bar
 
-/// The tabs along the top of the library (HOME · SONGS · ...), with Import, Downloads and a ⋯
-/// menu at the right end. Tabs wrap onto more rows when the panel is narrow. Returns its height.
-fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
+/// The bar above what's showing: ‹ › (back / forward), the search bar (FIND MUSIC), and Import,
+/// Downloads and a ⋯ menu at the right end. Returns its height.
+fn top_bar(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     let pal = app.pal;
     let (order, hidden) = { let s = app.settings.lock(); (nav_order(&s.sidebar_order), s.sidebar_hidden.clone()) };
     let shown: Vec<_> = order.iter().filter_map(|id| NAV.iter().find(|n| n.0 == *id)).filter(|n| !hidden.iter().any(|h| h == n.0)).collect();
     let cur = nav_of(&app.browser.view);
     let active_dl = app.dl.active_count();
-    let (font, row_h, pad) = (px(7.0), 30.0, 6.0);
+    let (font, h, pad) = (px(7.0), 42.0, 6.0);
     let measure = ui.painter().clone();
     let text_w = |s: &str| measure.layout_no_wrap(s.to_string(), font.clone(), pal.text).size().x;
-    // right end: [+ IMPORT] [⬇ n] [⋯]
+    let bar = Rect::from_min_size(area.min, Vec2::new(area.width(), h));
+    ui.painter().hline(bar.x_range(), bar.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
+    let (ry, bh) = (bar.top() + 9.0, h - 18.0);
+    // ‹ ›
+    let mut x = bar.left() + pad;
+    for fwd in [false, true] {
+        let r = Rect::from_min_size(Pos2::new(x, ry), Vec2::new(26.0, bh));
+        x += 28.0;
+        let can = app.browser.can_go(fwd);
+        let resp = ui.interact(r, ui.id().with(("go", fwd)), if can { Sense::click() } else { Sense::hover() });
+        if can && resp.hovered() {
+            fill(ui.painter(), r, pal.panel_hi);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // a chevron drawn with lines (the pixel font has no nice arrow)
+        let c = r.center();
+        let d = if fwd { 1.0 } else { -1.0 };
+        let col = if !can { pal.faint } else if resp.hovered() { pal.accent } else { pal.text };
+        let st = egui::Stroke::new(2.5_f32, col);
+        ui.painter().line_segment([c + Vec2::new(-3.0 * d, -6.0), c + Vec2::new(3.0 * d, 0.0)], st);
+        ui.painter().line_segment([c + Vec2::new(3.0 * d, 0.0), c + Vec2::new(-3.0 * d, 6.0)], st);
+        if resp.on_hover_text(if fwd { "Forward (Alt+Right)" } else { "Back (Alt+Left, or your mouse's back button)" }).clicked() {
+            app.browser.go(fwd);
+        }
+    }
+    // right end: [+ IMPORT] [DOWNLOADS n] [⋯]
     let mut right: Vec<(&str, f32)> = Vec::new();
     for n in shown.iter().filter(|n| n.1 == "more") {
         match n.0 {
-            "import" => right.push(("import", text_w(n.3) + 16.0)),
+            "import" => right.push(("import", text_w("+ IMPORT") + 16.0)),
             "downloads" => right.push(("downloads", text_w("DOWNLOADS") + 16.0 + if active_dl > 0 { text_w(&active_dl.to_string()) + 12.0 } else { 0.0 })),
             _ => {}
         }
     }
     right.push(("more", 30.0));
+    // a narrow panel: Downloads moves into the ⋯ menu first, then Import (the search bar stays)
+    let room = |right: &[(&str, f32)]| bar.right() - pad - right.iter().map(|r| r.1 + 4.0).sum::<f32>() - x;
+    while room(&right) < 170.0 && right.len() > 1 {
+        right.remove(right.len() - 2);
+    }
     let right_w: f32 = right.iter().map(|r| r.1).sum::<f32>() + 4.0 * (right.len() - 1) as f32;
-    // tabs flow left to right; the first row leaves room for the right end
-    let mut tabs: Vec<(&str, &str, Rect)> = Vec::new();
-    let (mut x, mut y) = (area.left() + pad, area.top() + 4.0);
-    let mut limit = area.right() - pad - right_w - 6.0;
-    for n in shown.iter().filter(|n| n.1 == "tab") {
-        // FIND MUSIC is a search bar
-        let w = if n.0 == "web" { (area.width() * 0.3).clamp(150.0, 240.0) } else { text_w(n.3) + 14.0 };
-        if x + w > limit && x > area.left() + pad {
-            (x, y, limit) = (area.left() + pad, y + row_h, area.right() - pad);
-        }
-        tabs.push((n.0, n.3, Rect::from_min_size(Pos2::new(x, y), Vec2::new(w, row_h))));
-        x += w;
-    }
-    let h = (y - area.top()) + row_h + 6.0;
-    let strip = Rect::from_min_size(area.min, Vec2::new(area.width(), h));
-    ui.painter().hline(strip.x_range(), strip.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
+    // the search bar fills the middle (up to a comfortable width)
+    let sw = (bar.right() - pad - right_w - 12.0 - x).clamp(110.0, 440.0);
+    let sr = Rect::from_min_size(Pos2::new(x + 6.0, bar.top() + 6.0), Vec2::new(sw, h - 12.0));
+    app.mark("web", sr);
+    search_bar(app, ui, sr, cur == Some("web"));
+    let in_menu: Vec<&str> = ["import", "downloads"].into_iter().filter(|id| !right.iter().any(|r| r.0 == *id)).collect();
     let mut go: Option<&str> = None;
-    for (id, label, r) in &tabs {
-        app.mark(id, *r);
-        if *id == "web" {
-            search_bar(app, ui, r.shrink2(Vec2::new(4.0, 3.0)), cur == Some("web"));
-            continue;
-        }
-        let resp = ui.interact(*r, ui.id().with(("nav", *id)), Sense::click());
-        let on = cur == Some(*id);
-        if on {
-            fill(ui.painter(), r.shrink2(Vec2::new(0.0, 2.0)), pal.sel);
-            fill(ui.painter(), Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 3.0), r.max), pal.accent);
-        } else if resp.hovered() {
-            fill(ui.painter(), r.shrink2(Vec2::new(0.0, 2.0)), pal.panel_hi);
-        }
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, *label, font.clone(), if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
-        if resp.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if resp.clicked() {
-            go = Some(id);
-        }
-    }
-    let mut rx = area.right() - pad - right_w;
-    let ry = area.top() + 7.0;
+    let mut rx = bar.right() - pad - right_w;
     for (id, w) in right {
-        let r = Rect::from_min_size(Pos2::new(rx, ry), Vec2::new(w, row_h - 6.0));
+        let r = Rect::from_min_size(Pos2::new(rx, ry), Vec2::new(w, bh));
         app.mark(id, r);
         rx += w + 4.0;
         let resp = ui.interact(r, ui.id().with(("nav", id)), Sense::click());
-        let on = cur == Some(id) || id == "more" && matches!(cur, Some("dupes" | "fix"));
+        let on = cur == Some(id) || id == "more" && matches!(cur, Some("dupes" | "fix")) || id == "more" && cur.is_some_and(|c| in_menu.contains(&c) || hidden.iter().any(|h| h == c));
         let p = ui.painter();
         if on {
             fill(p, r, pal.accent);
@@ -469,14 +431,20 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
             ui.memory_mut(|m| m.toggle_popup(pid));
         }
         egui::popup::popup_below_widget(ui, pid, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-            ui.set_min_width(190.0);
+            ui.set_min_width(200.0);
+            // Import / Downloads when the panel is too narrow for their buttons
+            for n in shown.iter().filter(|n| in_menu.contains(&n.0)) {
+                if ui.button(format!("{}  {}", n.2, n.4)).clicked() {
+                    go = Some(n.0);
+                }
+            }
             for n in shown.iter().filter(|n| n.1 == "more" && !matches!(n.0, "import" | "downloads")) {
                 if ui.button(format!("{}  {}", n.2, n.3)).clicked() {
                     go = Some(n.0);
                 }
             }
-            // a tab or button you hid is still one click away here
-            let hid: Vec<_> = NAV.iter().filter(|n| hidden.iter().any(|h| h == n.0) && !matches!(n.0, "dupes" | "fix" | "folder")).collect();
+            // a screen you took out of the sidebar is still one click away here
+            let hid: Vec<_> = NAV.iter().filter(|n| hidden.iter().any(|h| h == n.0) && !matches!(n.0, "dupes" | "fix" | "folder" | "web")).collect();
             if !hid.is_empty() {
                 ui.separator();
                 for n in hid {
@@ -486,7 +454,7 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
                 }
             }
             ui.separator();
-            if ui.button("Customize tabs…").clicked() {
+            if ui.button("Customize the sidebar…").clicked() {
                 app.modal = Some(Modal::Settings(super::settings::SetTab::Sidebar));
             }
         });
@@ -503,7 +471,7 @@ fn nav_strip(app: &mut App, ui: &mut Ui, area: Rect) -> f32 {
     h
 }
 
-/// The search bar in HOME's tab strip: typing searches all of YouTube Music (FIND MUSIC).
+/// The search bar at the top: typing searches all of YouTube Music (FIND MUSIC).
 fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
     let pal = app.pal;
     fill(ui.painter(), r, pal.bg);
@@ -515,7 +483,7 @@ fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
         voice_button(app, ui, r, field);
     }
     let w = &mut app.browser.web;
-    let resp = ui.put(field, egui::TextEdit::singleline(&mut w.query).hint_text("Search music").frame(false).font(vt(18.0)).vertical_align(egui::Align::Center));
+    let resp = ui.put(field, egui::TextEdit::singleline(&mut w.query).hint_text("What do you want to play?").frame(false).font(vt(18.0)).vertical_align(egui::Align::Center));
     if w.focus {
         resp.request_focus();
         w.focus = false;
@@ -676,7 +644,8 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
     // one sidebar row: `indent` px, a cover thumbnail instead of the icon, draggable, pinned mark
     let mut item = |ui: &mut Ui, app: &mut App, v: Option<View>, ico: &str, label: &str, cnt: Option<usize>, indent: f32, cover: Option<&str>, drag: Option<SideDrag>, pin: bool| -> egui::Response {
         let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), if drag.is_some() { Sense::click_and_drag() } else { Sense::click() });
-        let active = v.as_ref() == Some(&app.browser.view);
+        // (Albums stays lit on an album's page, Artists on an artist's…)
+        let active = v.as_ref().is_some_and(|v| *v == app.browser.view || nav_of(v).is_some() && nav_of(v) == nav_of(&app.browser.view));
         let droppable = matches!(v, Some(View::Playlist(_)) | Some(View::Liked));
         if droppable && resp.dnd_hover_payload::<DragSongs>().is_some() {
             fill(ui.painter(), r, pal.sel);
@@ -725,61 +694,65 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         resp
     };
-    // header (as tall as one row of tabs, so the two lines meet): PLAYLISTS · ↕ sort/folders · + new
-    let (hr, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
-    ui.painter().hline(hr.x_range(), hr.bottom() - 1.0, egui::Stroke::new(2.0_f32, pal.line));
-    ui.painter().text(Pos2::new(hr.left() + 10.0, hr.center().y), Align2::LEFT_CENTER, "PLAYLISTS", px(7.0), pal.accent2);
-    let hbtn = |ui: &mut Ui, x: f32, txt: &str, size: f32, on: bool, tip: &str, id: &str| {
-        let r = Rect::from_center_size(Pos2::new(x, hr.center().y), Vec2::splat(24.0));
-        let resp = ui.interact(r, ui.id().with(id), Sense::click()).on_hover_text(tip);
-        if resp.hovered() {
-            frame_rect(ui.painter(), r, 2.0, pal.line_hi);
-        }
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, txt, vt(size), if on { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
-        resp
+    // the screens you can go to (in your order; Settings > Sidebar hides some): Home and Discover,
+    // then YOUR LIBRARY (Liked, Songs, Albums, Artists… and the songs DK.FM downloaded)
+    let nav: Vec<(&str, &str, &str)> = {
+        let s = app.settings.lock();
+        nav_order(&s.sidebar_order).into_iter().filter(|id| !s.sidebar_hidden.iter().any(|h| h == id)).filter_map(|id| NAV.iter().find(|n| n.0 == id && n.1 == "tab" && n.0 != "web")).map(|n| (n.0, n.2, n.3)).collect()
     };
-    // + new playlist: a real plus (two bars), clearer than the pixel font's "+"
-    let pr = Rect::from_center_size(Pos2::new(hr.right() - 18.0, hr.center().y), Vec2::splat(24.0));
-    let presp = ui.interact(pr, ui.id().with("pl-new"), Sense::click()).on_hover_text("New playlist");
-    let pc = if presp.hovered() { pal.accent } else { pal.text };
-    if presp.hovered() {
-        frame_rect(ui.painter(), pr, 2.0, pal.line_hi);
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    fill(ui.painter(), Rect::from_center_size(pr.center(), Vec2::new(14.0, 3.0)), pc);
-    fill(ui.painter(), Rect::from_center_size(pr.center(), Vec2::new(3.0, 14.0)), pc);
-    if presp.clicked() {
-        app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
-    }
-    let r = hbtn(ui, hr.right() - 44.0, "↕", 15.0, !custom, "Sort playlists · new folder", "pl-sortb");
-    let id = ui.make_persistent_id("pl-sort");
-    if r.clicked() {
-        ui.memory_mut(|m| m.toggle_popup(id));
-    }
-    egui::popup::popup_below_widget(ui, id, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
-        ui.set_min_width(190.0);
-        ui.label(egui::RichText::new("SORT BY").font(px(6.0)).color(pal.dim));
-        for (k, name) in PL_SORTS {
-            if ui.button(format!("{} {name}", if sort == k { "•" } else { "  " })).clicked() {
-                app.edit_settings(|s| s.playlist_sort = k.to_string());
-            }
-        }
-        ui.separator();
-        if ui.button("New folder…").clicked() {
-            app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(None) });
-        }
-    });
-    ui.add_space(3.0);
+    let top = |id: &str| matches!(id, "home" | "discover");
     let mut acts: Vec<SideAct> = Vec::new();
     let mut toggle: Option<String> = None;
+    let mut sort_btn: Option<egui::Response> = None;
     let dragging = egui::DragAndDrop::payload::<SideDrag>(ui.ctx());
     let take = |r: &egui::Response| if dragging.is_some() { r.dnd_release_payload::<SideDrag>() } else { None };
+    let heading = |ui: &mut Ui, text: &str| -> Rect {
+        ui.add_space(8.0);
+        let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
+        ui.painter().text(Pos2::new(r.left() + 10.0, r.center().y), Align2::LEFT_CENTER, text, px(6.0), pal.accent2);
+        r
+    };
     egui::ScrollArea::vertical().id_salt("side").auto_shrink([false; 2]).show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 0.0;
-        item(ui, app, Some(View::Liked), "♥", "Liked", Some(n_liked), 0.0, None, None, false);
-        if n_downloaded > 0 {
-            item(ui, app, Some(View::Downloaded), "⬇", "Downloads", Some(n_downloaded), 0.0, None, None, false);
+        ui.add_space(6.0);
+        for (id, ico, label) in nav.iter().filter(|n| top(n.0)) {
+            let r = item(ui, app, view_for(id), ico, label, None, 0.0, None, None, false);
+            app.mark(id, r.rect);
         }
+        let lr = heading(ui, "YOUR LIBRARY");
+        item(ui, app, Some(View::Liked), "♥", "Liked Songs", Some(n_liked), 0.0, None, None, false);
+        for (id, ico, label) in nav.iter().filter(|n| !top(n.0)) {
+            let r = item(ui, app, view_for(id), ico, label, None, 0.0, None, None, false);
+            app.mark(id, r.rect);
+        }
+        if n_downloaded > 0 {
+            item(ui, app, Some(View::Downloaded), "⬇", "Downloaded", Some(n_downloaded), 0.0, None, None, false);
+        }
+        app.mark("yourlibrary", Rect::from_min_max(lr.min, Pos2::new(lr.right(), ui.cursor().top())));
+        // PLAYLISTS · ↕ sort / folders · + new playlist
+        let hr = heading(ui, "PLAYLISTS");
+        app.mark("playlists", Rect::from_min_max(hr.min, Pos2::new(hr.right(), ui.clip_rect().bottom())));
+        // + new playlist: a real plus (two bars), clearer than the pixel font's "+"
+        let pr = Rect::from_center_size(Pos2::new(hr.right() - 18.0, hr.center().y), Vec2::splat(24.0));
+        let presp = ui.interact(pr, ui.id().with("pl-new"), Sense::click()).on_hover_text("New playlist");
+        let pc = if presp.hovered() { pal.accent } else { pal.text };
+        if presp.hovered() {
+            frame_rect(ui.painter(), pr, 2.0, pal.line_hi);
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        fill(ui.painter(), Rect::from_center_size(pr.center(), Vec2::new(14.0, 3.0)), pc);
+        fill(ui.painter(), Rect::from_center_size(pr.center(), Vec2::new(3.0, 14.0)), pc);
+        if presp.clicked() {
+            app.modal = Some(Modal::Prompt { title: "NEW PLAYLIST".into(), text: "My Playlist".into(), action: PromptAction::NewPlaylist(vec![]) });
+        }
+        let sr = Rect::from_center_size(Pos2::new(hr.right() - 44.0, hr.center().y), Vec2::splat(24.0));
+        let resp = ui.interact(sr, ui.id().with("pl-sortb"), Sense::click()).on_hover_text("Sort playlists · new folder");
+        if resp.hovered() {
+            frame_rect(ui.painter(), sr, 2.0, pal.line_hi);
+        }
+        ui.painter().text(sr.center(), Align2::CENTER_CENTER, "↕", vt(15.0), if !custom { pal.accent } else if resp.hovered() { pal.text } else { pal.dim });
+        sort_btn = Some(resp);
+        ui.add_space(2.0);
         for row in &rows {
             if row.is_folder {
                 let resp = item(ui, app, None, row.icon, &row.name, Some(row.n), 0.0, None, Some(SideDrag::Folder(row.id.clone())), false);
@@ -844,6 +817,25 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
             _ => {}
         }
     });
+    if let Some(r) = sort_btn {
+        let id = ui.make_persistent_id("pl-sort");
+        if r.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(id));
+        }
+        egui::popup::popup_below_widget(ui, id, &r, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+            ui.set_min_width(190.0);
+            ui.label(egui::RichText::new("SORT BY").font(px(6.0)).color(pal.dim));
+            for (k, name) in PL_SORTS {
+                if ui.button(format!("{} {name}", if sort == k { "•" } else { "  " })).clicked() {
+                    app.edit_settings(|s| s.playlist_sort = k.to_string());
+                }
+            }
+            ui.separator();
+            if ui.button("New folder…").clicked() {
+                app.modal = Some(Modal::Prompt { title: "NEW FOLDER".into(), text: "New Folder".into(), action: PromptAction::NewFolder(None) });
+            }
+        });
+    }
     // what's being dragged follows the pointer
     if let (Some(d), Some(pos)) = (dragging, ui.ctx().pointer_hover_pos()) {
         let name = match &*d {
@@ -1939,20 +1931,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_and_library_keep_their_own_screens() {
+    fn back_and_forward() {
         let mut b = BrowserState::default();
+        assert_eq!(b.view, View::Home);
+        assert!(!b.can_go(false) && !b.can_go(true));
         b.set_view(View::Stats);
-        assert!(b.nav_home);
         b.set_view(View::Playlist("p".into()));
-        assert!(!b.nav_home);
-        // each panel still shows its own screen
-        assert_eq!(b.view_of(true), &View::Stats);
-        assert_eq!(b.view_of(false), &View::Playlist("p".into()));
         b.search = "abc".into();
-        b.use_page(true);
+        assert!(b.go(false));
         assert_eq!((&b.view, b.search.as_str()), (&View::Stats, ""));
-        b.use_page(false);
-        assert_eq!((&b.view, b.search.as_str()), (&View::Playlist("p".into()), "abc"));
-        assert!(is_home_view(&View::Web) && is_home_view(&View::Artist("x".into())) && !is_home_view(&View::Liked) && !is_home_view(&View::Downloaded));
+        assert!(b.go(false) && b.view == View::Home && !b.go(false));
+        assert!(b.go(true) && b.go(true) && b.view == View::Playlist("p".into()) && !b.go(true));
+        // a new screen after going back drops what was ahead
+        b.go(false);
+        b.set_view(View::Albums);
+        assert!(!b.can_go(true));
+        // opening the screen that's showing adds nothing
+        b.set_view(View::Albums);
+        b.go(false);
+        assert_eq!(b.view, View::Stats);
     }
 }

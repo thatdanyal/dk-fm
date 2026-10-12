@@ -108,7 +108,7 @@ pub fn show(app: &mut App, ctx: &egui::Context, area: Rect) {
                     Tab::Deck => super::deck::show(app, ui),
                     Tab::Scope => super::scope::show(app, ui),
                     Tab::Library => super::browser::show(app, ui),
-                    Tab::Home => super::browser::show_home(app, ui),
+                    Tab::Home => super::browser::show(app, ui),
                     Tab::Queue => super::queue::show(app, ui),
                     Tab::Eq => super::eqpanel::show(app, ui),
                     Tab::Lyrics => super::lyrics::show(app, ui),

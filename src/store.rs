@@ -88,7 +88,7 @@ fn d_sources() -> Vec<String> { ["library", "songs", "youtube"].map(String::from
 fn d_normal() -> String { "normal".into() }
 fn d_pixel() -> String { "pixel".into() }
 fn d_comfy() -> String { "comfortable".into() }
-fn d_all() -> String { "all".into() }
+fn d_home() -> String { "home".into() }
 fn d_daily() -> String { "daily".into() }
 fn d_balanced() -> String { "balanced".into() }
 fn d_played() -> String { "played".into() }
@@ -263,7 +263,7 @@ pub struct Settings {
     #[serde(default = "d_columns")] pub columns: Vec<String>,
     /// default sort per screen ("all", "liked", ...) -> "artist" / "-plays" ("-" = descending, "" = list order)
     #[serde(default)] pub sorts: std::collections::BTreeMap<String, String>,
-    #[serde(default = "d_all")] pub start_view: String,
+    #[serde(default = "d_home")] pub start_view: String,
     #[serde(default)] pub sidebar_order: Vec<String>,
     #[serde(default = "d_hidden_tabs")] pub sidebar_hidden: Vec<String>,
     // ---- downloads
@@ -278,7 +278,7 @@ pub struct Settings {
     #[serde(default = "d_daily")] pub backup_every: String,
     // ---- playlists in the sidebar: "custom" (drag to reorder) | "name" | "added" | "played"
     #[serde(default = "d_played")] pub playlist_sort: String,
-    /// width of the playlists column in LIBRARY (0 = fit the panel)
+    /// width of the playlists column in MUSIC (0 = fit the panel)
     #[serde(default)] pub sidebar_width: f32,
     /// Spotify's Liked Songs are synced into DK.FM's own Liked (♥), not a separate playlist
     #[serde(default)] pub spotify_liked_sync: bool,

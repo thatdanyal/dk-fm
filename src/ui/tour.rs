@@ -9,25 +9,41 @@ use eframe::egui::{self, Align2, Id, LayerId, Order, Pos2, Rect};
 
 /// Bump with every update that adds steps: people who update are offered a tour of just the
 /// steps newer than the last tour they were offered.
-pub const TOUR_VERSION: u32 = 7;
+pub const TOUR_VERSION: u32 = 8;
+
+/// `App::tour_from` for the whole list of extras (MORE TIPS at the end of the basics).
+pub const ALL_TIPS: u32 = u32::MAX;
+
+/// A new user's tour: just the basics, the way Spotify users expect them (what it points at,
+/// title, explanation). MORE TIPS on the last one goes on to everything in `STEPS`.
+pub const BASICS: [(&str, &str, &str); 7] = [
+    ("web", "SEARCH", "Find any song, artist, album or podcast. ▶ plays it right away; + GET keeps it in your library."),
+    ("yourlibrary", "YOUR LIBRARY", "Home, Liked Songs, Songs, Albums and Artists are always here on the left; what you pick opens beside them. ‹ › at the top go back and forward."),
+    ("playlists", "PLAYLISTS", "Your playlists, the one you played last at the top. + makes a new one; drag songs onto a playlist to add them."),
+    ("import", "COMING FROM SPOTIFY?", "+ IMPORT brings over a playlist from a link, or your whole Spotify library at once, and keeps it in sync."),
+    ("deck", "PLAYER", "Play, skip, shuffle, repeat and volume. ♥ likes the song playing; SHAZAM names a song you hear."),
+    ("lyrics", "LYRICS", "The lyrics of the song playing, line by line. EQUALIZER and SCOPE are the tabs beside them."),
+    ("settings", "THAT'S IT", "Everything else is in SETTINGS (it has a search box). Curious about the extras, like karaoke, mixes made for you and themes? MORE TIPS."),
+];
 
 /// (what it points at, title, explanation, the TOUR_VERSION that added it)
-pub const STEPS: [(&str, &str, &str, u32); 27] = [
-    ("homepanel", "HOME", "Home, Discover, Songs, Albums, Artists, Recent, Top and Stats have their own HOME tab, next to LIBRARY (your playlists).", 2),
+pub const STEPS: [(&str, &str, &str, u32); 28] = [
+    ("yourlibrary", "EASIER TO FIND YOUR WAY", "DK.FM is laid out like Spotify now: Home, Liked Songs, Songs, Albums, Artists and your playlists are all down the left, and what you pick opens beside them. ‹ › go back and forward (so do Alt+Left / Alt+Right and your mouse's side buttons).", 8),
+    ("lyrics", "LYRICS UNDER THE PLAYER", "In the default layout the lyrics sit under the player now, so your playlists and imports get the whole middle. EQUALIZER and SCOPE are the tabs beside them. PANELS > RESET LAYOUT puts it like this.", 8),
     ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
     ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
     ("downloads", "DOWNLOADS", "What's downloading right now. Cancel any time; CLEAR FINISHED tidies the list.", 2),
     ("shazam", "SHAZAM", "Hear a song in a video, a game or a browser tab, or on a radio in the room? Press SHAZAM, pick THIS PC or MICROPHONE, and DK.FM names it, then finds it for you.", 1),
     ("discover", "DISCOVER", "New music picked from the artists you play most and the songs you like, minus what you already have.", 1),
-    ("library", "LIBRARY", "Your playlists: the one you played last moves to the top. Drag the line beside them to make the column wider. ⬇ Downloads lists every song you downloaded; select some and press DELETE to remove them.", 2),
-    ("library", "SONGS LIKE THIS", "Right-click any song (or click … at the end of its row) > Songs like this: similar songs to listen to first and download if you like them.", 1),
+    ("playlists", "PLAYLISTS", "Your playlists: the one you played last moves to the top. Drag the line beside them to make the column wider. Downloaded lists every song you downloaded; select some and press DELETE to remove them.", 2),
+    ("page", "SONGS LIKE THIS", "Right-click any song (or click … at the end of its row) > Songs like this: similar songs to listen to first and download if you like them.", 1),
     ("stats", "STATS", "Your listening: top songs, artists and albums, how long you listened and when. Play counts live here, out of the way while you listen.", 1),
     ("scope", "VISUALIZER", "The scope: click it (or press V) to switch between bars, oscilloscope, VU meters and a waterfall. It starts off; pick a style to turn it on.", 1),
     ("eq", "EQUALIZER", "Shape the sound: pick a preset or drag the bands. Turn it on with the EQ switch (it starts flat and off).", 1),
     ("layout", "LAYOUT", "Move and resize the panels: LAYOUT, then drag a panel's tab or the gaps between panels. RESET puts the default back, and UNDO (Ctrl+Z) takes it back again. THEATER shows the cover and the lyrics big.", 1),
     ("theme", "THEMES", "Change the colours here, or make your own in Settings > Look.", 1),
     ("theme", "ALBUM COVER THEME", "THEME > Album Cover: DK.FM's colours follow the cover of the song playing, toned down so they always look good. Settings > Look sets how much.", 3),
-    ("homepanel", "MADE FOR YOU", "Home's MADE FOR YOU mixes have your songs and new ones you don't have yet, side by side: double-click one to play it, + GET keeps it.", 4),
+    ("home", "MADE FOR YOU", "Home's MADE FOR YOU mixes have your songs and new ones you don't have yet, side by side: double-click one to play it, + GET keeps it.", 4),
     ("theater", "THEATER, YOUR WAY", "Hover THEATER to pick one of your three versions (CLASSIC, KARAOKE, PARTY); a click opens your default. Inside, LAYOUT adds, removes and moves what's shown, renames a version and makes it the default. 1, 2, 3 switch; Esc leaves.", 4),
     ("settings", "LYRICS IN YOUR LANGUAGE", "Lyrics in another language are translated into yours, under each line. Pick your language in Settings > Language.", 4),
     ("theater", "SING ALONG", "THEATER's KARAOKE version sings along: each word lights up the moment it's sung, and dots count you in after a break. Turn it on for any version in THEATER > LAYOUT.", 5),
@@ -35,18 +51,22 @@ pub const STEPS: [(&str, &str, &str, u32); 27] = [
     ("web", "FIND A SONG BY ITS LYRICS", "Remember a line but not the song? Type it in the search bar and pick LYRICS: your own songs that have it (click to play from that line) and the songs online.", 6),
     ("theme", "KEEP THESE COLOURS", "Like how the Album Cover theme looks with this song? THEME > + SAVE THESE COLOURS keeps it as a theme of yours.", 5),
     ("podcasts", "PODCASTS & AUDIOBOOKS", "Follow any podcast or audiobook: search for it or paste its RSS link. Episodes pick up where you stopped and play up to 2x with normal-sounding voices.", 7),
-    ("stats", "YEAR IN REVIEW", "Stats > ★ YEAR IN REVIEW: your year on one card (song of the year, top artists, your busiest month and more). SAVE AS PICTURE to share it.", 7),
+    ("stats", "YEAR IN REVIEW", "Your stats > ★ YEAR IN REVIEW: your year on one card (song of the year, top artists, your busiest month and more). SAVE AS PICTURE to share it.", 7),
     ("more", "FIX MY LIBRARY", "⋯ > Fix my library: songs with no cover, no lyrics, or the wrong recording, each with the button that fixes it.", 7),
     ("theme", "MATCHES LOGO", "DK.FM has a new look to match its logo. Your old theme is still in THEME.", 7),
     ("refresh", "REFRESH", "↻ checks for a DK.FM update and syncs your Spotify playlists right now.", 2),
     ("settings", "SETTINGS", "Settings has a search box: type what you're looking for, like \"quality\" or \"spotify\".", 2),
 ];
 
-/// The steps of the tour that's on: all of them, or only those newer than `app.tour_from`.
+/// The steps of the tour that's on: the basics (`tour_from` 0), every extra (ALL_TIPS), or only
+/// the extras newer than `app.tour_from`.
 fn steps(app: &App) -> Vec<(&'static str, &'static str, &'static str, u32)> {
-    STEPS.iter().copied().filter(|s| s.3 > app.tour_from).collect()
+    match app.tour_from {
+        0 => BASICS.iter().map(|b| (b.0, b.1, b.2, 0)).collect(),
+        ALL_TIPS => STEPS.to_vec(),
+        from => STEPS.iter().copied().filter(|s| s.3 > from).collect(),
+    }
 }
-
 /// Is there anything new to show someone who was last offered tour `seen`?
 pub fn has_new(seen: u32) -> bool {
     STEPS.iter().any(|s| s.3 > seen)
@@ -78,8 +98,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let tab = match id {
         "scope" => Some(super::Tab::Scope),
         "eq" => Some(super::Tab::Eq),
-        "library" => Some(super::Tab::Library),
-        "homepanel" | "web" | "import" | "downloads" | "discover" | "stats" => Some(super::Tab::Home),
+        "library" | "page" | "yourlibrary" | "playlists" | "home" | "web" | "import" | "downloads" | "discover" | "stats" | "podcasts" | "more" => Some(super::Tab::Library),
+        "lyrics" => Some(super::Tab::Lyrics),
+        "queue" => Some(super::Tab::Queue),
         _ => None,
     };
     if let Some(tab) = tab {
@@ -113,11 +134,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         _ => (Align2::CENTER_CENTER, screen.center()),
     };
     let pos = if anchor == Align2::CENTER_CENTER { pos } else { Pos2::new(pos.x.clamp(screen.left() + 10.0, screen.right() - w - 10.0), pos.y) };
-    let (mut next, mut back, mut end) = (false, false, false);
+    let (mut next, mut back, mut end, mut more) = (false, false, false, false);
     egui::Area::new(Id::new("tour-card")).order(Order::Tooltip).pivot(anchor).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent2)).inner_margin(egui::Margin::same(14)).show(ui, |ui| {
             ui.set_width(w - 28.0);
-            ui.label(egui::RichText::new(format!("{}{} / {}", if app.tour_from > 0 { "NEW · " } else { "" }, step + 1, list.len())).font(px(6.0)).color(pal.dim));
+            ui.label(egui::RichText::new(format!("{}{} / {}", if app.tour_from > 0 && app.tour_from != ALL_TIPS { "NEW · " } else { "" }, step + 1, list.len())).font(px(6.0)).color(pal.dim));
             ui.label(egui::RichText::new(title).font(px(10.0)).color(pal.accent));
             ui.add_space(4.0);
             ui.label(egui::RichText::new(text).font(vt(20.0)).color(pal.text));
@@ -134,6 +155,10 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     if button(ui, &pal, if last { "DONE" } else { "NEXT" }, true, true).clicked() {
                         next = true;
                     }
+                    // the basics' last step: on to the extras
+                    if last && app.tour_from == 0 && button(ui, &pal, "MORE TIPS", false, true).clicked() {
+                        more = true;
+                    }
                     if step > 0 && button(ui, &pal, "BACK", false, true).clicked() {
                         back = true;
                     }
@@ -146,6 +171,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
         next = true;
+    }
+    if more {
+        app.tour_from = ALL_TIPS;
+        app.tour = Some(0);
+        return;
     }
     app.tour = if end || (next && step + 1 == list.len()) {
         None

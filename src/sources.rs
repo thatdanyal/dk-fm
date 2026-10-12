@@ -26,6 +26,9 @@ pub struct ITrack {
     pub source_key: String,
     /// the title as the source wrote it, "(Clean)" / "(Live)" and all (online searches only)
     pub raw_title: String,
+    /// a Spotify "local file": a music file on the PC that Spotify plays, not a Spotify song. It's
+    /// matched to your library and never downloaded (that would be a second copy of your file).
+    pub local: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -302,11 +305,37 @@ fn spotify(url: &str, creds: &Creds) -> Result<Collection, String> {
     }
 }
 
+/// A Spotify local file ("spotify:local:Artist:Album:Title:215", `+` for spaces) as a song to
+/// find in your library. `title` / `artists` / `secs`: what the listing says, if anything.
+pub(crate) fn local_track(uri: &str, title: &str, artists: Vec<String>, album: &str, ms: Option<u64>) -> ITrack {
+    let parts: Vec<String> = uri.strip_prefix("spotify:local:").unwrap_or("").split(':').map(|p| urlencoding::decode(&p.replace('+', " ")).map(|s| s.into_owned()).unwrap_or_default()).collect();
+    let part = |i: usize| parts.get(i).cloned().unwrap_or_default();
+    let title = if title.is_empty() { part(2) } else { title.to_string() };
+    let artists = if artists.is_empty() { vec![part(0)].into_iter().filter(|a| !a.is_empty()).collect() } else { artists };
+    let key = crate::library::ta_key(artists.first().map(|s| s.as_str()).unwrap_or(""), &title);
+    ITrack {
+        album: if album.is_empty() { part(1) } else { album.to_string() },
+        duration_ms: ms.or_else(|| part(3).parse::<u64>().ok().map(|s| s * 1000)),
+        source_key: format!("spl:{}", key.trim_start_matches("ta:")),
+        title,
+        artists,
+        local: true,
+        ..Default::default()
+    }
+}
+
 fn page_items(page: &Value, col: &mut Collection) {
     for it in page["items"].as_array().map(|a| a.as_slice()).unwrap_or(&[]) {
         // playlist items are `item` since Feb 2026 (was `track`); saved tracks are `track`
         let t = if it["item"].is_object() { &it["item"] } else { &it["track"] };
-        if t["type"].as_str().unwrap_or("track") == "track" && t["id"].is_string() && !it["is_local"].as_bool().unwrap_or(false) {
+        if it["is_local"].as_bool().unwrap_or(false) || t["is_local"].as_bool().unwrap_or(false) {
+            let artists = t["artists"].as_array().map(|a| a.iter().filter_map(|x| x["name"].as_str().filter(|n| !n.is_empty()).map(String::from)).collect()).unwrap_or_default();
+            let mut x = local_track(t["uri"].as_str().unwrap_or(""), t["name"].as_str().unwrap_or(""), artists, t["album"]["name"].as_str().unwrap_or(""), t["duration_ms"].as_u64().filter(|d| *d > 0));
+            x.added_at = it["added_at"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis() as f64);
+            if !x.title.is_empty() {
+                col.tracks.push(x);
+            }
+        } else if t["type"].as_str().unwrap_or("track") == "track" && t["id"].is_string() && !it["is_local"].as_bool().unwrap_or(false) {
             let mut x = api_track(t, None);
             x.added_at = it["added_at"].as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis() as f64);
             col.tracks.push(x);
@@ -462,6 +491,13 @@ fn spotify_embed(kind: &str, id: &str) -> Result<Collection, String> {
     }
     col.owner = e["subtitle"].as_str().unwrap_or("").into();
     for t in e["trackList"].as_array().cloned().unwrap_or_default() {
+        let uri = t["uri"].as_str().unwrap_or("");
+        if uri.starts_with("spotify:local:") {
+            // the last part of a local file's uri is its length, not an id
+            let artists = t["subtitle"].as_str().unwrap_or("").split(", ").filter(|s| !s.is_empty()).map(String::from).collect();
+            col.tracks.push(local_track(uri, t["title"].as_str().unwrap_or(""), artists, "", t["duration"].as_u64().filter(|d| *d > 0)));
+            continue;
+        }
         let sid = t["uri"].as_str().and_then(|u| u.rsplit(':').next()).map(String::from);
         col.tracks.push(ITrack {
             title: t["title"].as_str().unwrap_or("").into(),

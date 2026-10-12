@@ -615,6 +615,15 @@ impl Downloader {
         if forced.is_none() {
             let kidx = self.lib.key_index();
             let have = lookup(&kidx, &t).filter(|id| self.lib.data.read().tracks.get(*id).is_some_and(|lt| Path::new(&lt.path).exists())).cloned();
+            // written another way ("Song - Remastered" here, "01 - Song" in your file's tags)
+            let have = have.or_else(|| loose(&self.lib, &mut None, &t));
+            if have.is_none() && t.local {
+                self.with_track(job_id, &cancel, idx, |jt| {
+                    jt.status = TStatus::Skipped;
+                    jt.note = Some("A file on your PC in Spotify: add its folder in Settings → Music folders".into());
+                });
+                return;
+            }
             if let Some(id) = have {
                 if !exact(&kidx, &t) {
                     self.lib.link_ids(&[(id.clone(), t.spotify_id.clone(), t.youtube_id.clone(), t.source_key.clone())]);
@@ -951,8 +960,9 @@ impl Downloader {
         let mut ordered: Vec<String> = Vec::new();
         let mut keys: Vec<Vec<String>> = Vec::new();
         let mut links = Vec::new();
+        let mut titles = None;
         for t in &col.tracks {
-            if let Some(id) = lookup(&idx, t) {
+            if let Some(id) = lookup(&idx, t).cloned().or_else(|| loose(&self.lib, &mut titles, t)).as_ref() {
                 if !exact(&idx, t) {
                     links.push((id.clone(), t.spotify_id.clone(), t.youtube_id.clone(), t.source_key.clone()));
                 }
@@ -1091,13 +1101,14 @@ impl Downloader {
         }
         let Fetched::Collection(col) = sources::fetch_any(url, &self.creds())? else { return Ok(0) };
         let idx = self.lib.key_index();
+        let mut titles = None;
         let missing: Vec<usize> = col
             .tracks
             .iter()
             .enumerate()
             .filter(|(_, t)| {
                 let keys = itrack_keys(t);
-                lookup(&idx, t).is_none() && !keys.iter().any(|k| p.removed.contains(k)) && !self.lib.sync_skips(&keys)
+                !t.local && lookup(&idx, t).is_none() && loose(&self.lib, &mut titles, t).is_none() && !keys.iter().any(|k| p.removed.contains(k)) && !self.lib.sync_skips(&keys)
             })
             .map(|(i, _)| i)
             .collect();
@@ -1177,6 +1188,13 @@ fn lookup<'a>(idx: &'a HashMap<String, String>, t: &ITrack) -> Option<&'a String
         .or_else(|| t.spotify_id.as_ref().and_then(|s| idx.get(&format!("sp:{s}"))))
         .or_else(|| t.youtube_id.as_ref().and_then(|y| idx.get(&format!("yt:{y}"))))
         .or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title)))
+}
+
+/// The library song an import track is when its names differ a little (see
+/// `library::same_song`). `titles` is built the first time it's needed.
+fn loose(lib: &Library, titles: &mut Option<crate::library::TitleIndex>, t: &ITrack) -> Option<String> {
+    let secs = t.duration_ms.map(|d| d as f64 / 1000.0).unwrap_or(0.0);
+    titles.get_or_insert_with(|| lib.title_index()).find(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title, secs)
 }
 
 /// Found by its own id (not just artist + title).
@@ -1718,5 +1736,52 @@ mod tests {
         assert!(below(&t("a.m4a", Some(128)), "high") && !below(&t("a.m4a", Some(256)), "high") && !below(&t("a.flac", Some(900)), "high"));
         // a lower setting never "upgrades" anything
         assert!(!below(&t("a.m4a", Some(128)), "standard") && !below(&t("a.m4a", Some(128)), "mp3-320"));
+    }
+
+    /// A Spotify playlist of your local files (and songs you have as files tagged differently):
+    /// the playlist gets your own files and nothing is downloaded a second time.
+    #[test]
+    fn spotify_local_files_are_never_downloaded_again() {
+        let (_profile, dir) = crate::store::test_profile("localfiles");
+        let music = dir.join("Music");
+        std::fs::create_dir_all(&music).unwrap();
+        let lib = Library::load();
+        let file = |id: &str, artist: &str, title: &str, secs: f64| {
+            let path = music.join(format!("{id}.mp3"));
+            std::fs::write(&path, b"x").unwrap();
+            store::Track { id: id.into(), path: path.display().to_string(), artist: artist.into(), title: title.into(), duration: secs, ..Default::default() }
+        };
+        for t in [file("a", "Unknown Artist", "01 - Sade - Kiss of Life", 300.0), file("b", "The Beatles", "Let It Be", 243.0)] {
+            lib.data.write().tracks.insert(t.id.clone(), t);
+        }
+        let settings = Arc::new(Mutex::new(Settings { download_dir: music.display().to_string(), sync_hours: 0, ..Default::default() }));
+        let dl = Downloader::new(lib.clone(), settings);
+        // a local file as Spotify lists it, one Spotify no longer names, and a real Spotify song
+        let local = |uri: &str, title: &str, artist: &str| sources::local_track(uri, title, if artist.is_empty() { vec![] } else { vec![artist.into()] }, "", None);
+        let sp = "0DiWol3AO6WpXZgp0goxAV";
+        let tracks = vec![
+            local("spotify:local:Sade:Love+Deluxe:Kiss+of+Life:300", "Kiss of Life", "Sade"),
+            local("spotify:local:Some+Band::Not+On+This+PC:200", "", ""),
+            ITrack { title: "Let It Be - Remastered 2009".into(), artists: vec!["The Beatles".into()], duration_ms: Some(242_000), spotify_id: Some(sp.into()), source_key: format!("sp:{sp}"), ..Default::default() },
+        ];
+        assert_eq!((tracks[1].title.as_str(), tracks[1].artists.clone(), tracks[1].duration_ms), ("Not On This PC", vec!["Some Band".to_string()], Some(200_000)));
+        let col = Collection { kind: "playlist".into(), id: "loc".into(), name: "Local Files".into(), tracks, complete: true, source: "spotify".into(), ..Default::default() };
+        dl.start(col, None);
+        let t0 = std::time::Instant::now();
+        while dl.active_count() > 0 && t0.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let jobs = dl.jobs.lock();
+        let st: Vec<_> = jobs[0].tracks.iter().map(|t| (t.status.clone(), t.note.clone().unwrap_or_default())).collect();
+        assert_eq!(st[0], (TStatus::Done, "Already in your library".to_string()), "{st:?}");
+        assert_eq!(st[1].0, TStatus::Skipped, "a local file DK.FM can't find isn't looked for on YouTube");
+        assert_eq!(st[2], (TStatus::Done, "Already in your library".to_string()));
+        drop(jobs);
+        let d = lib.data.read();
+        assert_eq!(d.tracks.len(), 2, "no second copies");
+        assert_eq!(d.playlists.iter().find(|p| p.id == "sp-playlist-loc").unwrap().track_ids, ["a", "b"]);
+        assert_eq!(d.tracks["b"].spotify_id.as_deref(), Some(sp), "linked for next time");
+        drop(d);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -58,15 +58,101 @@ static RE_BRACKET: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r
 static RE_VERSION: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"remix|live|acoustic|version|edit|mix|slowed|sped|instrumental|cover").unwrap());
 static RE_ARTIST_SPLIT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i),|;| feat\.? | & ").unwrap());
 
-pub fn ta_key(artist: &str, title: &str) -> String {
+/// Lowercase words only: accents, punctuation and bracketed extras dropped (unless they mark
+/// another version: remix, live, acoustic…).
+fn norm_words(s: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
-    fn n(s: &str) -> String {
-        let lower: String = s.nfkd().filter(|c| !('\u{300}'..='\u{36f}').contains(c)).collect::<String>().to_lowercase();
-        // drop bracketed extras unless they mark another version
-        let stripped = RE_BRACKET.replace_all(&lower, |c: &regex::Captures| if RE_VERSION.is_match(&c[1]) { format!(" {}", &c[1]) } else { String::new() });
-        stripped.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+    let lower: String = s.nfkd().filter(|c| !('\u{300}'..='\u{36f}').contains(c)).collect::<String>().to_lowercase();
+    let stripped = RE_BRACKET.replace_all(&lower, |c: &regex::Captures| if RE_VERSION.is_match(&c[1]) { format!(" {}", &c[1]) } else { String::new() });
+    stripped.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { ' ' }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn ta_key(artist: &str, title: &str) -> String {
+    format!("ta:{}|{}", norm_words(&main_artist(artist)), norm_words(title))
+}
+
+// Spotify's " - Remastered 2011" / " - Radio Edit" / " - From "Film"" and "feat." tails: the same
+// recording as a file tagged without them (" - Live" or " - Remix" stay: another version)
+static RE_DASH_EXTRA: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)\s+[-–—]\s+(?:(?:\d{4}\s+)?(?:digital(?:ly)?\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?|mono|stereo|single version|album version|radio edit|original mix|bonus track|explicit|clean|from .+|feat\.? .+|ft\.? .+)\s*$").unwrap());
+static RE_FEAT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)\s+(?:feat\.?|ft\.|featuring)\s+.*$").unwrap());
+// "01 - Song", "1. Song" (a file's track number in its title; "7 Rings" stays)
+static RE_LEAD_NO: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^\s*\d{1,3}\s*[-.)]\s+").unwrap());
+static RE_MORE_ARTISTS: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)\s*(?:,|;|/|&|\+| x | and | with | feat\.? | ft\.? | featuring )\s*").unwrap());
+
+fn unknown_artist(a: &str) -> bool {
+    matches!(norm_words(a).as_str(), "" | "unknown" | "unknown artist" | "various" | "various artists" | "va")
+}
+
+/// The ways a title can be written for one recording, as fingerprints: Spotify's names
+/// ("Song - Remastered 2011", "Song (feat. X)") and a music file's own tags ("01 - Song",
+/// "Artist - Song" as the title) give the same key.
+pub fn title_keys(artist: &str, title: &str) -> Vec<String> {
+    let one = |t: &str| {
+        let t = RE_LEAD_NO.replace(t, "");
+        let t = RE_DASH_EXTRA.replace(&t, "");
+        norm_words(&RE_FEAT.replace(&t, ""))
+    };
+    let mut k = vec![one(title)];
+    // "Artist - Song" as the title: the song is after the dash
+    if let Some((a, rest)) = RE_LEAD_NO.replace(title, "").split_once(" - ") {
+        if unknown_artist(artist) || norm_words(a) == norm_words(&main_artist(artist)) || norm_words(a) == norm_words(artist) {
+            k.push(one(rest));
+        }
     }
-    format!("ta:{}|{}", n(&main_artist(artist)), n(title))
+    k.retain(|x| !x.is_empty());
+    k.dedup();
+    k
+}
+
+/// Could these two artist names be the same act? ("Drake, Future" and "Drake"; a file without
+/// an artist could be anyone's)
+fn artists_agree(a: &str, b: &str) -> bool {
+    if unknown_artist(a) || unknown_artist(b) {
+        return true;
+    }
+    let set = |s: &str| RE_MORE_ARTISTS.split(s).map(norm_words).filter(|x| !x.is_empty()).collect::<Vec<_>>();
+    let (sa, sb) = (set(a), set(b));
+    let (na, nb) = (norm_words(a).replace(' ', ""), norm_words(b).replace(' ', ""));
+    sa.iter().any(|x| sb.contains(x)) || (!na.is_empty() && !nb.is_empty() && (na.contains(&nb) || nb.contains(&na)))
+}
+
+/// One recording written two ways? Titles with a fingerprint in common, artists that agree and
+/// about the same length (seconds; 0 = not known). An unknown artist needs a known, close length.
+pub fn same_song(a: (&str, &str, f64), b: (&str, &str, f64)) -> bool {
+    let (ka, kb) = (title_keys(a.0, a.1), title_keys(b.0, b.1));
+    if !ka.iter().any(|k| kb.contains(k)) || !artists_agree(a.0, b.0) {
+        return false;
+    }
+    let unsure = unknown_artist(a.0) || unknown_artist(b.0);
+    if a.2 > 0.0 && b.2 > 0.0 {
+        (a.2 - b.2).abs() <= if unsure { 2.0 } else { 3.0 }
+    } else {
+        !unsure
+    }
+}
+
+/// Library songs by their title fingerprints, to find one written another way (`same_song`).
+pub struct TitleIndex {
+    by: HashMap<String, Vec<(String, String, String, f64)>>,
+}
+
+impl TitleIndex {
+    /// The library song this is (artist, title, length in seconds or 0), if exactly one fits
+    /// (two that fit: better not guess).
+    pub fn find(&self, artist: &str, title: &str, secs: f64) -> Option<String> {
+        let mut hit: Option<&String> = None;
+        for k in title_keys(artist, title) {
+            for (id, a, t, d) in self.by.get(&k).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if same_song((artist, title, secs), (a, t, *d)) {
+                    match hit {
+                        Some(h) if h != id => return None,
+                        _ => hit = Some(id),
+                    }
+                }
+            }
+        }
+        hit.cloned()
+    }
 }
 
 /// Every key a song is known by (source, Spotify, YouTube, artist+title).
@@ -733,9 +819,41 @@ impl Library {
     /// lossless, then higher bitrate, then has cover art, then most played.
     pub fn duplicate_groups(&self) -> Vec<Vec<String>> {
         let d = self.data.read();
-        let mut by: HashMap<String, Vec<&Track>> = HashMap::new();
+        // songs that could be one another (same title fingerprint), then pairs that are (same
+        // artist + title at about the same length, or `same_song`: "Song - Remastered" from
+        // Spotify and your own file tagged "01 - Song"), joined into groups
+        let mut cand: HashMap<String, Vec<&Track>> = HashMap::new();
         for t in d.tracks.values().filter(|t| !t.title.trim().is_empty()) {
-            by.entry(ta_key(&t.artist, &t.title)).or_default().push(t);
+            for k in title_keys(&t.artist, &t.title) {
+                cand.entry(k).or_default().push(t);
+            }
+        }
+        let mut root: HashMap<&str, &str> = HashMap::new();
+        fn top<'a>(root: &HashMap<&'a str, &'a str>, mut x: &'a str) -> &'a str {
+            while let Some(p) = root.get(x).filter(|p| **p != x) {
+                x = p;
+            }
+            x
+        }
+        for v in cand.values().filter(|v| v.len() > 1) {
+            for (i, a) in v.iter().enumerate() {
+                for b in &v[i + 1..] {
+                    let same = (ta_key(&a.artist, &a.title) == ta_key(&b.artist, &b.title) && (a.duration - b.duration).abs() <= 4.0) || same_song((&a.artist, &a.title, a.duration), (&b.artist, &b.title, b.duration));
+                    if same {
+                        let (ra, rb) = (top(&root, &a.id), top(&root, &b.id));
+                        if ra != rb {
+                            root.insert(ra, rb);
+                        }
+                        root.entry(rb).or_insert(rb);
+                    }
+                }
+            }
+        }
+        let mut by: HashMap<&str, Vec<&Track>> = HashMap::new();
+        for id in root.keys() {
+            if let Some(t) = d.tracks.get(*id) {
+                by.entry(top(&root, id)).or_default().push(t);
+            }
         }
         let quality = |t: &Track| {
             let lossless = matches!(t.codec.to_lowercase().as_str(), c if c.contains("flac") || c.contains("alac") || c.contains("wav") || c.contains("pcm") || c.contains("aiff"));
@@ -749,15 +867,7 @@ impl Library {
             }
             g.clear();
         };
-        for (_, mut v) in by.into_iter().filter(|(_, v)| v.len() > 1) {
-            v.sort_by(|a, b| a.duration.total_cmp(&b.duration));
-            let mut g: Vec<&Track> = Vec::new();
-            for t in v {
-                if g.last().map(|l| t.duration - l.duration > 4.0).unwrap_or(false) {
-                    take(&mut g);
-                }
-                g.push(t);
-            }
+        for (_, mut g) in by.into_iter().filter(|(_, v)| v.len() > 1) {
             take(&mut g);
         }
         out.sort_by_cached_key(|g| d.tracks.get(&g[0]).map(|t| (t.artist.to_lowercase(), t.title.to_lowercase())).unwrap_or_default());
@@ -1086,6 +1196,18 @@ impl Library {
     }
 
     /// sourceKey / Spotify / YouTube / artist+title -> track id
+    /// Songs with their files, by title fingerprint (see `TitleIndex`).
+    pub fn title_index(&self) -> TitleIndex {
+        let d = self.data.read();
+        let mut by: HashMap<String, Vec<(String, String, String, f64)>> = HashMap::new();
+        for t in d.tracks.values().filter(|t| Path::new(&t.path).exists()) {
+            for k in title_keys(&t.artist, &t.title) {
+                by.entry(k).or_default().push((t.id.clone(), t.artist.clone(), t.title.clone(), t.duration));
+            }
+        }
+        TitleIndex { by }
+    }
+
     pub fn key_index(&self) -> HashMap<String, String> {
         let d = self.data.read();
         let mut m = HashMap::new();
@@ -1397,6 +1519,45 @@ mod tests {
         lib.bump_play("b");
         lib.add_history(("b".into(), 1, 200, 0));
         assert!(lib.stat("b").plays == plays + 1 && lib.history.read().events.len() == hist + 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A Spotify song and your own file of it, written differently, are one song; other songs
+    /// and other versions are not.
+    #[test]
+    fn same_song_written_two_ways() {
+        let same = |a: (&str, &str, f64), b: (&str, &str, f64)| same_song(a, b) && same_song(b, a);
+        assert!(same(("The Beatles", "Let It Be - Remastered 2009", 243.0), ("The Beatles", "Let It Be", 242.0)));
+        assert!(same(("Drake", "Jimmy Cooks (feat. 21 Savage)", 218.0), ("Drake, 21 Savage", "Jimmy Cooks", 219.5)));
+        assert!(same(("Drake", "Jimmy Cooks", 218.0), ("Drake feat. 21 Savage", "Jimmy Cooks ft. 21 Savage", 218.0)));
+        assert!(same(("Daft Punk", "One More Time", 320.0), ("Unknown Artist", "03 - Daft Punk - One More Time", 321.0)));
+        assert!(same(("Daft Punk", "One More Time", 320.0), ("Daft Punk", "Daft Punk - One More Time", 0.0)));
+        assert!(same(("Kendrick Lamar", "HUMBLE.", 177.0), ("kendrick lamar", "Humble", 177.0)));
+        assert!(same(("Tyler, The Creator", "EARFQUAKE", 190.0), ("Tyler, The Creator", "Earfquake", 191.0)));
+        assert!(!same(("The Beatles", "Let It Be - Live", 243.0), ("The Beatles", "Let It Be", 243.0)), "a live version");
+        assert!(!same(("Sade", "Smooth Operator", 258.0), ("Sade", "Smooth Operator (Remix)", 258.0)), "a remix");
+        assert!(!same(("Drake", "Hold On", 230.0), ("Drake", "Hold On", 300.0)), "70 s longer");
+        assert!(!same(("Adele", "Hello", 295.0), ("Lionel Richie", "Hello", 295.0)), "another artist's song");
+        assert!(!same(("Unknown Artist", "Intro", 60.0), ("The xx", "Intro", 128.0)), "an unknown artist needs the same length");
+        assert!(!same(("Unknown Artist", "Intro", 0.0), ("The xx", "Intro", 128.0)));
+        assert!(!same(("Ariana Grande", "7 rings", 178.0), ("Ariana Grande", "Rings", 178.0)), "a number in the title stays");
+    }
+
+    /// Spotify import downloaded a second copy of songs you had as your own files (tagged
+    /// differently): Duplicates finds them, an unrelated song with the same title stays apart.
+    #[test]
+    fn duplicates_find_downloads_of_your_own_files() {
+        let (_profile, dir) = crate::store::test_profile("dupelocal");
+        let lib = Library::load();
+        {
+            let mut d = lib.data.write();
+            let mut mine = track("mine", "Unknown Artist", "01 - The Beatles - Let It Be", 243.0, "MPEG", 320);
+            mine.spotify_id = None;
+            for t in [mine, track("dl", "The Beatles", "Let It Be - Remastered 2009", 242.4, "AAC", 256), track("other", "Paul McCartney", "Let It Be", 260.0, "AAC", 256)] {
+                d.tracks.insert(t.id.clone(), t);
+            }
+        }
+        assert_eq!(lib.duplicate_groups(), vec![vec!["mine".to_string(), "dl".to_string()]]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

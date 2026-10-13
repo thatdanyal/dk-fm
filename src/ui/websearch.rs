@@ -54,7 +54,7 @@ type Done = (String, Result<HitPage, String>, bool);
 pub struct WebState {
     pub listen: Arc<Mutex<Listen>>,
     /// voice search (the search bar's microphone)
-    pub voice: Arc<Mutex<Voice>>,
+    pub voice: Voice,
     /// what SHAZAM listened to last (AGAIN uses it, the chooser suggests it)
     pub ear: Ear,
     pub query: String,
@@ -109,36 +109,22 @@ pub fn listen_to(app: &mut App, ctx: &egui::Context, ear: Ear) {
     });
 }
 
-/// Voice search, from pressing the microphone to what was heard.
-#[derive(Default, Clone)]
+/// Voice search: pressing the microphone puts the cursor in the search bar, then opens Windows
+/// voice typing there (what you say is typed in and searched like anything you type).
+#[derive(Default, Clone, Copy, PartialEq)]
 pub enum Voice {
     #[default]
     Idle,
-    Listening,
-    Heard(String),
-    Failed(String),
+    /// waiting for the search bar to have the cursor
+    Starting,
+    /// Windows voice typing is open on the search bar
+    Typing,
 }
 
-/// The search bar's microphone was pressed: listen in the background (Windows does the hearing;
-/// DK.FM's thread only waits for its answer).
-pub fn voice(app: &mut App, ctx: &egui::Context) {
-    let slot = app.browser.web.voice.clone();
-    if matches!(*slot.lock(), Voice::Listening) {
-        return;
-    }
-    *slot.lock() = Voice::Listening;
-    let ctx = ctx.clone();
-    std::thread::Builder::new()
-        .name("voice".into())
-        .spawn(move || {
-            let r = crate::voice::listen();
-            *slot.lock() = match r {
-                Ok(t) => Voice::Heard(t),
-                Err(e) => Voice::Failed(e),
-            };
-            ctx.request_repaint();
-        })
-        .ok();
+/// The search bar's microphone was pressed.
+pub fn voice(app: &mut App) {
+    app.browser.web.voice = Voice::Starting;
+    app.browser.web.focus = true;
 }
 
 /// The search bar was typed in (`enter` = search now, else after a short pause).
@@ -858,15 +844,24 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
                     ui.label(egui::RichText::new(if h.album.is_empty() { h.artist.clone() } else { format!("{} · {}", h.artist, h.album) }).color(pal.dim));
                     ui.add_space(4.0);
                     let t = ITrack { title: h.title.clone(), artists: vec![h.artist.clone()], source_key: format!("shazam:{}:{}", h.artist, h.title), ..Default::default() };
-                    let (current, loading) = (super::preview::current(app, &t), super::preview::loading(app, &t));
+                    // a song you have plays from your library (nothing to fetch, nothing to KEEP)
+                    let mine = super::preview::mine(app, &t);
+                    let (current, loading) = match &mine {
+                        Some(id) => (app.player.current_id().as_ref() == Some(id), false),
+                        None => (super::preview::current(app, &t), super::preview::loading(app, &t)),
+                    };
                     let playing = current && app.player.status().playing;
                     if loading {
                         ctx.request_repaint_after(Duration::from_millis(300));
                     }
                     ui.horizontal(|ui| {
-                        let label = if loading { "GETTING IT…" } else if playing { "⏸ PAUSE" } else if current { "▶ RESUME" } else { "▶ PLAY FULL SONG" };
-                        if button(ui, &pal, label, !current, !loading).on_hover_text("Listen to the whole song now, without saving it. Like it? KEEP it. If you don't, it's deleted when you play something else").clicked() {
-                            super::preview::toggle(app, &t);
+                        let label = if loading { "GETTING IT…" } else if playing { "⏸ PAUSE" } else if current { "▶ RESUME" } else if mine.is_some() { "▶ PLAY (IN YOUR LIBRARY)" } else { "▶ PLAY FULL SONG" };
+                        let tip = if mine.is_some() { "You have this song: play it from your library" } else { "Listen to the whole song now, without saving it. Like it? KEEP it. If you don't, it's deleted when you play something else" };
+                        if button(ui, &pal, label, !current, !loading).on_hover_text(tip).clicked() {
+                            match &mine {
+                                Some(id) => super::preview::play_mine(app, id),
+                                None => super::preview::toggle(app, &t),
+                            }
                         }
                         if button(ui, &pal, "FIND IT", false, true).on_hover_text("Its versions in FIND MUSIC: listen, then + GET the one you want").clicked() {
                             search_for(app, format!("{} {}", h.title, h.artist), "songs");
@@ -876,7 +871,7 @@ pub fn shazam_card(app: &mut App, ctx: &egui::Context) {
                             go = Some(ear);
                         }
                     });
-                    if current {
+                    if current && mine.is_none() {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             let kept = super::preview::kept(app, &t);

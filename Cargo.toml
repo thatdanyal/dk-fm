@@ -61,10 +61,10 @@ souvlaki = { version = "0.7", default-features = false, features = ["use_zbus"] 
 tray-icon = "0.19"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Com"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading", "Win32_UI_Shell", "Win32_System_Com", "Win32_UI_Input_KeyboardAndMouse"] }
 
 # voice search: Windows' own speech recognition (the same crate version egui's deps already build)
-windows = { version = "0.58", default-features = false, features = ["Foundation", "Foundation_Collections", "Media", "Media_SpeechRecognition", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_System_WinRT"] }
+windows = { version = "0.58", default-features = false, features = ["Foundation", "Foundation_Collections", "Media", "Storage", "Storage_Streams", "Win32_Foundation", "Win32_System_WinRT"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

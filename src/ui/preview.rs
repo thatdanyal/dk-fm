@@ -31,6 +31,8 @@ pub struct Previews {
     last: Option<String>,
     /// online songs fetched for the queue (a mix's), not by ▶: they don't jump in when ready
     auto: std::collections::HashSet<String>,
+    /// source key -> the library song it is (library generation it was looked up in; see `mine`)
+    mine: HashMap<String, (u64, Option<String>)>,
 }
 
 fn dir() -> PathBuf {
@@ -344,28 +346,65 @@ pub fn poll(app: &mut App) {
 
 /// The ▶ / ⏸ / … button over a song's cover (or wherever `r` is). Returns its response.
 pub fn button(app: &mut App, ui: &mut Ui, r: Rect, t: &ITrack) -> egui::Response {
-    let pal = app.pal;
     let resp = ui.interact(r, ui.id().with(("preview", &t.source_key)), Sense::click());
     let id = id_of(t);
     let current = app.player.current_id().as_deref() == Some(id.as_str());
     let playing = current && app.player.status().playing;
     let busy = matches!(app.previews.state.get(&t.source_key), Some(None));
-    let over = resp.hovered();
-    {
-        fill(ui.painter(), r, with_alpha(if over { pal.accent } else { pal.bg }, if over { 235 } else { 170 }));
-        frame_rect(ui.painter(), r, 1.0, pal.accent);
-        let icon = if busy { "…" } else if playing { "⏸" } else { "▶" };
-        ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, vt((r.height() * 0.6).clamp(14.0, 26.0)), if over { pal.ink } else { pal.text });
-    }
+    draw(app, ui, r, &resp, if busy { "…" } else if playing { "⏸" } else { "▶" });
     if busy {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(300));
-    }
-    if over {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     let resp = resp.on_hover_text(if busy { "Getting a preview…" } else if playing { "Pause" } else { "Listen before you download (a temporary copy: it isn't added to your library)" });
     if resp.clicked() && !busy {
         toggle(app, t);
     }
     resp
+}
+
+/// ▶ / ⏸ drawn over a cover.
+fn draw(app: &App, ui: &Ui, r: Rect, resp: &egui::Response, icon: &str) {
+    let pal = app.pal;
+    let over = resp.hovered();
+    fill(ui.painter(), r, with_alpha(if over { pal.accent } else { pal.bg }, if over { 235 } else { 170 }));
+    frame_rect(ui.painter(), r, 1.0, pal.accent);
+    ui.painter().text(r.center(), Align2::CENTER_CENTER, icon, vt((r.height() * 0.6).clamp(14.0, 26.0)), if over { pal.ink } else { pal.text });
+    if over {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+}
+
+/// ▶ for an online song: a song you have (`mine`, its library id) plays from your library right
+/// away; one you don't gets a preview (`button`).
+pub fn play_button(app: &mut App, ui: &mut Ui, r: Rect, t: &ITrack, mine: Option<&str>) -> egui::Response {
+    let Some(id) = mine else { return button(app, ui, r, t) };
+    let resp = ui.interact(r, ui.id().with(("mine", id)), Sense::click());
+    let current = app.player.current_id().as_deref() == Some(id);
+    let playing = current && app.player.status().playing;
+    draw(app, ui, r, &resp, if playing { "⏸" } else { "▶" });
+    let resp = resp.on_hover_text(if playing { "Pause" } else { "Play it: it's in your library" });
+    if resp.clicked() {
+        play_mine(app, id);
+    }
+    resp
+}
+
+/// Play (or pause / resume) a song from your library.
+pub fn play_mine(app: &mut App, id: &str) {
+    if app.player.current_id().as_deref() == Some(id) {
+        app.player.toggle();
+    } else {
+        app.player.play_now(id.to_string());
+    }
+}
+
+/// The library song this online song is, if you have it (remembered until the library changes).
+pub fn mine(app: &mut App, t: &ITrack) -> Option<String> {
+    let gen = app.lib.gen.load(std::sync::atomic::Ordering::Relaxed);
+    if let Some((_, id)) = app.previews.mine.get(&t.source_key).filter(|m| m.0 == gen) {
+        return id.clone();
+    }
+    let id = super::addsongs::owned_ids(app, std::slice::from_ref(t)).pop().flatten();
+    app.previews.mine.insert(t.source_key.clone(), (gen, id.clone()));
+    id
 }

@@ -267,9 +267,23 @@ fn online_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, key: &Key, found: &[IT
 }
 
 /// The library songs these online results are, if you have them.
+/// (its own id, its Spotify or YouTube id, artist + title, or written a little differently:
+/// "Song - Remastered 2009" finds your file tagged "Song"; see `library::same_song`)
 pub fn owned_ids(app: &App, found: &[ITrack]) -> Vec<Option<String>> {
     let idx = app.lib.key_index();
-    found.iter().map(|t| idx.get(&t.source_key).or_else(|| idx.get(&ta_key(t.artists.first().map(|s| s.as_str()).unwrap_or(""), &t.title))).cloned()).collect()
+    let mut titles = None;
+    found
+        .iter()
+        .map(|t| {
+            let artist = t.artists.first().map(|s| s.as_str()).unwrap_or("");
+            idx.get(&t.source_key)
+                .or_else(|| t.spotify_id.as_ref().and_then(|s| idx.get(&format!("sp:{s}"))))
+                .or_else(|| t.youtube_id.as_ref().and_then(|y| idx.get(&format!("yt:{y}"))))
+                .or_else(|| idx.get(&ta_key(artist, &t.title)))
+                .cloned()
+                .or_else(|| titles.get_or_insert_with(|| app.lib.title_index()).find(artist, &t.title, t.duration_ms.map(|d| d as f64 / 1000.0).unwrap_or(0.0)))
+        })
+        .collect()
 }
 
 /// Online results, each with + ADD (you have it) / + GET (download it, into `pl` if given) or its
@@ -320,8 +334,10 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
         } else {
             ui.painter().text(cr.center(), Align2::CENTER_CENTER, "♫", vt(16.0), pal.faint);
         }
-        if have.is_none() && (ui.rect_contains_pointer(full) || super::preview::active(app, t)) {
-            super::preview::button(app, ui, cr, t);
+        // (a song you have plays from your library: nothing to fetch)
+        let mine_on = have.as_ref().is_some_and(|id| app.player.current_id().as_ref() == Some(id));
+        if ui.rect_contains_pointer(full) || mine_on || (have.is_none() && super::preview::active(app, t)) {
+            super::preview::play_button(app, ui, cr, t, have.as_deref());
         }
         if hit {
             clicked = true;

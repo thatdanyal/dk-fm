@@ -1602,6 +1602,9 @@ impl App {
                 // nowplaying2 / nowplaying3: another version of THEATER; theaterlayout: its editor
                 "nowplaying2" => self.open_theater(Some(1)),
                 "nowplaying3" => self.open_theater(Some(2)),
+                // FIND MUSIC > SONGS for DKFM_QUERY; DOWNLOADS (the songs DK.FM downloaded)
+                "song-search" => websearch::search_for(self, std::env::var("DKFM_QUERY").unwrap_or_default(), "songs"),
+                "downloaded" => self.browser.set_view(browser::View::Downloaded),
                 // FIND MUSIC > LYRICS for DKFM_QUERY
                 "lyrics-search" => websearch::search_for(self, std::env::var("DKFM_QUERY").unwrap_or_default(), "lyrics"),
                 // KARAOKE with the sing-along score on

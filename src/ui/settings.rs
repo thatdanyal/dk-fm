@@ -2075,7 +2075,7 @@ fn about(app: &mut App, ui: &mut Ui) {
 
 /// Left-aligned text in a fixed-width cell (cut off with … when too long).
 /// "7.4 GB", or "120 MB" under a gigabyte.
-fn gb_text(gb: f64) -> String {
+pub(super) fn gb_text(gb: f64) -> String {
     if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", (gb * 1024.0).max(1.0)) }
 }
 

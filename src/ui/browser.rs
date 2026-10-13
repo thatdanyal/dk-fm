@@ -480,13 +480,24 @@ fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
     let mic = crate::voice::available();
     let field = Rect::from_min_max(Pos2::new(r.left() + 22.0, r.top() + 1.0), Pos2::new(r.right() - if mic { 30.0 } else { 4.0 }, r.bottom() - 1.0));
     if mic {
-        voice_button(app, ui, r, field);
+        voice_button(app, ui, r);
     }
     let w = &mut app.browser.web;
-    let resp = ui.put(field, egui::TextEdit::singleline(&mut w.query).hint_text("What do you want to play?").frame(false).font(vt(18.0)).vertical_align(egui::Align::Center));
+    use super::websearch::Voice;
+    let hint = if w.voice == Voice::Idle { "What do you want to play?" } else { "Speak now: say a song, an artist or a lyric" };
+    let resp = ui.put(field, egui::TextEdit::singleline(&mut w.query).hint_text(hint).frame(false).font(vt(18.0)).vertical_align(egui::Align::Center));
     if w.focus {
         resp.request_focus();
         w.focus = false;
+    }
+    match w.voice {
+        // the cursor is in the search bar: open Windows voice typing on it
+        Voice::Starting if resp.has_focus() => {
+            w.voice = if crate::voice::start_typing() { Voice::Typing } else { Voice::Idle };
+        }
+        // done once something was said, or you click elsewhere
+        Voice::Typing if resp.changed() || !resp.has_focus() => w.voice = Voice::Idle,
+        _ => {}
     }
     let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     if resp.changed() || enter {
@@ -496,69 +507,22 @@ fn search_bar(app: &mut App, ui: &mut Ui, r: Rect, on: bool) {
     }
 }
 
-/// The search bar's microphone: say a song, an artist or a lyric. While it listens the bar says
-/// so; what it heard is searched for (in the category showing); a problem shows under the bar.
-fn voice_button(app: &mut App, ui: &mut Ui, bar: Rect, field: Rect) {
+/// The search bar's microphone: opens Windows voice typing in the search bar (say a song, an
+/// artist or a lyric; it's typed in and searched).
+fn voice_button(app: &mut App, ui: &mut Ui, bar: Rect) {
     use super::websearch::Voice;
     let pal = app.pal;
-    let state = app.browser.web.voice.lock().clone();
-    let listening = matches!(state, Voice::Listening);
+    let on = app.browser.web.voice != Voice::Idle;
     let mr = Rect::from_min_max(Pos2::new(bar.right() - 28.0, bar.top() + 2.0), Pos2::new(bar.right() - 2.0, bar.bottom() - 2.0));
     let resp = ui.interact(mr, ui.id().with("voice-search"), Sense::click());
-    let t = ui.input(|i| i.time);
-    if listening {
-        let a = (150.0 + 100.0 * (t * 5.0).sin()) as u8;
-        fill(ui.painter(), mr, with_alpha(pal.accent, a));
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
-        // over the text box: what to do
-        fill(ui.painter(), field, pal.bg);
-        ui.painter().with_clip_rect(field).text(Pos2::new(field.left() + 4.0, field.center().y), Align2::LEFT_CENTER, "LISTENING… SAY A SONG, ARTIST OR LYRIC", px(6.0), pal.accent);
+    if on {
+        fill(ui.painter(), mr, pal.accent);
     } else if resp.hovered() {
         fill(ui.painter(), mr, pal.panel_hi);
     }
-    mic_icon(ui.painter(), mr.center(), if listening { pal.ink } else if resp.hovered() { pal.accent } else { pal.dim });
-    if resp.on_hover_text(if listening { "Listening… (stops by itself when you stop talking)" } else { "Voice search: say a song, an artist or a line of lyrics" }).clicked() {
-        super::websearch::voice(app, ui.ctx());
-    }
-    match state {
-        Voice::Heard(q) => {
-            *app.browser.web.voice.lock() = Voice::Idle;
-            app.browser.web.query = q;
-            super::websearch::typed(app, true);
-        }
-        Voice::Failed(e) => {
-            // under the bar, until closed (with a way to the Windows setting it needs)
-            let mut close = false;
-            egui::Area::new(egui::Id::new("voice-problem")).order(egui::Order::Foreground).fixed_pos(bar.left_bottom() + Vec2::new(0.0, 4.0)).show(ui.ctx(), |ui| {
-                egui::Frame::new().fill(pal.panel).stroke(egui::Stroke::new(2.0_f32, pal.accent)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
-                    ui.set_max_width(bar.width().max(320.0));
-                    ui.label(egui::RichText::new("VOICE SEARCH").font(px(6.0)).color(pal.accent2));
-                    ui.label(egui::RichText::new(&e).color(pal.text));
-                    ui.horizontal(|ui| {
-                        let page = if e.contains("Speech") { Some("ms-settings:privacy-speech") } else if e.contains("Microphone") { Some("ms-settings:privacy-microphone") } else { None };
-                        if let Some(page) = page {
-                            if button(ui, &pal, "OPEN WINDOWS SETTINGS", true, true).on_hover_text("Opens the Windows Settings page with that switch").clicked() {
-                                let _ = open::that(page);
-                            }
-                        }
-                        if button(ui, &pal, "TRY AGAIN", false, true).clicked() {
-                            close = true;
-                            super::websearch::voice(app, ui.ctx());
-                        }
-                        if button(ui, &pal, "CLOSE", false, true).clicked() {
-                            close = true;
-                        }
-                    });
-                });
-            });
-            if close {
-                let mut v = app.browser.web.voice.lock();
-                if matches!(*v, Voice::Failed(_)) {
-                    *v = Voice::Idle;
-                }
-            }
-        }
-        _ => {}
+    mic_icon(ui.painter(), mr.center(), if on { pal.ink } else if resp.hovered() { pal.accent } else { pal.dim });
+    if resp.on_hover_text("Voice search: say a song, an artist or a line of lyrics (Windows voice typing, Win+H)").clicked() {
+        super::websearch::voice(app);
     }
 }
 
@@ -1137,7 +1101,12 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
         let now = crate::store::now_ms();
         let (ids, cfg): (Vec<String>, ListCfg) = match &view {
             View::All => (all().map(|t| t.id.clone()).collect(), ListCfg { title: "ALL TRACKS".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "all"), back: None }),
-            View::Downloaded => (downloaded.iter().cloned().collect(), ListCfg { title: "DOWNLOADS".into(), sub: "SONGS DK.FM DOWNLOADED".into(), cover: None, playlist: None, default_sort: Some((SortKey::Added, false)), back: None }),
+            View::Downloaded => {
+                // how much room they take on this PC
+                let bytes: u64 = downloaded.iter().filter_map(|id| d.tracks.get(id)).map(|t| t.size).sum();
+                let sub = format!("SONGS DK.FM DOWNLOADED · {} ON DISK", super::settings::gb_text(bytes as f64 / (1u64 << 30) as f64));
+                (downloaded.iter().cloned().collect(), ListCfg { title: "DOWNLOADS".into(), sub, cover: None, playlist: None, default_sort: Some((SortKey::Added, false)), back: None })
+            }
             View::Liked => (all().filter(|t| d.stats.get(&t.id).map(|s| s.liked).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "LIKED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "liked"), back: None }),
             View::Top => (all().filter(|t| d.stats.get(&t.id).map(|s| s.plays > 0).unwrap_or(false)).map(|t| t.id.clone()).collect(), ListCfg { title: "MOST PLAYED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "top"), back: None }),
             View::Recent => (all().filter(|t| now - t.added_at < 60.0 * 86400.0 * 1000.0).map(|t| t.id.clone()).collect(), ListCfg { title: "RECENTLY ADDED".into(), sub: String::new(), cover: None, playlist: None, default_sort: default_sort(app, "recent"), back: None }),

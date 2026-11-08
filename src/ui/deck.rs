@@ -24,6 +24,10 @@ const CASSETTE: &[&str] = &[
 
 pub fn show(app: &mut App, ui: &mut Ui) {
     let avail = ui.available_size();
+    // a wide, short panel (along the bottom, like Spotify's): the player bar
+    if avail.x >= 640.0 && avail.y < 200.0 && avail.y >= 60.0 {
+        return bar(app, ui);
+    }
     // the deck always fits: smaller panels get a compact deck (the controls never disappear)
     if avail.y < 280.0 || avail.x < 300.0 {
         return compact(app, ui);
@@ -211,6 +215,83 @@ fn sleep_button(app: &mut App, ui: &mut Ui) {
                 app.player.set_sleep(Sleep::At(Instant::now() + Duration::from_secs(m * 60)));
             }
         }
+    });
+}
+
+/// The deck along the bottom of the window, like Spotify's player bar: the song (cover, title,
+/// artist, ♥) on the left, the controls over the seek bar (with the times) in the middle, the
+/// volume and SHAZAM (KEEP / DISCARD while a preview plays) on the right.
+fn bar(app: &mut App, ui: &mut Ui) {
+    let pal = app.pal;
+    let st = app.player.status();
+    let track = app.current_track();
+    let full = ui.available_rect_before_wrap().shrink2(Vec2::new(12.0, 6.0));
+    ui.allocate_rect(full, Sense::hover());
+    let w = full.width();
+    let left_w = (w * 0.28).clamp(200.0, 380.0);
+    let mid_w = (w * 0.42).clamp(340.0, 680.0).min(w - left_w - 160.0);
+    let right_w = w - left_w - mid_w;
+    let left = Rect::from_min_size(full.min, Vec2::new(left_w, full.height()));
+    let mid = Rect::from_min_size(Pos2::new(left.right(), full.top()), Vec2::new(mid_w, full.height()));
+    let right = Rect::from_min_size(Pos2::new(mid.right(), full.top()), Vec2::new(right_w, full.height()));
+    // ---- the song
+    let side = (full.height() - 8.0).clamp(40.0, 72.0);
+    let cr = Rect::from_min_size(Pos2::new(left.left(), left.center().y - side / 2.0), Vec2::splat(side));
+    cover(app, ui, cr, track.as_ref(), 128);
+    let tx = cr.right() + 10.0;
+    let text_r = Rect::from_min_max(Pos2::new(tx, left.top()), Pos2::new(left.right() - 40.0, left.bottom()));
+    {
+        let p = ui.painter_at(text_r);
+        let title = track.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| "NO TRACK LOADED".into());
+        let artist = track.as_ref().map(|t| t.artist.clone()).unwrap_or_default();
+        let cy = text_r.center().y;
+        p.text(Pos2::new(tx, cy - 1.0), Align2::LEFT_BOTTOM, title, vt(21.0), pal.text);
+        p.text(Pos2::new(tx, cy + 1.0), Align2::LEFT_TOP, artist, vt(17.0), pal.dim);
+    }
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_max(Pos2::new(left.right() - 36.0, left.top()), left.max)).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+        let liked = track.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);
+        if icon(ui, &pal, "♥", liked).on_hover_text("Like").clicked() {
+            if let Some(t) = &track {
+                app.lib.toggle_like(&t.id);
+            }
+        }
+    });
+    // ---- controls over the seek bar
+    let k = ((full.height() - 30.0) / 53.0).clamp(0.55, 0.75);
+    let seek_h = 22.0;
+    let gap = 4.0;
+    let block = 53.0 * k + gap + seek_h;
+    let top = mid.center().y - block / 2.0;
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_size(Pos2::new(mid.left(), top), Vec2::new(mid_w, 53.0 * k))), |ui| {
+        transport(app, ui, &st, k);
+    });
+    let sy = top + 53.0 * k + gap;
+    let time_w = 44.0;
+    let pp = ui.painter();
+    pp.text(Pos2::new(mid.left() + time_w - 4.0, sy + seek_h / 2.0), Align2::RIGHT_CENTER, fmt_time(st.position), vt(17.0), pal.dim);
+    pp.text(Pos2::new(mid.right() - time_w + 4.0, sy + seek_h / 2.0), Align2::LEFT_CENTER, fmt_time(st.duration.max(0.0)), vt(17.0), pal.dim);
+    let wr = Rect::from_min_max(Pos2::new(mid.left() + time_w, sy), Pos2::new(mid.right() - time_w, sy + seek_h));
+    let resp = ui.interact(wr, ui.id().with("bar-seek"), Sense::click_and_drag());
+    waveform(app, ui, wr, &resp, &st);
+    // ---- volume, extras
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right.shrink2(Vec2::new(8.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        let preview = app.player.current_id().is_some_and(|id| id.starts_with(crate::library::PREVIEW));
+        if preview {
+            super::preview::keep_bar(app, ui, (ui.available_width() * 0.5).clamp(120.0, 200.0), 30.0);
+        } else if ui.available_width() > 300.0 {
+            shazam_button(app, ui);
+        }
+        if ui.available_width() > 260.0 {
+            if icon(ui, &pal, "🗖", false).on_hover_text("THEATER: the song big, with its lyrics (F11)").clicked() {
+                app.open_theater(None);
+            }
+            sleep_button(app, ui);
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let room = ui.available_width();
+            ui.add_space((room - 210.0).max(0.0));
+            volume(app, ui, 46.0);
+        });
     });
 }
 

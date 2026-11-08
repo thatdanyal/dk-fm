@@ -93,13 +93,42 @@ fn d_daily() -> String { "daily".into() }
 fn d_balanced() -> String { "balanced".into() }
 fn d_played() -> String { "played".into() }
 fn d_under() -> String { "under".into() }
+/// How many THEATER versions there are (CLASSIC and KARAOKE; PARTY went in November 2026).
+pub const THEATERS: usize = 2;
+
+fn theater_preset(name: &str, left: &[&str], right: &[&str], backdrop: &str, lyrics_size: f32, singalong: bool) -> TheaterPreset {
+    TheaterPreset { name: name.into(), left: left.iter().map(|s| s.to_string()).collect(), right: right.iter().map(|s| s.to_string()).collect(), backdrop: backdrop.into(), lyrics_size, auto_hide: false, singalong }
+}
+
 pub fn d_theater() -> Vec<TheaterPreset> {
-    let p = |name: &str, left: &[&str], right: &[&str], backdrop: &str, lyrics_size: f32, singalong: bool| TheaterPreset { name: name.into(), left: left.iter().map(|s| s.to_string()).collect(), right: right.iter().map(|s| s.to_string()).collect(), backdrop: backdrop.into(), lyrics_size, auto_hide: false, singalong };
     vec![
-        p("CLASSIC", &["cover", "info", "seek", "controls"], &["lyrics"], "plain", 1.35, false),
-        p("KARAOKE", &["info", "lyrics", "seek", "controls"], &[], "glow", 1.8, true),
-        p("PARTY", &["cover", "info", "seek", "controls"], &["clock", "next", "visualizer"], "glow", 1.0, false),
+        // (what PARTY looked like: the cover's colours behind, the clock, up next and the visualizer)
+        theater_preset("CLASSIC", &["cover", "info", "seek", "controls"], &["clock", "next", "visualizer"], "glow", 1.0, false),
+        theater_preset("KARAOKE", &["info", "lyrics", "seek", "controls"], &[], "glow", 1.8, true),
     ]
+}
+
+/// The THEATER versions before November 2026, to tell whether someone changed them.
+fn old_theater() -> [TheaterPreset; 3] {
+    [
+        theater_preset("CLASSIC", &["cover", "info", "seek", "controls"], &["lyrics"], "plain", 1.35, false),
+        theater_preset("KARAOKE", &["info", "lyrics", "seek", "controls"], &[], "glow", 1.8, true),
+        theater_preset("PARTY", &["cover", "info", "seek", "controls"], &["clock", "next", "visualizer"], "glow", 1.0, false),
+    ]
+}
+
+/// PARTY is gone and CLASSIC looks like it did (unless you'd changed CLASSIC: yours stays).
+fn drop_party(theater: &mut Vec<TheaterPreset>, default: &mut usize) {
+    let old = old_theater();
+    if theater.len() > 2 {
+        theater.truncate(2);
+        if *default >= 2 {
+            *default = 0;
+        }
+    }
+    if theater.first() == Some(&old[0]) {
+        theater[0] = d_theater()[0].clone();
+    }
 }
 
 /// One of your THEATER versions: what's on screen, in two columns (an empty right column = one
@@ -347,12 +376,18 @@ impl Settings {
         if s.eq.gains.len() != 10 {
             s.eq.gains = vec![0.0; 10];
         }
-        if s.theater.len() != 3 {
+        if !s.upgrades.iter().any(|u| u == "theater-no-party") {
+            s.upgrades.push("theater-no-party".into());
+            let mut def = s.theater_default;
+            drop_party(&mut s.theater, &mut def);
+            s.theater_default = def;
+        }
+        if s.theater.len() != THEATERS {
             let d = d_theater();
             s.theater.extend(d.into_iter().skip(s.theater.len()));
-            s.theater.truncate(3);
+            s.theater.truncate(THEATERS);
         }
-        s.theater_default = s.theater_default.min(2);
+        s.theater_default = s.theater_default.min(THEATERS - 1);
         // (KARAOKE from before sing-along existed sings along, unless it was changed)
         if !s.upgrades.iter().any(|u| u == "theater-sing") {
             s.upgrades.push("theater-sing".into());
@@ -521,6 +556,26 @@ pub fn local_stamp(secs: i64, time: bool) -> String {
     let d = chrono::Local.timestamp_opt(secs, 0).single().unwrap_or_else(chrono::Local::now);
     let date = format!("{:04}-{:02}-{:02}", d.year(), d.month(), d.day());
     if time { format!("{date}_{:02}{:02}{:02}", d.hour(), d.minute(), d.second()) } else { date }
+}
+
+#[cfg(test)]
+mod theater_upgrade_tests {
+    use super::*;
+
+    #[test]
+    fn party_goes_and_classic_takes_its_look() {
+        let mut t = old_theater().to_vec();
+        let mut def = 2;
+        drop_party(&mut t, &mut def);
+        assert_eq!(t, d_theater());
+        assert_eq!(def, 0, "PARTY was the default: CLASSIC is");
+        // a CLASSIC you'd changed stays yours
+        let mut t = old_theater().to_vec();
+        t[0].lyrics_size = 2.0;
+        let mut def = 1;
+        drop_party(&mut t, &mut def);
+        assert_eq!((t.len(), t[0].lyrics_size, def), (2, 2.0, 1));
+    }
 }
 
 #[cfg(test)]

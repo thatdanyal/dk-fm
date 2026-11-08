@@ -844,7 +844,7 @@ mod theater_tests {
 
     #[test]
     fn theater_codes_round_trip_and_stay_safe() {
-        let mut t = crate::store::d_theater()[2].clone();
+        let mut t = crate::store::d_theater()[0].clone();
         t.name = "my party".into();
         let back = decode(&encode(&Share::Theater(t.clone()))).unwrap();
         let Share::Theater(b) = back else { panic!() };

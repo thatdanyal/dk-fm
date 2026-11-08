@@ -9,7 +9,7 @@ use eframe::egui::{self, Align2, Id, LayerId, Order, Pos2, Rect};
 
 /// Bump with every update that adds steps: people who update are offered a tour of just the
 /// steps newer than the last tour they were offered.
-pub const TOUR_VERSION: u32 = 8;
+pub const TOUR_VERSION: u32 = 9;
 
 /// `App::tour_from` for the whole list of extras (MORE TIPS at the end of the basics).
 pub const ALL_TIPS: u32 = u32::MAX;
@@ -21,15 +21,17 @@ pub const BASICS: [(&str, &str, &str); 7] = [
     ("yourlibrary", "YOUR LIBRARY", "Home, Liked Songs, Songs, Albums and Artists are always here on the left; what you pick opens beside them. ‹ › at the top go back and forward."),
     ("playlists", "PLAYLISTS", "Your playlists, the one you played last at the top. + makes a new one; drag songs onto a playlist to add them."),
     ("import", "COMING FROM SPOTIFY?", "+ IMPORT brings over a playlist from a link, or your whole Spotify library at once, and keeps it in sync."),
-    ("deck", "PLAYER", "Play, skip, shuffle, repeat and volume. ♥ likes the song playing; SHAZAM names a song you hear."),
-    ("lyrics", "LYRICS", "The lyrics of the song playing, line by line. EQUALIZER and SCOPE are the tabs beside them."),
+    ("deck", "PLAYER", "Along the bottom, like Spotify: play, skip, shuffle, repeat and volume. ♥ likes the song playing; SHAZAM names a song you hear."),
+    ("lyrics", "LYRICS & QUEUE", "On the right: the lyrics of the song playing, line by line. QUEUE, EQUALIZER and SCOPE are the tabs beside them."),
     ("settings", "THAT'S IT", "Everything else is in SETTINGS (it has a search box). Curious about the extras, like karaoke, mixes made for you and themes? MORE TIPS."),
 ];
 
 /// (what it points at, title, explanation, the TOUR_VERSION that added it)
-pub const STEPS: [(&str, &str, &str, u32); 28] = [
+pub const STEPS: [(&str, &str, &str, u32); 30] = [
+    ("deck", "THE PLAYER IS ALONG THE BOTTOM", "Like Spotify: the song on the left, the controls and seek bar in the middle, the volume on the right. The lyrics are on the right of the window, with QUEUE, EQUALIZER and SCOPE as tabs beside them. PANELS > RESET LAYOUT puts it like this.", 9),
+    ("web", "ONE SEARCH", "ALL also looks on YouTube and SoundCloud: covers, remixes and small artists show up right under SONGS when the music catalogue doesn't have what you typed. No more YOUTUBE and SOUNDCLOUD tabs.", 9),
     ("yourlibrary", "EASIER TO FIND YOUR WAY", "DK.FM is laid out like Spotify now: Home, Liked Songs, Songs, Albums, Artists and your playlists are all down the left, and what you pick opens beside them. ‹ › go back and forward (so do Alt+Left / Alt+Right and your mouse's side buttons).", 8),
-    ("lyrics", "LYRICS UNDER THE PLAYER", "In the default layout the lyrics sit under the player now, so your playlists and imports get the whole middle. EQUALIZER and SCOPE are the tabs beside them. PANELS > RESET LAYOUT puts it like this.", 8),
+    ("lyrics", "LYRICS BESIDE THE MUSIC", "In the default layout the lyrics sit on the right, so your playlists and imports get the whole middle. QUEUE, EQUALIZER and SCOPE are the tabs beside them.", 8),
     ("web", "SEARCH", "Search all of YouTube Music right here: songs, artists, albums, playlists, profiles, podcasts and audiobooks. ▶ plays a preview first; + GET downloads the version you want.", 2),
     ("import", "IMPORT YOUR MUSIC", "Paste a link to a Spotify, SoundCloud or YouTube Music playlist, album, song or profile, and DK.FM downloads every song. Connect Spotify in Settings to import your whole library (and keep it in sync).", 1),
     ("downloads", "DOWNLOADS", "What's downloading right now. Cancel any time; CLEAR FINISHED tidies the list.", 2),
@@ -44,7 +46,7 @@ pub const STEPS: [(&str, &str, &str, u32); 28] = [
     ("theme", "THEMES", "Change the colours here, or make your own in Settings > Look.", 1),
     ("theme", "ALBUM COVER THEME", "THEME > Album Cover: DK.FM's colours follow the cover of the song playing, toned down so they always look good. Settings > Look sets how much.", 3),
     ("home", "MADE FOR YOU", "Home's MADE FOR YOU mixes have your songs and new ones you don't have yet, side by side: double-click one to play it, + GET keeps it.", 4),
-    ("theater", "THEATER, YOUR WAY", "Hover THEATER to pick one of your three versions (CLASSIC, KARAOKE, PARTY); a click opens your default. Inside, LAYOUT adds, removes and moves what's shown, renames a version and makes it the default. 1, 2, 3 switch; Esc leaves.", 4),
+    ("theater", "THEATER, YOUR WAY", "Hover THEATER to pick one of your two versions (CLASSIC, KARAOKE); a click opens your default. Inside, LAYOUT adds, removes and moves what's shown, renames a version and makes it the default. 1, 2 switch; Esc leaves.", 4),
     ("settings", "LYRICS IN YOUR LANGUAGE", "Lyrics in another language are translated into yours, under each line. Pick your language in Settings > Language.", 4),
     ("theater", "SING ALONG", "THEATER's KARAOKE version sings along: each word lights up the moment it's sung, and dots count you in after a break. Turn it on for any version in THEATER > LAYOUT.", 5),
     ("theater", "SCORE YOUR SINGING", "In a sing-along THEATER (KARAOKE), ♪ SCORE ME listens through your microphone and grades every line: PERFECT, GREAT, GOOD. Headphones give a fair score. Your best per song is kept.", 6),

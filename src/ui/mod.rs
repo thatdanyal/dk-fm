@@ -350,10 +350,20 @@ pub fn merge_home(d: &mut DockState<Tab>) {
 }
 
 pub fn default_dock() -> DockState<Tab> {
-    // DK.FM's owner's own layout: the deck over the lyrics (with the equalizer and visualizer
-    // as tabs behind them) down the left, the music (Home, your library and playlists) in the
-    // middle at full height, the queue on the right (the visualizer starts off, the EQ flat
-    // and off)
+    // like Spotify's window, so it's familiar from the start: the music (Home, search, your
+    // library and playlists down its left) in the middle, the lyrics on the right (the queue,
+    // equalizer and visualizer as tabs behind them) and the player as a bar along the bottom
+    let mut d = DockState::new(vec![Tab::Library]);
+    let s = d.main_surface_mut();
+    let [top, _bar] = s.split_below(NodeIndex::root(), 0.87, vec![Tab::Deck]);
+    let _ = s.split_right(top, 0.74, vec![Tab::Lyrics, Tab::Queue, Tab::Eq, Tab::Scope]);
+    d
+}
+
+/// The default layout of 11 October – November 2026 (DK.FM's owner's own): the deck over the
+/// lyrics (equalizer and visualizer behind them) down the left, the music in the middle, the
+/// queue on the right.
+fn owner_dock() -> DockState<Tab> {
     let mut d = DockState::new(vec![Tab::Library]);
     let s = d.main_surface_mut();
     let [music, col] = s.split_left(NodeIndex::root(), 0.2614, vec![Tab::Deck]);
@@ -412,7 +422,7 @@ fn arrangement(d: &DockState<Tab>) -> Vec<String> {
 /// its panels to) gets the new default; a layout someone arranged differently stays as it is.
 fn takes_new_default(d: &DockState<Tab>) -> bool {
     let a = arrangement(d);
-    a == arrangement(&old_default_dock()) || a == arrangement(&dock_with(0.23, 0.45, 0.76, 0.62))
+    a == arrangement(&old_default_dock()) || a == arrangement(&dock_with(0.23, 0.45, 0.76, 0.62)) || a == arrangement(&owner_dock())
 }
 
 /// Smallest comfortable size of a panel.
@@ -420,7 +430,8 @@ fn min_size(tab: Tab) -> Vec2 {
     match tab {
         Tab::Library => Vec2::new(420.0, 260.0),
         Tab::Home => Vec2::new(520.0, 300.0),
-        Tab::Deck => Vec2::new(300.0, 150.0),
+        // (along the bottom it's a player bar: short)
+        Tab::Deck => Vec2::new(300.0, 84.0),
         Tab::Eq => Vec2::new(300.0, 130.0),
         Tab::Queue => Vec2::new(240.0, 160.0),
         Tab::Lyrics => Vec2::new(260.0, 140.0),
@@ -528,7 +539,9 @@ impl App {
             s.upgrade("home-tab"); // (HOME is part of MUSIC now: nothing to add)
             // the new default layout (only where it was a default anyway: see takes_new_default),
             // and HOME is part of MUSIC now (load_dock merged it: saved like that from now on)
-            if s.upgrade("layout-2026-10b") && s.dock.is_some() {
+            // (again in November 2026: the Spotify-style layout, the player bar along the bottom)
+            let again = s.upgrade("layout-2026-11-bar");
+            if (s.upgrade("layout-2026-10b") || again) && s.dock.is_some() {
                 if takes_new_default(&dock) {
                     dock = default_dock();
                 }
@@ -924,6 +937,8 @@ impl App {
     /// The title bar's ↻: look for an update and sync imported playlists (Spotify...) now.
     pub fn refresh_all(&mut self, ctx: &egui::Context) {
         self.refreshing.store(true, Ordering::Relaxed);
+        // (a mix's new songs are kept until now: see preview.rs)
+        preview::forget_mix_songs(self);
         self.toast("Checking for updates and syncing your playlists…");
         *self.update.lock() = UpdState::Checking;
         let (slot, dl, busy, ctx) = (self.update.clone(), self.dl.clone(), self.refreshing.clone(), ctx.clone());
@@ -1205,7 +1220,7 @@ impl App {
                     if room(ui, 300.0 + later) {
                         let r = tb_button(ui, &pal, "THEATER", self.nowplaying);
                         self.mark("theater", r.rect);
-                        // hovering lists your three versions; a click opens your default
+                        // hovering lists your versions; a click opens your default
                         match nowplaying::hover_menu(self, ui, &r) {
                             Some(Some(i)) => self.open_theater(Some(i)),
                             Some(None) => {
@@ -2156,6 +2171,7 @@ mod tests {
         assert!(takes_new_default(&saved(&dock_with(0.23, 0.45, 0.76, 0.62))));
         assert!(takes_new_default(&saved(&dock_with(0.27000001, 0.5398840308, 0.7430105209, 0.5387368202))));
         assert!(takes_new_default(&saved(&dock_with(0.35, 0.3, 0.6, 0.8))));
+        assert!(takes_new_default(&saved(&owner_dock())), "the owner's layout of October–November");
         // anyone's own arrangement stays
         assert!(!takes_new_default(&saved(&App::preset("Minimal").unwrap())));
         assert!(!takes_new_default(&saved(&App::preset("Everything").unwrap())));
@@ -2164,11 +2180,6 @@ mod tests {
         let q = moved.find_tab(&Tab::Queue).unwrap();
         moved.remove_tab(q);
         assert!(!takes_new_default(&saved(&moved)));
-        // DKFM_DOCK_FILE=<the owner's saved dock JSON>: that's the new default
-        if let Ok(f) = std::env::var("DKFM_DOCK_FILE") {
-            let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap();
-            assert_eq!(arrangement(&load_dock(&v).unwrap()), arrangement(&default_dock()), "the owner's saved layout");
-        }
     }
 
     #[test]
@@ -2234,10 +2245,10 @@ mod tests {
         // collapsed panels open again, extreme splits stay usable
         let d = edit(&|n| {
             n[leaf]["Leaf"]["collapsed"] = json!(true);
-            n[0]["Horizontal"]["fraction"] = json!(0.0);
+            n[0]["Vertical"]["fraction"] = json!(0.0);
         })
         .unwrap();
         assert!(d.iter_all_nodes().all(|(_, n)| !n.is_collapsed()));
-        assert!(matches!(d.main_surface()[NodeIndex(0)], Node::Horizontal { fraction, .. } if fraction == 0.05));
+        assert!(matches!(d.main_surface()[NodeIndex(0)], Node::Vertical { fraction, .. } if fraction == 0.05));
     }
 }

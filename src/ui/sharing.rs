@@ -25,7 +25,7 @@ pub struct Incoming {
     pick: [bool; 4],
     /// a whole DK.FM: songs already here
     have_all: usize,
-    /// THEATER: which of your three versions it replaces
+    /// THEATER: which of your versions it replaces
     slot: usize,
 }
 
@@ -66,7 +66,7 @@ pub fn layout_share(app: &App, name: Option<&str>) -> Option<Share> {
 
 /// One of your THEATER versions.
 pub fn theater_share(app: &App, i: usize) -> Share {
-    Share::Theater(app.settings.lock().theater[i.min(2)].clone())
+    Share::Theater(app.settings.lock().theater[i.min(crate::store::THEATERS - 1)].clone())
 }
 
 pub fn settings_share(app: &App) -> Share {
@@ -156,7 +156,7 @@ fn open(app: &mut App, s: Share) {
     };
     app.palette = None;
     app.pick = None;
-    let slot = if app.nowplaying { app.theater.preset } else { 2 };
+    let slot = if app.nowplaying { app.theater.preset } else { crate::store::THEATERS - 1 };
     app.incoming = Some(Incoming { share: s, owned, name, dock, pick: [true; 4], have_all, slot });
 }
 
@@ -368,7 +368,7 @@ fn apply(app: &mut App, ctx: &egui::Context, inc: Incoming) {
         }
         Share::Everything(a) => bring_in_all(app, ctx, &a, inc.pick),
         Share::Theater(t) => {
-            let (slot, name) = (inc.slot.min(2), t.name.clone());
+            let (slot, name) = (inc.slot.min(crate::store::THEATERS - 1), t.name.clone());
             app.edit_settings(|s| s.theater[slot] = t);
             app.toast(format!("THEATER \"{name}\" is your version {}: hover THEATER to open it", slot + 1));
         }

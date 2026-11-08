@@ -1,10 +1,10 @@
-//! THEATER (full-screen now playing), your way: three versions of it (presets) you name and
+//! THEATER (full-screen now playing), your way: two versions of it (CLASSIC and KARAOKE) you name and
 //! arrange yourself. Each is two columns of parts (cover, song, seek bar, controls, lyrics, up
 //! next, clock, visualizer, volume, plays) top to bottom; an empty right column makes one wide
 //! column. LAYOUT (the title bar's, while THEATER is open) drags parts between spots, onto a bin
 //! to take them out and in from a list, renames a version and makes one the default. In the
-//! title bar, clicking THEATER opens the default; hovering it lists all three (right-click one:
-//! make it the default). 1 / 2 / 3 switch while it's open; Esc (or F11) leaves. Nothing extra repaints: it redraws on
+//! title bar, clicking THEATER opens the default; hovering it lists both (right-click one:
+//! make it the default). 1 / 2 switch while it's open; Esc (or F11) leaves. Nothing extra repaints: it redraws on
 //! the same playback tick as the deck (the clock asks for one repaint a minute).
 use super::deck::tbtn;
 use super::theme::{px, vt};
@@ -183,13 +183,13 @@ impl App {
         if self.mini {
             return;
         }
-        self.theater.preset = preset.unwrap_or_else(|| self.settings.lock().theater_default).min(2);
+        self.theater.preset = preset.unwrap_or_else(|| self.settings.lock().theater_default).min(crate::store::THEATERS - 1);
         self.theater.edit = false;
         self.nowplaying = true;
     }
 }
 
-/// The THEATER title-bar button's menu: hovering it lists your three versions (★ = default).
+/// The THEATER title-bar button's menu: hovering it lists your versions (★ = default).
 /// Returns the one clicked, if any (Some(None): edit layouts).
 pub fn hover_menu(app: &mut App, ui: &mut Ui, button: &egui::Response) -> Option<Option<usize>> {
     let pal = app.pal;
@@ -252,7 +252,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     // 1 / 2 / 3: another version
     if !busy && !ctx.wants_keyboard_input() {
-        for (k, i) in [(egui::Key::Num1, 0), (egui::Key::Num2, 1), (egui::Key::Num3, 2)] {
+        for (k, i) in [(egui::Key::Num1, 0), (egui::Key::Num2, 1)].into_iter().take(crate::store::THEATERS) {
             if ui.input(|inp| inp.key_pressed(k) && inp.modifiers.is_none()) {
                 app.theater.preset = i;
             }

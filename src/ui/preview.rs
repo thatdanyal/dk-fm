@@ -4,7 +4,8 @@
 //! on screen) starts as soon as its first piece is in and plays while the rest arrives. While it plays the deck offers
 //! KEEP (download it for real) or DISCARD (skip it). Previews never join your library, playlists
 //! or Stats; once you move on to another song a preview's file is deleted (kept or not: KEEP
-//! downloads its own copy), and anything left over is cleared when DK.FM starts.
+//! downloads its own copy). A mix's new songs are kept for the session instead (played again,
+//! they start at once) and deleted on ↻, when DK.FM closes, or (after a crash) when it starts.
 use super::theme::vt;
 use super::widgets::{fill, frame_rect, with_alpha};
 use super::App;
@@ -49,19 +50,39 @@ pub fn clear_old(covers: PathBuf) {
 }
 
 /// Previews you've moved on from (another song is playing, or nothing) are deleted, and taken
-/// out of the queue so ⏮ doesn't land on them.
+/// out of the queue so ⏮ doesn't land on them. A mix's new songs stay (on disk and in the queue,
+/// so going back or playing the mix again is instant) until ↻ or DK.FM closes.
 fn tidy(app: &mut App) {
     let cur = app.player.current_id();
     if cur == app.previews.last {
         return;
     }
     app.previews.last = cur.clone();
-    // (online songs still to come in the queue stay)
-    let upcoming: std::collections::HashSet<String> = {
-        let st = app.player.st.lock();
-        st.queue.iter().skip((st.index + 1).max(0) as usize).cloned().collect()
+    let gone: Vec<String> = {
+        let upcoming = upcoming(app);
+        let auto = &app.previews.auto;
+        app.lib.previews.read().keys().filter(|id| Some(*id) != cur.as_ref() && !upcoming.contains(*id) && !auto.contains(*id)).cloned().collect()
     };
-    let gone: Vec<String> = app.lib.previews.read().keys().filter(|id| Some(*id) != cur.as_ref() && !upcoming.contains(*id)).cloned().collect();
+    remove(app, gone);
+}
+
+/// (online songs still to come in the queue)
+fn upcoming(app: &App) -> std::collections::HashSet<String> {
+    let st = app.player.st.lock();
+    st.queue.iter().skip((st.index + 1).max(0) as usize).cloned().collect()
+}
+
+/// ↻: a mix's new songs fetched this session are deleted (all but the one playing and those
+/// still to come).
+pub fn forget_mix_songs(app: &mut App) {
+    let cur = app.player.current_id();
+    let upcoming = upcoming(app);
+    let gone: Vec<String> = app.previews.auto.iter().filter(|id| Some(*id) != cur.as_ref() && !upcoming.contains(*id)).cloned().collect();
+    remove(app, gone);
+}
+
+/// Previews out of the queue, their files (and covers) deleted.
+fn remove(app: &mut App, gone: Vec<String>) {
     for id in gone {
         loop {
             let at = app.player.st.lock().queue.iter().position(|q| *q == id);

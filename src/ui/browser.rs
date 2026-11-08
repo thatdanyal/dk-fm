@@ -607,7 +607,10 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
     let mut drops: Vec<(View, Vec<String>)> = Vec::new();
     // one sidebar row: `indent` px, a cover thumbnail instead of the icon, draggable, pinned mark
     let mut item = |ui: &mut Ui, app: &mut App, v: Option<View>, ico: &str, label: &str, cnt: Option<usize>, indent: f32, cover: Option<&str>, drag: Option<SideDrag>, pin: bool| -> egui::Response {
-        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), if drag.is_some() { Sense::click_and_drag() } else { Sense::click() });
+        // playlists (and folders) get the queue's size: a cover you can see and bigger names
+        let big = drag.is_some();
+        let h = if big { 38.0 } else { 28.0 };
+        let (r, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), if drag.is_some() { Sense::click_and_drag() } else { Sense::click() });
         // (Albums stays lit on an album's page, Artists on an artist's…)
         let active = v.as_ref().is_some_and(|v| *v == app.browser.view || nav_of(v).is_some() && nav_of(v) == nav_of(&app.browser.view));
         let droppable = matches!(v, Some(View::Playlist(_)) | Some(View::Liked));
@@ -625,20 +628,23 @@ fn sidebar(app: &mut App, ui: &mut Ui) {
         let p = ui.painter();
         match tex {
             Some(t) => {
-                p.image(t, Rect::from_center_size(Pos2::new(x + 14.0, r.center().y), Vec2::splat(18.0)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                let side = if big { 30.0 } else { 20.0 };
+                p.image(t, Rect::from_center_size(Pos2::new(x + 6.0 + side / 2.0, r.center().y), Vec2::splat(side)), Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
             }
             None => {
-                p.text(Pos2::new(x + 14.0, r.top() + 12.0), Align2::CENTER_CENTER, ico, vt(18.0), pal.accent2);
+                let c = if big { Pos2::new(x + 21.0, r.center().y) } else { Pos2::new(x + 14.0, r.center().y) };
+                p.text(c, Align2::CENTER_CENTER, ico, vt(if big { 24.0 } else { 19.0 }), pal.accent2);
             }
         }
+        let tx = x + if big { 44.0 } else { 30.0 };
         let right = r.right() - if pin { 44.0 } else { 30.0 };
         let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(right, r.bottom())));
-        clip.text(Pos2::new(x + 28.0, r.top() + 12.0), Align2::LEFT_CENTER, label, vt(19.0), if active { pal.accent } else { pal.text });
+        clip.text(Pos2::new(tx, r.center().y), Align2::LEFT_CENTER, label, vt(if big { 21.0 } else { 20.0 }), if active { pal.accent } else { pal.text });
         if pin {
             p.text(Pos2::new(r.right() - 34.0, r.center().y), Align2::CENTER_CENTER, "📌", vt(14.0), pal.accent2);
         }
         if let Some(c) = cnt {
-            p.text(Pos2::new(r.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, c.to_string(), vt(16.0), pal.dim);
+            p.text(Pos2::new(r.right() - 8.0, r.center().y), Align2::RIGHT_CENTER, c.to_string(), vt(17.0), pal.dim);
         }
         // (a release check takes the payload even when it's another type, so check the type first)
         if droppable && egui::DragAndDrop::has_payload_of_type::<DragSongs>(ui.ctx()) {

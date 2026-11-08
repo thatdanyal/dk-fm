@@ -48,28 +48,30 @@ enum Btn {
 /// One result row (room at the left for the cover / ▶ preview); returns (button clicked, row).
 /// `tip` = what + GET does.
 fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, tags: &[&str], sub: &str, secs: Option<f64>, btn: Btn, tip: &str) -> (bool, Rect) {
-    let (full, resp) = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click());
+    let (full, resp) = ui.allocate_exact_size(Vec2::new(w, ROW_H), Sense::click());
     if resp.hovered() || ui.rect_contains_pointer(full) {
         fill(ui.painter(), full, pal.panel_hi);
     }
     let r = Rect::from_min_max(Pos2::new(full.left() + LEAD, full.top()), full.max);
-    let br = Rect::from_min_size(Pos2::new(r.right() - 92.0, r.top() + 3.0), Vec2::new(86.0, 20.0));
+    let br = Rect::from_min_size(Pos2::new(r.right() - 92.0, r.center().y - 11.0), Vec2::new(86.0, 22.0));
     let over = resp.hovered() && ui.input(|i| i.pointer.hover_pos()).map(|q| br.contains(q)).unwrap_or(false);
     let p = ui.painter();
     let cy = r.center().y;
     let clip = p.with_clip_rect(Rect::from_min_max(r.min, Pos2::new(r.right() - 160.0, r.bottom())));
-    let g = clip.layout_no_wrap(title.to_string(), vt(19.0), pal.text);
+    // the title on top (with its version labels), artist · album under it, like the queue
+    let ty = cy - 10.0;
+    let g = clip.layout_no_wrap(title.to_string(), vt(20.0), pal.text);
     let mut x = r.left() + 8.0 + g.size().x;
-    clip.galley(Pos2::new(r.left() + 8.0, cy - g.size().y / 2.0), g, pal.text);
+    clip.galley(Pos2::new(r.left() + 8.0, ty - g.size().y / 2.0), g, pal.text);
     // version labels (EXPLICIT, CLEAN, LIVE...) as small boxed tags
     for t in tags {
         let tg = clip.layout_no_wrap(t.to_string(), px(5.0), pal.accent2);
-        let tr = Rect::from_min_size(Pos2::new(x + 8.0, cy - 7.0), Vec2::new(tg.size().x + 8.0, 14.0));
+        let tr = Rect::from_min_size(Pos2::new(x + 8.0, ty - 7.0), Vec2::new(tg.size().x + 8.0, 14.0));
         frame_rect(&clip, tr, 1.0, if *t == "EXPLICIT" { pal.accent } else { pal.accent2 });
-        clip.galley(Pos2::new(tr.left() + 4.0, cy - tg.size().y / 2.0), tg, if *t == "EXPLICIT" { pal.accent } else { pal.accent2 });
+        clip.galley(Pos2::new(tr.left() + 4.0, ty - tg.size().y / 2.0), tg, if *t == "EXPLICIT" { pal.accent } else { pal.accent2 });
         x = tr.right();
     }
-    clip.text(Pos2::new(x + 8.0, cy), Align2::LEFT_CENTER, sub, vt(17.0), pal.dim);
+    clip.text(Pos2::new(r.left() + 8.0, cy + 10.0), Align2::LEFT_CENTER, sub, vt(17.0), pal.dim);
     if let Some(s) = secs {
         p.text(Pos2::new(r.right() - 104.0, cy), Align2::RIGHT_CENTER, fmt_time(s), vt(17.0), pal.dim);
     }
@@ -96,7 +98,15 @@ fn row(ui: &mut Ui, pal: &Pal, w: f32, title: &str, tags: &[&str], sub: &str, se
 }
 
 /// Left of a result row: its cover, with ▶ (listen first) over it.
-const LEAD: f32 = 30.0;
+const LEAD: f32 = 50.0;
+/// A result row's height, and its cover's (the queue's size)
+const ROW_H: f32 = 46.0;
+const COVER: f32 = 38.0;
+
+/// Where a result row's cover goes.
+fn cover_rect(full: Rect) -> Rect {
+    Rect::from_min_size(Pos2::new(full.left() + 4.0, full.center().y - COVER / 2.0), Vec2::splat(COVER))
+}
 
 pub fn show(app: &mut App, ui: &mut Ui, pl: &Playlist) {
     let pal = app.pal;
@@ -185,7 +195,7 @@ fn library_rows(app: &mut App, ui: &mut Ui, pl: &Playlist, q: &str, gen: u64, w:
         let Some(t) = app.lib.track(id) else { continue };
         let inp = pl.track_ids.contains(id);
         let (hit, full) = row(ui, &pal, w, &t.title, &[], format!("{} · {}", t.artist, t.album).trim_end_matches(" · "), Some(t.duration), if inp { Btn::Added } else { Btn::Add }, "");
-        let cr = Rect::from_min_size(Pos2::new(full.left() + 4.0, full.top() + 3.0), Vec2::splat(24.0));
+        let cr = cover_rect(full);
         if let Some(tex) = t.thumb.as_ref().or(t.cover.as_ref()).and_then(|c| app.covers.get(ui.ctx(), app.lib.cover_path(c), c, 64)) {
             ui.painter().image(tex, cr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
         }
@@ -328,11 +338,11 @@ pub fn result_rows_tagged(app: &mut App, ui: &mut Ui, pl: Option<&Playlist>, fou
             crate::fastlink::warm(t); // so ▶ starts right away
         }
         // cover, and ▶ to listen before getting it
-        let cr = Rect::from_min_size(Pos2::new(full.left() + 4.0, full.top() + 3.0), Vec2::splat(24.0));
+        let cr = cover_rect(full);
         if let Some(tex) = super::home::remote_tex(app, ui.ctx(), t.cover.as_ref()) {
             ui.painter().image(tex, cr, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), egui::Color32::WHITE);
         } else {
-            ui.painter().text(cr.center(), Align2::CENTER_CENTER, "♫", vt(16.0), pal.faint);
+            ui.painter().text(cr.center(), Align2::CENTER_CENTER, "♫", vt(22.0), pal.faint);
         }
         // (a song you have plays from your library: nothing to fetch)
         let mine_on = have.as_ref().is_some_and(|id| app.player.current_id().as_ref() == Some(id));

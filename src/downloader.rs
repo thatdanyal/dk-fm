@@ -1507,9 +1507,8 @@ mod tests {
     #[test]
     fn importing_again_never_downloads_twice() {
         use lofty::file::TaggedFileExt;
-        let dir = std::env::temp_dir().join(format!("dkfm-reimport-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("DKFM_USER_DATA", &dir);
+        // (holds the data folder while it runs: other tests point it elsewhere)
+        let (_profile, dir) = crate::store::test_profile("reimport");
         let music = dir.join("Music");
         std::fs::create_dir_all(music.join("Old")).unwrap();
         // a song downloaded long ago (somewhere else, other file name): only its tags say what it is

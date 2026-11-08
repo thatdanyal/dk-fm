@@ -25,7 +25,7 @@ const CASSETTE: &[&str] = &[
 pub fn show(app: &mut App, ui: &mut Ui) {
     let avail = ui.available_size();
     // a wide, short panel (along the bottom, like Spotify's): the player bar
-    if avail.x >= 640.0 && avail.y < 200.0 && avail.y >= 60.0 {
+    if avail.x >= 640.0 && avail.y < 200.0 && avail.y >= 44.0 {
         return bar(app, ui);
     }
     // the deck always fits: smaller panels get a compact deck (the controls never disappear)
@@ -219,46 +219,51 @@ fn sleep_button(app: &mut App, ui: &mut Ui) {
 }
 
 /// The deck along the bottom of the window, like Spotify's player bar: the song (cover, title,
-/// artist, ♥) on the left, the controls over the seek bar (with the times) in the middle, the
-/// volume and SHAZAM (KEEP / DISCARD while a preview plays) on the right.
+/// artist, ♥ right after the title) on the left, the controls over the seek bar in the middle of
+/// the window, and SHAZAM, the sleep timer, THEATER and the volume packed on the right.
 fn bar(app: &mut App, ui: &mut Ui) {
     let pal = app.pal;
     let st = app.player.status();
     let track = app.current_track();
-    let full = ui.available_rect_before_wrap().shrink2(Vec2::new(12.0, 6.0));
+    let full = ui.available_rect_before_wrap().shrink2(Vec2::new(14.0, 4.0));
     ui.allocate_rect(full, Sense::hover());
     let w = full.width();
-    let left_w = (w * 0.28).clamp(200.0, 380.0);
-    let mid_w = (w * 0.42).clamp(340.0, 680.0).min(w - left_w - 160.0);
-    let right_w = w - left_w - mid_w;
-    let left = Rect::from_min_size(full.min, Vec2::new(left_w, full.height()));
-    let mid = Rect::from_min_size(Pos2::new(left.right(), full.top()), Vec2::new(mid_w, full.height()));
-    let right = Rect::from_min_size(Pos2::new(mid.right(), full.top()), Vec2::new(right_w, full.height()));
-    // ---- the song
-    let side = (full.height() - 8.0).clamp(40.0, 72.0);
+    // the controls sit in the middle of the bar, whatever is either side of them
+    let mid_w = (w * 0.40).clamp(360.0, 620.0).min(w - 2.0 * 230.0).max(300.0);
+    let mid = Rect::from_center_size(full.center(), Vec2::new(mid_w, full.height()));
+    let left = Rect::from_min_max(full.min, Pos2::new(mid.left() - 16.0, full.bottom()));
+    let right = Rect::from_min_max(Pos2::new(mid.right() + 16.0, full.top()), full.max);
+    // ---- the song: cover, title (♥ right after it) and artist
+    let side = (full.height() - 6.0).clamp(34.0, 64.0);
     let cr = Rect::from_min_size(Pos2::new(left.left(), left.center().y - side / 2.0), Vec2::splat(side));
     cover(app, ui, cr, track.as_ref(), 128);
-    let tx = cr.right() + 10.0;
-    let text_r = Rect::from_min_max(Pos2::new(tx, left.top()), Pos2::new(left.right() - 40.0, left.bottom()));
+    let tx = cr.right() + 12.0;
+    let heart_w = 30.0;
+    let text_max = (left.right() - tx - heart_w).max(20.0);
+    let title = track.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| "NO TRACK LOADED".into());
+    let artist = track.as_ref().map(|t| t.artist.clone()).unwrap_or_default();
+    let cy = cr.center().y;
+    let tg = ui.painter().layout_no_wrap(title, vt(21.0), pal.text);
+    let title_w = tg.size().x.min(text_max);
     {
-        let p = ui.painter_at(text_r);
-        let title = track.as_ref().map(|t| t.title.clone()).unwrap_or_else(|| "NO TRACK LOADED".into());
-        let artist = track.as_ref().map(|t| t.artist.clone()).unwrap_or_default();
-        let cy = text_r.center().y;
-        p.text(Pos2::new(tx, cy - 1.0), Align2::LEFT_BOTTOM, title, vt(21.0), pal.text);
-        p.text(Pos2::new(tx, cy + 1.0), Align2::LEFT_TOP, artist, vt(17.0), pal.dim);
+        let p = ui.painter_at(Rect::from_min_max(Pos2::new(tx, left.top()), Pos2::new(tx + text_max, left.bottom())));
+        p.galley(Pos2::new(tx, cy - 1.0 - tg.size().y), tg, pal.text);
+        p.text(Pos2::new(tx, cy + 2.0), Align2::LEFT_TOP, artist, vt(17.0), pal.dim);
     }
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(Rect::from_min_max(Pos2::new(left.right() - 36.0, left.top()), left.max)).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-        let liked = track.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);
-        if icon(ui, &pal, "♥", liked).on_hover_text("Like").clicked() {
-            if let Some(t) = &track {
-                app.lib.toggle_like(&t.id);
+    if track.is_some() {
+        let hr = Rect::from_min_size(Pos2::new(tx + title_w + 4.0, cy - 1.0 - 26.0), Vec2::new(heart_w, 26.0));
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(hr).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            let liked = track.as_ref().map(|t| app.lib.stat(&t.id).liked).unwrap_or(false);
+            if icon(ui, &pal, "♥", liked).on_hover_text(if liked { "Liked: click to unlike" } else { "Like" }).clicked() {
+                if let Some(t) = &track {
+                    app.lib.toggle_like(&t.id);
+                }
             }
-        }
-    });
-    // ---- controls over the seek bar
-    let k = ((full.height() - 30.0) / 53.0).clamp(0.55, 0.75);
-    let seek_h = 22.0;
+        });
+    }
+    // ---- controls over the seek bar (the times either side of it)
+    let seek_h = if full.height() < 56.0 { 12.0 } else { 18.0 };
+    let k = ((full.height() - seek_h - 6.0) / 53.0).clamp(0.42, 0.72);
     let gap = 4.0;
     let block = 53.0 * k + gap + seek_h;
     let top = mid.center().y - block / 2.0;
@@ -266,32 +271,35 @@ fn bar(app: &mut App, ui: &mut Ui) {
         transport(app, ui, &st, k);
     });
     let sy = top + 53.0 * k + gap;
-    let time_w = 44.0;
+    let time_w = 48.0;
     let pp = ui.painter();
-    pp.text(Pos2::new(mid.left() + time_w - 4.0, sy + seek_h / 2.0), Align2::RIGHT_CENTER, fmt_time(st.position), vt(17.0), pal.dim);
-    pp.text(Pos2::new(mid.right() - time_w + 4.0, sy + seek_h / 2.0), Align2::LEFT_CENTER, fmt_time(st.duration.max(0.0)), vt(17.0), pal.dim);
+    pp.text(Pos2::new(mid.left() + time_w - 6.0, sy + seek_h / 2.0), Align2::RIGHT_CENTER, fmt_time(st.position), vt(17.0), pal.dim);
+    pp.text(Pos2::new(mid.right() - time_w + 6.0, sy + seek_h / 2.0), Align2::LEFT_CENTER, fmt_time(st.duration.max(0.0)), vt(17.0), pal.dim);
     let wr = Rect::from_min_max(Pos2::new(mid.left() + time_w, sy), Pos2::new(mid.right() - time_w, sy + seek_h));
     let resp = ui.interact(wr, ui.id().with("bar-seek"), Sense::click_and_drag());
     waveform(app, ui, wr, &resp, &st);
-    // ---- volume, extras
-    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(right.shrink2(Vec2::new(8.0, 0.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
-        let preview = app.player.current_id().is_some_and(|id| id.starts_with(crate::library::PREVIEW));
-        if preview {
-            super::preview::keep_bar(app, ui, (ui.available_width() * 0.5).clamp(120.0, 200.0), 30.0);
-        } else if ui.available_width() > 300.0 {
-            shazam_button(app, ui);
+    // ---- on the right, packed against the edge: the volume last (like Spotify), then THEATER,
+    // the sleep timer and SHAZAM (KEEP / DISCARD while a preview plays)
+    let vol_w = (right.width() * 0.45).clamp(110.0, 170.0);
+    let vr = Rect::from_min_max(Pos2::new(right.right() - vol_w, right.top()), right.max);
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(vr).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+        volume(app, ui, 4.0);
+    });
+    let rest = Rect::from_min_max(right.min, Pos2::new(vr.left() - 8.0, right.bottom()));
+    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rest).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        if ui.available_width() > 40.0 && icon(ui, &pal, "🗖", false).on_hover_text("THEATER: the song big, with its lyrics (F11)").clicked() {
+            app.open_theater(None);
         }
-        if ui.available_width() > 260.0 {
-            if icon(ui, &pal, "🗖", false).on_hover_text("THEATER: the song big, with its lyrics (F11)").clicked() {
-                app.open_theater(None);
-            }
+        if ui.available_width() > 50.0 {
             sleep_button(app, ui);
         }
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            let room = ui.available_width();
-            ui.add_space((room - 210.0).max(0.0));
-            volume(app, ui, 46.0);
-        });
+        let preview = app.player.current_id().is_some_and(|id| id.starts_with(crate::library::PREVIEW));
+        if preview && ui.available_width() > 130.0 {
+            let kw = ui.available_width().min(200.0);
+            super::preview::keep_bar(app, ui, kw, 28.0);
+        } else if !preview && ui.available_width() > 90.0 {
+            shazam_button(app, ui);
+        }
     });
 }
 

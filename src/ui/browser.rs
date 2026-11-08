@@ -1340,6 +1340,7 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
 
     // ---- rows (virtualised)
     let cur = app.player.current_id();
+    let playing = app.player.status().playing;
     let mut act: Option<RowAct> = None;
     let num_mode = matches!(active_sort, Some((SortKey::TrackNo, _)));
     // drag rows to reorder: only in a playlist shown in its own order
@@ -1407,6 +1408,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
                     let clip = p.with_clip_rect(cr);
                     let (txt, color): (String, Color32) = match c.id {
                         // hovering a row: ▶ here plays it with one click
+                        // (the playing song shows ⏸: click it to pause, like Spotify)
+                        "num" if is_cur && playing => ("⏸".into(), pal.accent),
                         "num" if resp.hovered() => ("▶".into(), pal.accent),
                         "num" => (if is_cur { "▶".into() } else if num_mode && t.track.is_some() { t.track.unwrap().to_string() } else { (i + 1).to_string() }, if is_cur { pal.accent } else { pal.dim }),
                         "like" => ("♥".into(), if st.liked { pal.accent } else { pal.faint }),
@@ -1531,6 +1534,8 @@ fn tracks_view(app: &mut App, ui: &mut Ui) {
             }
         }
         Some(RowAct::Like(id)) => app.lib.toggle_like(&id),
+        // ▶ / ⏸ on the song that's on: pause or carry on (not start it over)
+        Some(RowAct::Play(i)) if app.player.current_id().as_deref() == ids.get(i).map(|s| s.as_str()) => app.player.toggle(),
         Some(RowAct::Play(i)) if mixl.is_some() => super::home::play_mix_at(app, mixl.as_ref().unwrap(), ids.clone(), i),
         Some(RowAct::Play(i)) => {
             app.player.play_pick(ids.clone(), i, None);

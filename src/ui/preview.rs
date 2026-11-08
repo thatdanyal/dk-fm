@@ -203,6 +203,14 @@ fn fetch(t: &ITrack, id: &str, covers: &std::path::Path, stream: bool) -> Result
     let d = dir();
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     let path = d.join(format!("{id}.m4a"));
+    // its cover (so the deck shows it), fetched at the same time as the song, not after it
+    let cover = {
+        let (u, covers, name) = (t.cover.clone(), covers.to_path_buf(), format!("{id}.jpg"));
+        std::thread::spawn(move || {
+            let b = u.and_then(|u| crate::net::get_bytes(&u).ok()).map(|b| crate::discover::small_square(b, 640))?;
+            std::fs::write(covers.join(&name), b).ok().map(|_| name)
+        })
+    };
     // its link was looked up ahead (it was on screen): just the file, in under a second (or,
     // streaming, just its first piece: it plays while the rest comes in)
     let wait = std::time::Duration::from_secs(20);
@@ -217,11 +225,7 @@ fn fetch(t: &ITrack, id: &str, covers: &std::path::Path, stream: bool) -> Result
     if !path.exists() {
         return Err("Couldn't get a preview of that song".into());
     }
-    // its cover, so the deck shows it
-    let cover = t.cover.as_ref().and_then(|u| crate::net::get_bytes(u).ok()).map(|b| crate::discover::small_square(b, 640)).and_then(|b| {
-        let name = format!("{id}.jpg");
-        std::fs::write(covers.join(&name), b).ok().map(|_| name)
-    });
+    let cover = cover.join().ok().flatten();
     Ok(Track {
         id: id.to_string(),
         path: path.display().to_string(),

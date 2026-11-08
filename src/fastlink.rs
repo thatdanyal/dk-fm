@@ -1,7 +1,10 @@
 //! Faster listening before downloading. Getting a song's audio link from YouTube is what makes ▶
-//! slow (yt-dlp: ~9 s for one song, but only ~1 s more for each extra song in the same run), so
-//! songs on screen have their links looked up ahead, in the background, several per run. ▶ then
-//! only fetches the file, in 1 MB pieces at once (under a second), instead of waiting on yt-dlp.
+//! slow (yt-dlp: ~9 s a song, most of it QuickJS solving YouTube's JavaScript puzzle, and every
+//! extra song in a run costs about as much again, so runs are one song each; Node.js solves it
+//! faster but its links were refused, 403), so songs on screen have their links
+//! looked up ahead, in the background. ▶ on a song that isn't looked up yet goes first: it's
+//! looked up right away, not after the songs waiting. ▶ then only fetches the file, in 1 MB
+//! pieces at once (under a second), instead of waiting on yt-dlp.
 //! Links last a few hours; anything that goes wrong falls back to the normal way.
 use crate::sources::ITrack;
 use parking_lot::Mutex;
@@ -10,8 +13,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-/// songs per yt-dlp run, and runs at once
-const BATCH: usize = 6;
+/// songs per yt-dlp run (a run of 6 took 50 s: one at a time, the first is ready in 9 s), and
+/// runs at once
+const BATCH: usize = 1;
 const WORKERS: usize = 2;
 /// songs waiting to be looked up (the newest on screen first; older ones drop off)
 const QUEUE_MAX: usize = 36;
@@ -126,14 +130,31 @@ fn link_for(y: &str, wait: Duration) -> Option<(String, u64)> {
             if let Some(l) = s.links.get(y).filter(|l| fresh(l)) {
                 return Some((l.url.clone(), l.size));
             }
-            let waiting = s.busy.contains(y) || s.queue.iter().any(|q| q == y);
-            if !waiting || t0.elapsed() > wait {
+            if s.failed.contains(y) || t0.elapsed() > wait {
                 return None;
             }
-            // pressed ▶: it goes next
-            if let Some(i) = s.queue.iter().position(|q| q == y) {
-                s.queue.remove(i);
-                s.queue.push_front(y.to_string());
+            // pressed ▶ on a song not being looked up yet: look it up now, here (not after the
+            // songs waiting in line)
+            if !s.busy.contains(y) {
+                if let Some(i) = s.queue.iter().position(|q| q == y) {
+                    s.queue.remove(i);
+                }
+                s.busy.insert(y.to_string());
+                drop(s);
+                let found = resolve(&[y.to_string()]);
+                let mut s = S.lock();
+                s.busy.remove(y);
+                match found.into_iter().next() {
+                    Some((_, l)) => {
+                        let r = (l.url.clone(), l.size);
+                        s.links.insert(y.to_string(), l);
+                        return Some(r);
+                    }
+                    None => {
+                        s.failed.insert(y.to_string());
+                        return None;
+                    }
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(100));

@@ -21,6 +21,8 @@ pub struct LyricsState {
     offset: f32,
     song: String,
     last_pos: f64,
+    /// when you last scrolled the lyrics yourself (they glide back BACK_AFTER later)
+    manual: Option<std::time::Instant>,
     /// translations: (song, language) -> None while it's being made
     tr: Arc<Mutex<HashMap<(String, String), Option<Result<crate::lang::Translation, String>>>>>,
     /// sing-along word times per song
@@ -40,6 +42,8 @@ enum Words {
 
 /// How long before a line starts the text glides to it, so it's centred right as it's sung.
 const LEAD: f64 = 0.45;
+/// How long lyrics you scrolled stay put before they glide back to the line being sung.
+const BACK_AFTER: std::time::Duration = std::time::Duration::from_millis(2500);
 
 fn ease(x: f32) -> f32 {
     let x = x.clamp(0.0, 1.0);
@@ -333,7 +337,22 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
             let view_h = ui.available_height();
             let goal = |st: &LyricsState, i: usize| st.line_y.get(i).map(|y| (y - view_h / 2.0).max(0.0));
             let mut force: Option<f32> = None;
-            if target != st.target || jumped {
+            // you scrolled the lyrics: they stay where you put them for a moment, then glide back
+            // to the line being sung (a seek or a new song brings them back at once)
+            if jumped {
+                st.manual = None;
+            }
+            let free = st.manual.is_some_and(|t| t.elapsed() < BACK_AFTER);
+            if st.manual.is_some() && !free {
+                st.manual = None;
+                if let Some(to) = target.and_then(|i| goal(st, i)) {
+                    st.glide = Some((st.offset, to, std::time::Instant::now()));
+                }
+                st.target = target;
+            }
+            if free {
+                st.target = target;
+            } else if target != st.target || jumped {
                 let to = target.and_then(|i| goal(st, i));
                 match (to, jumped || st.target.is_none()) {
                     (Some(to), true) => force = Some(to),
@@ -342,7 +361,7 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                 }
                 st.target = target;
             }
-            let dur = (LEAD as f32).min(until.max(0.15) as f32);
+            let dur = (LEAD as f32).min(until.max(0.3) as f32);
             if let Some((from, to, t0)) = st.glide {
                 let k = ease(t0.elapsed().as_secs_f32() / dur.max(0.15));
                 force = Some(from + (to - from) * k);
@@ -353,6 +372,18 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
                     // full rate, 60-144, only cost CPU)
                     ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
                 }
+            }
+            // locked on: the line stays centred every frame, also after the panel or the text
+            // changes size, during a long instrumental and while paused
+            if !free && force.is_none() {
+                if let Some(to) = st.target.and_then(|i| goal(st, i)) {
+                    if (st.offset - to).abs() > 0.5 {
+                        force = Some(to);
+                    }
+                }
+            }
+            if let Some(t) = st.manual.filter(|_| free) {
+                ui.ctx().request_repaint_after(BACK_AFTER.saturating_sub(t.elapsed()) + std::time::Duration::from_millis(20));
             }
             // wake up in time for the next glide, and to light the next line the moment it starts
             // (none after the last line: `until` is f64::MAX there, far too long for a timer; none
@@ -482,6 +513,15 @@ pub fn show_sized(app: &mut App, ui: &mut Ui, scale: f32, sing: bool) {
             }
             if sing {
                 timing_bar(app, ui, out.inner_rect, &t.id, offset, exact.is_some());
+            }
+            // did you scroll them (wheel, touchpad or the scroll bar)?
+            let set = force.unwrap_or(app.lyrics.offset);
+            let over = ui.rect_contains_pointer(out.inner_rect.expand2(egui::vec2(16.0, 0.0)));
+            let hand = over && ui.input(|i| i.smooth_scroll_delta.y != 0.0 || i.raw_scroll_delta.y != 0.0 || i.pointer.primary_down());
+            if (out.state.offset.y - set).abs() > 1.0 && (hand || free) {
+                app.lyrics.manual = Some(std::time::Instant::now());
+                app.lyrics.glide = None;
+                ui.ctx().request_repaint();
             }
             let st = &mut app.lyrics;
             st.offset = out.state.offset.y;

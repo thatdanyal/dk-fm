@@ -663,8 +663,20 @@ fn song_row(app: &mut App, ui: &mut Ui, w: f32, ids: &[String], i: usize, right:
         fill(p, r, pal.panel_hi);
     }
     let cur = app.player.current_id().as_deref() == Some(t.id.as_str());
+    let playing = cur && app.player.status().playing;
     let cy = r.center().y;
-    p.text(Pos2::new(r.left() + 22.0, cy), Align2::RIGHT_CENTER, if cur { "▶".to_string() } else { (i + 1).to_string() }, vt(19.0), pal.accent);
+    // the number turns into ▶ (play) on hover, and ⏸ while this song plays: click it
+    let num_r = Rect::from_min_max(r.min, Pos2::new(r.left() + 28.0, r.bottom()));
+    let on_num = resp.hovered() && ui.input(|i| i.pointer.hover_pos()).is_some_and(|pp| num_r.contains(pp));
+    let num = if playing { "⏸".to_string() } else if cur || resp.hovered() { "▶".to_string() } else { (i + 1).to_string() };
+    p.text(Pos2::new(r.left() + 22.0, cy), Align2::RIGHT_CENTER, num, vt(19.0), if on_num { pal.text } else { pal.accent });
+    if on_num {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let num_click = resp.clicked() && resp.interact_pointer_pos().is_some_and(|pp| num_r.contains(pp));
+    if num_click && cur {
+        app.player.toggle();
+    }
     let ic = Rect::from_center_size(Pos2::new(r.left() + 44.0, cy), Vec2::splat(28.0));
     fill(p, ic, pal.bg);
     if let Some(tx) = tx {
@@ -685,7 +697,7 @@ fn song_row(app: &mut App, ui: &mut Ui, w: f32, ids: &[String], i: usize, right:
         ui.set_min_width(210.0);
         super::browser::track_menu(app, ui, ids, i, None);
     });
-    resp.double_clicked()
+    resp.double_clicked() || num_click && !cur
 }
 
 // ------------------------------------------------------------------------------- artist pages

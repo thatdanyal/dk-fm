@@ -1802,6 +1802,9 @@ impl eframe::App for App {
         self.player.shutdown();
         self.lib.flush();
         self.settings.lock().save();
+        // previews and a mix's new songs are temporary: gone when DK.FM closes (and anything left,
+        // say after a crash, when it starts)
+        preview::clear_old(self.lib.cover_path(""));
     }
 }
 

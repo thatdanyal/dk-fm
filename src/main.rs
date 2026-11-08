@@ -7,6 +7,7 @@ mod discord;
 mod discover;
 mod downloader;
 mod fastlink;
+mod growing;
 #[cfg(windows)]
 mod install;
 mod karaoke;

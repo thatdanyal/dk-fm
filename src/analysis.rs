@@ -82,8 +82,8 @@ fn worker(rx: Receiver<(String, PathBuf)>, cache: Arc<Mutex<HashMap<String, Arc<
 
 /// Decode the whole file once: 50 ms RMS blocks -> waveform buckets + gated loudness.
 fn analyze(path: &PathBuf) -> Option<(Vec<u8>, f32)> {
-    let file = std::fs::File::open(path).ok()?;
-    let mss = MediaSourceStream::new(Box::new(file), Default::default());
+    // (a song still downloading is read as it arrives)
+    let mss = MediaSourceStream::new(crate::growing::open(path).ok()?, Default::default());
     let mut hint = Hint::new();
     if let Some(e) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(e);

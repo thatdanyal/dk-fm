@@ -1,6 +1,7 @@
 //! Listen before you download: ▶ on an online song (Songs like this, search results, Discover)
-//! fetches a quick temporary copy (a few seconds, only when asked: searching never waits on it)
-//! and plays it right away (the whole song), keeping your queue. While it plays the deck offers
+//! fetches a quick temporary copy (only when asked: searching never waits on it) and plays it
+//! right away (the whole song), keeping your queue. A song whose link was looked up ahead (it was
+//! on screen) starts as soon as its first piece is in and plays while the rest arrives. While it plays the deck offers
 //! KEEP (download it for real) or DISCARD (skip it). Previews never join your library, playlists
 //! or Stats; once you move on to another song a preview's file is deleted (kept or not: KEEP
 //! downloads its own copy), and anything left over is cleared when DK.FM starts.
@@ -69,6 +70,10 @@ fn tidy(app: &mut App) {
         }
         if let Some(t) = app.lib.previews.write().remove(&id).filter(|t| !t.path.is_empty()) {
             let mut files = vec![PathBuf::from(&t.path)];
+            // (still coming in: stop the download)
+            if let Some(p) = crate::growing::get(&files[0]) {
+                p.fail();
+            }
             files.extend(t.cover.as_ref().map(|c| app.lib.cover_path(c)));
             // the player may still have the file open for a moment
             std::thread::spawn(move || {
@@ -103,7 +108,7 @@ pub fn toggle(app: &mut App, t: &ITrack) {
     match app.previews.state.get(&t.source_key) {
         Some(None) => {} // on its way
         Some(Some(Ok(id))) if app.lib.track(id).is_some() => app.player.play_now(id.clone()),
-        _ => start(app, t),
+        _ => start(app, t, true),
     }
 }
 
@@ -149,13 +154,15 @@ pub fn queue_online(app: &mut App, songs: &[ITrack]) -> Vec<String> {
     ids
 }
 
-fn start(app: &mut App, t: &ITrack) {
+/// `stream`: start playing as soon as the start of the song is in (it plays as the rest arrives).
+/// A mix's next song, fetched while another plays, comes whole, so it's ready to seek around in.
+fn start(app: &mut App, t: &ITrack, stream: bool) {
     app.previews.state.insert(t.source_key.clone(), None);
     app.previews.items.insert(id_of(t), t.clone());
     let (t, done, ctx, id) = (t.clone(), app.previews.done.clone(), app.covers.ctx.clone(), id_of(t));
     let covers = app.lib.cover_path("");
     std::thread::spawn(move || {
-        let r = fetch(&t, &id, &covers);
+        let r = fetch(&t, &id, &covers, stream);
         done.lock().push((t.source_key.clone(), r));
         if let Some(c) = ctx {
             c.request_repaint();
@@ -163,8 +170,7 @@ fn start(app: &mut App, t: &ITrack) {
     });
 }
 
-fn fetch(t: &ITrack, id: &str, covers: &std::path::Path) -> Result<Track, String> {
-    crate::ytdlp::ensure()?;
+fn fetch(t: &ITrack, id: &str, covers: &std::path::Path, stream: bool) -> Result<Track, String> {
     let artist = t.artists.join(", ");
     let url = t
         .direct_url
@@ -174,8 +180,12 @@ fn fetch(t: &ITrack, id: &str, covers: &std::path::Path) -> Result<Track, String
     let d = dir();
     std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
     let path = d.join(format!("{id}.m4a"));
-    // its link was looked up ahead (it was on screen): just the file, in under a second
-    if !matches!(crate::fastlink::fetch(t, &path, std::time::Duration::from_secs(20)), Some(Ok(()))) {
+    // its link was looked up ahead (it was on screen): just the file, in under a second (or,
+    // streaming, just its first piece: it plays while the rest comes in)
+    let wait = std::time::Duration::from_secs(20);
+    let fast = if stream { crate::fastlink::stream(t, &path, wait) } else { crate::fastlink::fetch(t, &path, wait) };
+    if !matches!(fast, Some(Ok(()))) {
+        crate::ytdlp::ensure()?;
         // the small AAC stream: starts fast, never converted
         let out = d.join(format!("{id}.%(ext)s"));
         let args: Vec<String> = ["--no-playlist", "-f", "bestaudio[ext=m4a]/bestaudio", "-x", "--audio-format", "m4a", "-o"].iter().map(|s| s.to_string()).chain([out.display().to_string(), url]).collect();
@@ -274,8 +284,10 @@ pub fn poll(app: &mut App) {
     for id in wants {
         let Some(t) = app.previews.items.get(&id).cloned() else { continue };
         if !matches!(app.previews.state.get(&t.source_key), Some(None)) && app.lib.track(&id).is_some_and(|x| x.path.is_empty()) {
+            // (the song it's needed for now: stream it)
+            let now = app.player.current_id().as_deref() == Some(id.as_str());
             app.previews.auto.insert(id);
-            start(app, &t);
+            start(app, &t, now);
         }
     }
     let done: Vec<_> = app.previews.done.lock().drain(..).collect();

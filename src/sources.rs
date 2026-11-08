@@ -813,7 +813,68 @@ fn parse_len(d: &str) -> Option<f64> {
 // ------------------------------------------------------------------------------- online catalog (FIND MUSIC)
 
 /// What FIND MUSIC searches: (id, tab label).
-pub const CATEGORIES: [(&str, &str); 11] = [("all", "ALL"), ("songs", "SONGS"), ("lyrics", "LYRICS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("youtube", "YOUTUBE"), ("soundcloud", "SOUNDCLOUD"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
+/// The search tabs. YouTube and SoundCloud uploads (covers, remixes, small artists) aren't tabs:
+/// ALL mixes them in (first, when the catalogue has nothing that's what you typed), and their
+/// SEE ALL opens the full list ("youtube" / "soundcloud" below).
+pub const CATEGORIES: [(&str, &str); 9] = [("all", "ALL"), ("songs", "SONGS"), ("lyrics", "LYRICS"), ("artists", "ARTISTS"), ("albums", "ALBUMS"), ("playlists", "PLAYLISTS"), ("profiles", "PROFILES"), ("podcasts", "PODCASTS & SHOWS"), ("audiobooks", "AUDIOBOOKS")];
+
+/// Words for comparing a search with a title: lower case, letters and digits, "feat." parts and
+/// anything in brackets left out.
+fn match_words(s: &str) -> Vec<String> {
+    static BR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\(\[][^\)\]]*[\)\]]|\b(feat|ft|featuring)\b.*").unwrap());
+    let s = BR.replace_all(&s.to_lowercase(), " ").into_owned();
+    s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect()
+}
+
+/// Is one of these songs what was typed: its whole title, plus maybe (some of) its artist?
+/// ("hotline bling", "drake hotline bling", "hotline bling drake" all match Drake's Hotline Bling.)
+pub fn exact_match(q: &str, songs: &[ITrack]) -> bool {
+    let qw = match_words(q);
+    if qw.is_empty() {
+        return false;
+    }
+    songs.iter().any(|t| {
+        let tw = match_words(&t.title);
+        if tw.is_empty() || !tw.iter().all(|w| qw.contains(w)) {
+            return false;
+        }
+        let extra: Vec<String> = match_words(&format!("{} {}", t.artists.join(" "), if t.raw_title.is_empty() { &t.title } else { &t.raw_title }));
+        qw.iter().all(|w| tw.contains(w) || extra.contains(w))
+    })
+}
+
+/// YouTube uploads for ALL, quickly: YouTube Music's own video search (one web call), or
+/// yt-dlp's YouTube search if that finds nothing.
+pub fn youtube_videos(q: &str, n: usize) -> Result<Vec<ITrack>, String> {
+    let fast = ytm("search", serde_json::json!({ "query": q, "params": "EgWKAQIQAWoKEAoQAxAEEAkQBQ==" })).ok().map(|v| {
+        let mut items = Vec::new();
+        find_key(&v, "musicResponsiveListItemRenderer", &mut items);
+        items
+            .into_iter()
+            .filter_map(song_item)
+            .map(|mut t| {
+                // (a video's picture is wide: YouTube's own thumbnail of it)
+                t.cover = t.youtube_id.as_deref().map(video_thumb);
+                t.direct_url = t.youtube_id.as_deref().map(|y| format!("https://www.youtube.com/watch?v={y}"));
+                t
+            })
+            .take(n)
+            .collect::<Vec<_>>()
+    });
+    match fast {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => search(q, "youtube", n).map(|v| {
+            v.into_iter()
+                .map(|mut t| {
+                    if t.cover.is_none() {
+                        t.cover = t.youtube_id.as_deref().map(video_thumb);
+                    }
+                    t
+                })
+                .collect()
+        }),
+    }
+}
 
 /// A YouTube video's picture, for songs that only have a video (no album cover).
 pub fn video_thumb(id: &str) -> String {
@@ -968,6 +1029,9 @@ pub fn catalog(q: &str, cat: &str, more: Option<&str>) -> Result<HitPage, String
             }
             Ok(HitPage { hits, more: None })
         }
+        // ALL's mixed-in uploads: a few, fast
+        "yt-few" => Ok(HitPage { hits: youtube_videos(q, 6)?.into_iter().map(Hit::of_track).collect(), more: None }),
+        "sc-few" => Ok(HitPage { hits: search(q, "soundcloud", 4)?.into_iter().map(Hit::of_track).collect(), more: None }),
         "youtube" | "soundcloud" => {
             // everything uploaded there, not just the official catalogue: covers, remixes,
             // instrumentals, small artists (`more` = how many so far)
@@ -1299,6 +1363,19 @@ pub fn rank(cands: Vec<Cand>, t: &ITrack) -> Vec<Cand> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn knows_an_exact_match() {
+        let song = |t: &str, a: &str| super::ITrack { title: t.into(), artists: vec![a.into()], ..Default::default() };
+        let found = vec![song("Hotline Bling", "Drake"), song("Hello (Remastered 2015)", "Adele")];
+        for q in ["hotline bling", "Drake - Hotline Bling", "hotline bling drake", "HELLO", "adele hello"] {
+            assert!(super::exact_match(q, &found), "{q}");
+        }
+        for q in ["hotline bling cover", "hello adele slowed", "bling", "drake"] {
+            assert!(!super::exact_match(q, &found), "{q}");
+        }
+        assert!(super::exact_match("one dance", &[song("One Dance (feat. Wizkid & Kyla)", "Drake")]));
+    }
+
     #[test]
     fn links_and_profiles() {
         assert!(super::is_link("https://youtu.be/abcdefghijk"));

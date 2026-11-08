@@ -117,67 +117,135 @@ fn parse(out: &str) -> HashMap<String, Link> {
     m
 }
 
-/// Fetch the song to `dest` (an .m4a) using its looked-up link, waiting up to `wait` for a look-up
-/// already under way. None = no link for it: use the normal way.
-pub fn fetch(t: &ITrack, dest: &Path, wait: Duration) -> Option<Result<(), String>> {
-    let y = t.youtube_id.clone()?;
+/// The link of a song looked up ahead, waiting up to `wait` for a look-up already under way.
+fn link_for(y: &str, wait: Duration) -> Option<(String, u64)> {
     let t0 = Instant::now();
     loop {
         {
             let mut s = S.lock();
-            if let Some(l) = s.links.get(&y).filter(|l| fresh(l)) {
-                let (url, size) = (l.url.clone(), l.size);
-                drop(s);
-                let r = download(&url, size, dest);
-                if r.is_err() {
-                    S.lock().links.remove(&y);
-                }
-                return Some(r);
+            if let Some(l) = s.links.get(y).filter(|l| fresh(l)) {
+                return Some((l.url.clone(), l.size));
             }
-            let waiting = s.busy.contains(&y) || s.queue.contains(&y);
+            let waiting = s.busy.contains(y) || s.queue.iter().any(|q| q == y);
             if !waiting || t0.elapsed() > wait {
                 return None;
             }
             // pressed ▶: it goes next
-            if let Some(i) = s.queue.iter().position(|q| *q == y) {
+            if let Some(i) = s.queue.iter().position(|q| q == y) {
                 s.queue.remove(i);
-                s.queue.push_front(y.clone());
+                s.queue.push_front(y.to_string());
             }
         }
         std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-/// The file in 1 MB pieces, several at once (YouTube slows down one long download).
-fn download(url: &str, size: u64, dest: &Path) -> Result<(), String> {
+/// Fetch the song to `dest` (an .m4a) using its looked-up link, waiting up to `wait` for a look-up
+/// already under way. None = no link for it: use the normal way.
+pub fn fetch(t: &ITrack, dest: &Path, wait: Duration) -> Option<Result<(), String>> {
+    let y = t.youtube_id.clone()?;
+    let (url, size) = link_for(&y, wait)?;
+    let r = download(&url, size, dest, None);
+    if r.is_err() {
+        S.lock().links.remove(&y);
+    }
+    Some(r)
+}
+
+/// Like `fetch`, but returns as soon as the start of the song is on disk: the rest keeps coming
+/// in the background and the player reads it as it arrives (see growing.rs).
+pub fn stream(t: &ITrack, dest: &Path, wait: Duration) -> Option<Result<(), String>> {
+    let y = t.youtube_id.clone()?;
+    let (url, size) = link_for(&y, wait)?;
+    let p = crate::growing::start(dest, size);
+    let (tx, rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
+    let (dest2, p2) = (dest.to_path_buf(), p.clone());
+    std::thread::Builder::new()
+        .name("stream".into())
+        .spawn(move || {
+            let r = download(&url, size, &dest2, Some(&p2));
+            if r.is_err() {
+                p2.fail();
+                S.lock().links.remove(&y);
+            }
+            crate::growing::finish(&dest2);
+            let _ = tx.try_send(r);
+        })
+        .ok()?;
+    // enough to start: the first piece (the song's header and its first minute or so)
+    let need = PIECE.min(size);
+    loop {
+        if p.avail() >= need {
+            return Some(Ok(()));
+        }
+        if let Ok(r) = rx.recv_timeout(Duration::from_millis(15)) {
+            if r.is_err() {
+                let _ = std::fs::remove_file(dest);
+            }
+            return Some(r);
+        }
+    }
+}
+
+/// The file in 1 MB pieces, several at once (YouTube slows down one long download), each
+/// written where it goes as it arrives. With `progress` it's written straight to `dest` and
+/// `progress` says how much of its start is there; otherwise it's renamed into place when done.
+fn download(url: &str, size: u64, dest: &Path, progress: Option<&crate::growing::Progress>) -> Result<(), String> {
+    use std::io::{Seek, SeekFrom, Write};
     let n = size.div_ceil(PIECE);
-    let pieces: Vec<Mutex<Option<Result<Vec<u8>, String>>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let target = if progress.is_some() { dest.to_path_buf() } else { dest.with_extension("part") };
+    let file = std::fs::File::create(&target).map_err(|e| e.to_string())?;
+    file.set_len(size).map_err(|e| e.to_string())?;
+    // the file, which pieces are in, and the first error
+    let out: Mutex<(std::fs::File, Vec<bool>, Option<String>)> = Mutex::new((file, vec![false; n as usize], None));
     let next = std::sync::atomic::AtomicU64::new(0);
     std::thread::scope(|sc| {
         for _ in 0..PIECES_AT_ONCE.min(n as usize) {
             sc.spawn(|| loop {
+                // (in order, so the start comes first)
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if i >= n {
                     return;
                 }
+                // (a preview you've moved on from: stop)
+                if progress.is_some_and(|p| p.failed()) {
+                    out.lock().2.get_or_insert("stopped".into());
+                    return;
+                }
                 let (a, b) = (i * PIECE, ((i + 1) * PIECE).min(size) - 1);
                 let r = crate::net::get_bytes(&format!("{url}&range={a}-{b}")).and_then(|v| if v.len() as u64 == b - a + 1 { Ok(v) } else { Err("cut short".into()) });
-                let bad = r.is_err();
-                *pieces[i as usize].lock() = Some(r);
-                if bad {
-                    next.store(n, std::sync::atomic::Ordering::Relaxed);
-                    return;
+                let mut o = out.lock();
+                let r = r.and_then(|v| {
+                    o.0.seek(SeekFrom::Start(a)).and_then(|_| o.0.write_all(&v)).map_err(|e| e.to_string())
+                });
+                match r {
+                    Ok(()) => {
+                        o.1[i as usize] = true;
+                        if let Some(p) = progress {
+                            let _ = o.0.flush();
+                            let have = o.1.iter().take_while(|d| **d).count() as u64;
+                            p.set_avail(have * PIECE);
+                        }
+                    }
+                    Err(e) => {
+                        o.2.get_or_insert(e);
+                        next.store(n, std::sync::atomic::Ordering::Relaxed);
+                        return;
+                    }
                 }
             });
         }
     });
-    let tmp = dest.with_extension("part");
-    let mut all = Vec::with_capacity(size as usize);
-    for p in pieces {
-        all.extend(p.into_inner().unwrap_or_else(|| Err("missing piece".into()))?);
+    let (file, done, err) = out.into_inner();
+    drop(file);
+    if let Some(e) = err.or_else(|| done.iter().any(|d| !d).then(|| "missing piece".to_string())) {
+        let _ = std::fs::remove_file(&target);
+        return Err(e);
     }
-    std::fs::write(&tmp, all).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, dest).map_err(|e| e.to_string())
+    if progress.is_none() {
+        std::fs::rename(&target, dest).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

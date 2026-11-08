@@ -144,8 +144,8 @@ struct Deck {
 
 impl Deck {
     fn open(id: &str, path: &PathBuf, dst_rate: u32, gain_db: f32) -> Result<Self, String> {
-        let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-        let mss = MediaSourceStream::new(Box::new(file), Default::default());
+        // (a preview still downloading plays as it arrives)
+        let mss = MediaSourceStream::new(crate::growing::open(path).map_err(|e| e.to_string())?, Default::default());
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);

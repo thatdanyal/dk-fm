@@ -1,4 +1,5 @@
-//! FIND MUSIC: search YouTube Music like Spotify's search — ALL, SONGS, ARTISTS, ALBUMS,
+//! FIND MUSIC: search YouTube Music like Spotify's search — ALL (with YouTube and SoundCloud
+//! uploads mixed in, first when the catalogue has nothing that's what you typed), SONGS, ARTISTS, ALBUMS,
 //! PLAYLISTS, PROFILES, PODCASTS & SHOWS, AUDIOBOOKS — with LOAD MORE, and pages for an artist
 //! (songs, albums, singles), an album / playlist / podcast (its songs) and a profile (its
 //! playlists). Songs are labelled CLEAN / EXPLICIT / LIVE / INSTRUMENTAL... so you pick the
@@ -224,6 +225,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     app.browser.web.stack.clear();
                 }
             }
+            // (SEE ALL of ALL's YouTube / SoundCloud uploads: not a tab of its own)
+            if let Some(name) = match cat.as_str() { "youtube" => Some("YOUTUBE UPLOADS"), "soundcloud" => Some("SOUNDCLOUD UPLOADS"), _ => None } {
+                tb_button(ui, &pal, name, true);
+            }
         });
         ui.add_space(6.0);
         if let Some(open) = app.browser.web.stack.last().cloned() {
@@ -252,10 +257,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         // search after a short pause in typing, or right away on Enter
         let key = format!("s|{cat}|{q}");
         let idle = app.browser.web.edited.map(|t| t.elapsed() >= Duration::from_millis(700)).unwrap_or(true);
-        if !app.browser.web.res.contains_key(&key) {
+        // (ALL also asks YouTube and SoundCloud at the same time, so they're there with no wait)
+        let extra: &[&str] = if cat == "all" { &["yt-few", "sc-few"] } else { &[] };
+        for (k, c) in std::iter::once((key.clone(), cat.clone())).chain(extra.iter().map(|c| (format!("s|{c}|{q}"), c.to_string()))) {
+            if app.browser.web.res.contains_key(&k) {
+                continue;
+            }
             if idle {
-                let (q2, c2) = (q.clone(), cat.clone());
-                fetch(app, ui.ctx(), key.clone(), false, move |more| sources::catalog(&q2, &c2, more.as_deref()));
+                let q2 = q.clone();
+                fetch(app, ui.ctx(), k, false, move |more| sources::catalog(&q2, &c, more.as_deref()));
             } else {
                 ui.ctx().request_repaint_after(Duration::from_millis(200));
             }
@@ -268,7 +278,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.label(egui::RichText::new("Songs with that line, from YouTube Music: ▶ to listen, + GET to keep").color(app.pal.dim));
             }
             if cat == "all" {
-                all_results(app, ui, &res, &key);
+                all_results(app, ui, &res, &key, &q);
             } else {
                 results(app, ui, &res, &key);
                 let (q2, c2) = (q.clone(), cat.clone());
@@ -438,47 +448,88 @@ fn intro(app: &mut App, ui: &mut Ui) {
     ui.add_space(6.0);
     ui.label(egui::RichText::new(format!("Sound: every download takes the best audio YouTube has for that song (sound quality: {quality}, change it in Settings > Downloads). Results from YouTube Music's SONGS are the studio versions, the best source; videos can be quieter or have extra sounds.")).color(pal.dim));
     ui.add_space(6.0);
-    ui.label(egui::RichText::new("Can't find a cover, remix, instrumental or a small artist? YOUTUBE and SOUNDCLOUD above search everything uploaded there. You can also paste a link to a song or playlist into the search bar.").color(pal.dim));
+    ui.label(egui::RichText::new("Can't find a cover, remix, instrumental or a small artist? ALL also looks on YouTube and SoundCloud, and puts what they have first when the music catalogue has nothing that's what you typed. You can also paste a link to a song or playlist into the search bar.").color(pal.dim));
     ui.add_space(6.0);
     ui.label(egui::RichText::new("Hear a song on your PC or around you? Press SHAZAM on the deck.").color(pal.dim));
 }
 
 /// ALL: a few artists, songs (the versions to pick from), albums and playlists.
-fn all_results(app: &mut App, ui: &mut Ui, res: &Res, key: &str) {
+fn all_results(app: &mut App, ui: &mut Ui, res: &Res, key: &str, q: &str) {
+    let yt = app.browser.web.res.get(&format!("s|yt-few|{q}")).cloned().unwrap_or(Res { busy: true, ..Default::default() });
+    let sc = app.browser.web.res.get(&format!("s|sc-few|{q}")).cloned().unwrap_or(Res { busy: true, ..Default::default() });
+    let uploads_found = !yt.hits.is_empty() || !sc.hits.is_empty();
+    // nothing in the catalogue: what YouTube and SoundCloud have is the answer
+    if res.hits.is_empty() && !res.busy {
+        if !uploads_found && !yt.busy && !sc.busy {
+            status(app, ui, res);
+        } else {
+            uploads(app, ui, &yt, &sc, key, true);
+        }
+        return;
+    }
     if status(app, ui, res) {
         return;
     }
     let n = app.settings.lock().web_results.clamp(1, 20) as usize;
+    // the catalogue doesn't have what was typed (a cover, a remix, a small artist): YouTube and
+    // SoundCloud uploads come right after its songs instead of at the bottom
+    let songs: Vec<ITrack> = res.hits.iter().filter(|h| h.kind == "song").filter_map(|h| h.track.clone()).collect();
+    let exact = sources::exact_match(q, &songs);
     let sections = [("artist", "ARTISTS", "artists"), ("song", "SONGS", "songs"), ("album", "ALBUMS", "albums"), ("playlist", "PLAYLISTS", "playlists")];
     for (kind, title, cat) in sections {
         let hits: Vec<Hit> = res.hits.iter().filter(|h| h.kind == kind).cloned().collect();
-        if hits.is_empty() {
-            continue;
-        }
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(title).font(px(8.0)).color(app.pal.accent2));
-            if tb_button(ui, &app.pal, "SEE ALL ›", false).clicked() {
-                app.browser.web.cat = cat.into();
+        if !hits.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(title).font(px(8.0)).color(app.pal.accent2));
+                if tb_button(ui, &app.pal, "SEE ALL ›", false).clicked() {
+                    app.browser.web.cat = cat.into();
+                }
+            });
+            if kind == "song" {
+                ui.label(egui::RichText::new("Pick the version you want: clean, explicit, live, instrumental… (SEE ALL for more)").color(app.pal.dim));
+                song_rows(app, ui, &hits.into_iter().take(n).collect::<Vec<_>>(), &format!("{key}|songs"));
+            } else {
+                hit_rows(app, ui, &hits);
             }
-        });
-        if kind == "song" {
-            ui.label(egui::RichText::new("Pick the version you want: clean, explicit, live, instrumental… (SEE ALL for more)").color(app.pal.dim));
-            song_rows(app, ui, &hits.into_iter().take(n).collect::<Vec<_>>(), &format!("{key}|songs"));
-        } else {
-            hit_rows(app, ui, &hits);
+            ui.add_space(10.0);
         }
-        ui.add_space(10.0);
+        if kind == "song" && !exact {
+            uploads(app, ui, &yt, &sc, key, true);
+        }
     }
-    // covers, remixes and small artists aren't in YouTube Music's catalogue
+    if exact {
+        uploads(app, ui, &yt, &sc, key, false);
+    }
+}
+
+/// ALL's YouTube and SoundCloud uploads (covers, remixes, instrumentals, small artists): a few
+/// songs from each, with SEE ALL for the full list. `first`: the catalogue had nothing that's
+/// what was typed, so these are likely what you're after (all of them, not just a few).
+fn uploads(app: &mut App, ui: &mut Ui, yt: &Res, sc: &Res, key: &str, first: bool) {
+    let pal = app.pal;
+    let few = if first { 6 } else { 3 };
+    let mut hits: Vec<Hit> = yt.hits.iter().take(few).cloned().collect();
+    hits.extend(sc.hits.iter().take(if first { 4 } else { 2 }).cloned());
     ui.horizontal_wrapped(|ui| {
-        ui.label(egui::RichText::new("Not here? Covers, remixes, instrumentals and small artists:").color(app.pal.dim));
-        if tb_button(ui, &app.pal, "SEARCH YOUTUBE ›", false).clicked() {
+        ui.label(egui::RichText::new(if first { "FROM YOUTUBE & SOUNDCLOUD" } else { "ALSO ON YOUTUBE & SOUNDCLOUD" }).font(px(8.0)).color(pal.accent2));
+        if !yt.hits.is_empty() && tb_button(ui, &pal, "SEE ALL YOUTUBE ›", false).clicked() {
             app.browser.web.cat = "youtube".into();
         }
-        if tb_button(ui, &app.pal, "SEARCH SOUNDCLOUD ›", false).clicked() {
+        if !sc.hits.is_empty() && tb_button(ui, &pal, "SEE ALL SOUNDCLOUD ›", false).clicked() {
             app.browser.web.cat = "soundcloud".into();
         }
     });
+    ui.label(egui::RichText::new(if first { "Not in the music catalogue, but uploaded here: covers, remixes, instrumentals and small artists" } else { "Covers, remixes, instrumentals and other uploads" }).color(pal.dim));
+    if hits.is_empty() {
+        let busy = yt.busy || sc.busy;
+        ui.label(egui::RichText::new(if busy { "SEARCHING…" } else { "Nothing there either." }).font(px(7.0)).color(if busy { pal.accent } else { pal.dim }));
+    } else {
+        song_rows(app, ui, &hits, &format!("{key}|uploads{few}"));
+        if yt.busy || sc.busy {
+            ui.label(egui::RichText::new("STILL LOOKING…").font(px(6.0)).color(pal.accent));
+        }
+    }
+    ui.add_space(10.0);
 }
 
 /// One category's results.
